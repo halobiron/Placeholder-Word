@@ -1,44 +1,10 @@
 {
+  "enabledPlugins": {
+    "everything-claude-code@everything-claude-code": true
+  },
   "permissions": {
     "allow": [
-      "Bash(python3 -c \"import main\")",
-      "Bash(chmod +x:*)",
-      "Bash(python3 -m pip install --upgrade pip)",
-      "Bash(python3:*)",
-      "Bash(/Users/aiot/workspace/placeholder/backend/setup.sh)",
-      "Bash(ls -la *.py)",
-      "Bash(./venv/bin/python3:*)",
-      "Bash(python test_conversion.py)",
-      "Bash(python:*)",
-      "Bash(curl -s http://localhost:8000/health)",
-      "Bash(ls -la test*)",
-      "Bash(ls -la *.py *.docx)",
-      "Bash(curl:*)",
-      "Bash(npm install:*)",
-      "Bash(lsof -ti:8000)",
-      "Bash(xargs kill:*)",
-      "Bash(pip3 install:*)",
-      "Bash(pkill -f \"uvicorn main:app\")",
-      "Bash(nohup uvicorn:*)",
-      "Bash(pip install:*)",
-      "Bash(cp -r node_modules/tinymce/icons public/tinymce/)",
-      "Bash(cp -r node_modules/tinymce/themes public/tinymce/)",
-      "Bash(cp -r node_modules/tinymce/skins public/tinymce/)",
-      "Bash(cp -r node_modules/tinymce/plugins public/tinymce/)",
-      "Bash(cp -r node_modules/tinymce/models public/tinymce/)",
-      "Bash([ -d node_modules/tinymce/langs ])",
-      "Bash(cp -r node_modules/tinymce/langs public/tinymce/)",
-      "Bash(ls -d public/tinymce/plugins/*/)",
-      "Bash(pkill -9 -f \"uvicorn main:app\")",
-      "Bash(npm uninstall:*)",
-      "Bash(PYTHONPATH=/Users/aiot/workspace/placeholder/backend python3:*)",
-      "Bash(pip show:*)",
-      "Bash(unzip -p \"uploads/templates/54002ea2-1719-43f1-b849-7fc2a77b2cf5.docx\" word/document.xml)",
-      "Bash(rm:*)",
-      "Bash(xargs -I {} basename {})",
-      "Bash(du -sh /Users/aiot/workspace/placeholder/backend/uploads/*)",
-      "Bash(ls -1 /Users/aiot/workspace/placeholder/frontend/src/components/*.jsx)",
-      "Bash(ls -1 /Users/aiot/workspace/placeholder/backend/*.py)"
+      "Bash(wc:*)"
     ]
   }
 }
