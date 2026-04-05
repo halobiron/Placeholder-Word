@@ -197,16 +197,48 @@ class MailMergeProcessor:
                     return process_run(element)
 
                 elif tag_name == 'fldSimple':
-                    # Mail merge field
+                    # Mail merge field - extract from instr attribute OR nested text
                     instr = element.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", "")
                     match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+
+                    # Try to get field name from instr first
                     if match:
                         field_name = match.group(1)
+                    else:
+                        # Fallback: extract from nested w:r/w:t text
                         nested_r = element.find(f"{w_ns}r")
-                        style_text = ""
                         if nested_r is not None:
-                            rPr = nested_r.find(f"{w_ns}rPr")
-                            style_text = get_run_style_text(rPr)
+                            for t in nested_r.findall(f"{w_ns}t"):
+                                if t.text:
+                                    # Extract from «field_name» format
+                                    text_match = re.search(r'«([^»]+)»', t.text)
+                                    if text_match:
+                                        field_name = text_match.group(1)
+                                        break
+                            else:
+                                field_name = "unknown"
+                        else:
+                            field_name = "unknown"
+
+                    # Get styling from nested run
+                    nested_r = element.find(f"{w_ns}r")
+                    style_text = ""
+                    actual_text = ""
+                    if nested_r is not None:
+                        rPr = nested_r.find(f"{w_ns}rPr")
+                        style_text = get_run_style_text(rPr)
+
+                        # Get actual text content from w:t elements
+                        for t in nested_r.findall(f"{w_ns}t"):
+                            if t.text:
+                                actual_text += t.text
+
+                    # Check if field has been filled (actual text is not in placeholder format)
+                    if actual_text and not re.match(r'^«[^»]+»$', actual_text):
+                        # Field has been filled with actual value - display it
+                        return f'<span style="{style_text}">{actual_text}</span>'
+                    else:
+                        # Still a placeholder - highlight it
                         return f'<span class="mail-merge-placeholder" data-field="{field_name}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
 
                 elif tag_name == 'smartTag' or tag_name == 'hyperlink':

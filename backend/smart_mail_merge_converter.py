@@ -4,6 +4,7 @@ Handles Vietnamese forms with XML surgical injection, offset mapping, and smart 
 """
 import re
 import unicodedata
+import copy
 from lxml import etree
 from docx import Document
 from docx.oxml.ns import qn
@@ -150,7 +151,10 @@ class SmartMailMergeConverter:
             if kind == 'text':
                 new_run = OxmlElement('w:r')
                 if original_rPr is not None:
-                    new_run.append(etree.fromstring(etree.tostring(original_rPr)))
+                    # DEEP CLONE để preserve toàn bộ format properties
+                    cloned_rPr = copy.deepcopy(original_rPr)
+                    new_run.append(cloned_rPr)
+
                 t = OxmlElement('w:t')
                 if content.startswith(' ') or content.endswith(' '):
                     t.set(qn('xml:space'), 'preserve')
@@ -174,7 +178,10 @@ class SmartMailMergeConverter:
                 # Bọc trong fldSimple là một run để hiển thị placeholder text
                 nested_run = OxmlElement('w:r')
                 if original_rPr is not None:
-                    nested_run.append(etree.fromstring(etree.tostring(original_rPr)))
+                    # DEEP CLONE để preserve toàn bộ format properties
+                    # Dùng deepcopy để copy hoàn toàn element với tất cả properties
+                    cloned_rPr = copy.deepcopy(original_rPr)
+                    nested_run.append(cloned_rPr)
 
                 t = OxmlElement('w:t')
                 t.text = f"«{final_label}»"
