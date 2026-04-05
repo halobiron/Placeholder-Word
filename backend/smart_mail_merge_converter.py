@@ -41,6 +41,9 @@ class SmartMailMergeConverter:
         # Loại bỏ nhiễu: (nếu có), (ghi rõ...), các ký tự đặc biệt
         text = re.sub(r'\(.*?\)|[:\-–—\._…□■]', ' ', text)
 
+        # Xử lý chữ đ/Đ đặc biệt trước khi normalize
+        text = text.replace('đ', 'd').replace('Đ', 'D')
+
         # Bình thường hóa tiếng Việt
         text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
         words = re.findall(r'\w+', text.lower())
@@ -69,9 +72,8 @@ class SmartMailMergeConverter:
         """Logic đặt tên Field thông minh dựa trên ngữ cảnh
 
         Priority order:
-        1. Time Context (ngày, tháng, năm)
-        2. Inline Context (label before colon/dash)
-        3. Section-Based Context (heading name)
+        1. Inline Context (label before placeholder)
+        2. Section-Based Context (heading name)
 
         Args:
             pre_text: Text immediately before placeholder
@@ -80,17 +82,12 @@ class SmartMailMergeConverter:
         Returns:
             Field name in snake_case
         """
-        # Ưu tiên 2: Xử lý Thời gian
-        time_match = re.search(r'(?i)(ngày|tháng|năm)\s*(20)?\s*$', pre_text)
-        if time_match:
-            return time_match.group(1).lower()
-
-        # Ưu tiên 1: Inline Context (Trước dấu hai chấm hoặc vài từ gần nhất)
+        # Inline Context (Trước dấu hai chấm hoặc vài từ gần nhất)
         inline_label = self._slugify(pre_text)
         if inline_label:
             return inline_label
 
-        # Ưu tiên 3: Kế thừa Section-Based
+        # Fallback: Section-Based
         return self._slugify(paragraph_context) or "field"
 
     def _process_paragraph(self, paragraph):
@@ -114,8 +111,9 @@ class SmartMailMergeConverter:
         if not full_text:
             return
 
-        # Regex tìm cụm dấu chấm (Greedy)
-        placeholder_pattern = re.compile(r'([._…]{2,}(?:\s+[._…]{2,})*)')
+        # Regex tìm placeholder có ý nghĩa: tối thiểu 3 ký tự placeholder liên tiếp
+        # Match: "...", "___", "... ...", nhưng KHÔNG match dấu chấm trong ngày (05.04.2026)
+        placeholder_pattern = re.compile(r'([._…]{3,}(?:\s+[._…]{3,})*)')
 
         segments = []
         last_idx = 0
