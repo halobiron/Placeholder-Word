@@ -30,6 +30,15 @@ function FileUpload({ onComplete }) {
       // Upload to backend for template conversion with HTML preview
       const result = await convertDocx(file)
 
+      // Debug: Log the response
+      console.log('=== BACKEND RESPONSE ===')
+      console.log('Fields:', result.fields)
+      console.log('HTML preview length:', result.html_preview?.length)
+      console.log('Contains «:', result.html_preview?.includes('«'))
+      console.log('Contains placeholder:', result.html_preview?.includes('mail-merge-placeholder'))
+      console.log('HTML preview (first 1000 chars):', result.html_preview?.substring(0, 1000))
+      console.log('=== END DEBUG ===')
+
       // Return result with HTML preview from backend
       onComplete({
         templateId: result.template_id,

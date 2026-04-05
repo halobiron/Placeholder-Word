@@ -110,22 +110,7 @@ async def convert_to_template(file: UploadFile = File(...)):
         processor = MailMergeProcessor()
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
-        original_backup_path = TEMPLATE_DIR / f"{template_id}_original.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path))
-
-        # Backup original converted DOCX (before any user modifications)
-        import shutil
-        shutil.copy(str(output_path), str(original_backup_path))
-
-        # Save initial field mapping
-        field_mapping_path = TEMPLATE_DIR / f"{template_id}_fields.json"
-        with open(field_mapping_path, 'w', encoding='utf-8') as f:
-            import json
-            json.dump({
-                "fields": result["fields"],
-                "original_fields": result["fields"],
-                "has_modifications": False
-            }, f, ensure_ascii=False, indent=2)
 
         # Debug: Log HTML preview content
         html_preview = result.get("html_preview", "")
@@ -164,7 +149,7 @@ async def merge_template(
     context: str = Form(None),
     field_values: str = Form(None)
 ):
-    """Fill Mail Merge template with data (preserves original formatting)
+    """Fill Mail Merge template with data
 
     Args:
         template_id: ID of template from /convert endpoint
@@ -174,78 +159,19 @@ async def merge_template(
     Returns:
         JSON with result_id and download_url
     """
-    # Check for field mapping to determine which template to use
-    field_mapping_path = TEMPLATE_DIR / f"{template_id}_fields.json"
-    original_backup_path = TEMPLATE_DIR / f"{template_id}_original.docx"
-
-    # Determine which template to use
-    template_to_use = None
-    field_mapping = None
-
-    if field_mapping_path.exists() and original_backup_path.exists():
-        # Load field mapping
-        import json
-        with open(field_mapping_path, 'r', encoding='utf-8') as f:
-            field_mapping = json.load(f)
-
-        # If fields were modified, use original template
-        if field_mapping.get('has_modifications', False):
-            template_to_use = original_backup_path
-        else:
-            template_to_use = TEMPLATE_DIR / f"{template_id}.docx"
-    else:
-        # No mapping found, use regular template
-        template_to_use = TEMPLATE_DIR / f"{template_id}.docx"
-
-    if not template_to_use.exists():
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
         raise HTTPException(status_code=404, detail=f"Template not found: {template_id}")
 
     try:
         executor = MergeExecutor()
-        template_fields = executor.get_template_fields(str(template_to_use))
-
-        print(f"=== MERGE DEBUG ===")
-        print(f"Template to use: {template_to_use}")
-        print(f"Template fields from DOCX: {template_fields}")
-        if field_mapping:
-            print(f"Field mapping - original: {field_mapping.get('original_fields', [])}")
-            print(f"Field mapping - current: {field_mapping.get('fields', [])}")
-            print(f"Has modifications: {field_mapping.get('has_modifications', False)}")
-        print(f"===================")
+        template_fields = executor.get_template_fields(str(template_path))
 
         # Determine data source
         if field_values:
             # Use direct field values
             import json
             data = json.loads(field_values)
-
-            # If field mapping exists, map current field names to template field names
-            if field_mapping and field_mapping.get('has_modifications', False):
-                original_fields = field_mapping.get('original_fields', [])
-                current_fields = field_mapping.get('fields', [])
-
-                # Create bidirectional mapping:
-                # - current_name -> original_name (for renamed fields)
-                # - original_name -> current_name (for filling data)
-                field_name_map = {}
-                for i, current_name in enumerate(current_fields):
-                    if i < len(original_fields):
-                        field_name_map[current_name] = original_fields[i]
-
-                # Build data with original field names
-                # Only fill fields that exist in the template
-                final_data = {}
-                for current_name, value in data.items():
-                    if current_name in field_name_map:
-                        original_name = field_name_map[current_name]
-                        # Only include if this field exists in current template
-                        if original_name in template_fields:
-                            final_data[original_name] = value
-
-                data = final_data
-            else:
-                # No modifications - filter data to only include fields in template
-                data = {k: v for k, v in data.items() if k in template_fields}
 
             # Ensure all required fields have values (empty string if missing)
             for field in template_fields:
@@ -261,54 +187,19 @@ async def merge_template(
                 )
 
             gemini_client = GeminiClient(GEMINI_API_KEY)
-
-            # If field mapping exists, extract with current field names then remap to template fields
-            if field_mapping and field_mapping.get('has_modifications', False):
-                current_fields = field_mapping.get('fields', [])
-                original_fields = field_mapping.get('original_fields', [])
-
-                print(f"Extracting with current fields: {current_fields}")
-                data = _extract_data_from_context(
-                    gemini_client,
-                    context,
-                    current_fields
-                )
-                print(f"Data extracted from Gemini: {data}")
-
-                # Build mapping: current_name -> original_name
-                field_name_map = {}
-                for i, current_name in enumerate(current_fields):
-                    if i < len(original_fields):
-                        field_name_map[current_name] = original_fields[i]
-
-                print(f"Field name mapping: {field_name_map}")
-
-                # Map to original field names, but only keep fields that exist in template
-                remapped_data = {}
-                for current_name, value in data.items():
-                    if current_name in field_name_map:
-                        original_name = field_name_map[current_name]
-                        # Only include if this field exists in current template
-                        if original_name in template_fields:
-                            remapped_data[original_name] = value
-
-                print(f"Data after remapping: {remapped_data}")
-                data = remapped_data
-            else:
-                # No modifications, use template fields directly
-                data = _extract_data_from_context(
-                    gemini_client,
-                    context,
-                    template_fields
-                )
+            data = _extract_data_from_context(
+                gemini_client,
+                context,
+                template_fields
+            )
         else:
             raise HTTPException(
                 status_code=400,
                 detail="Either 'context' or 'field_values' must be provided"
             )
 
-        # Execute merge with the appropriate template
-        result_path, result_id = executor.execute_merge(str(template_to_use), data)
+        # Execute merge
+        result_path, result_id = executor.execute_merge(str(template_path), data)
 
         return JSONResponse(content={
             "result_id": result_id,
@@ -388,187 +279,88 @@ async def update_template(
     fields: str = Form(...),
     editor_html: str = Form(None)
 ):
-    """Update template by regenerating DOCX from HTML editor (preserves formatting)
+    """Update template field names by renaming MERGEFIELD fields directly in DOCX
+    DELETES extra fields if user removed placeholders
 
     Args:
         template_id: ID of template to update
-        fields: JSON string of current field names after editing
-        editor_html: HTML content from edited preview (used to regenerate DOCX)
+        fields: JSON string of field names
+        editor_html: Not used
 
     Returns:
         JSON with updated template_id and fields
     """
-    # Find files
-    field_mapping_path = TEMPLATE_DIR / f"{template_id}_fields.json"
-    original_backup_path = TEMPLATE_DIR / f"{template_id}_original.docx"
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
-
-    if not field_mapping_path.exists() or not original_backup_path.exists():
-        raise HTTPException(status_code=404, detail=f"Template files not found: {template_id}")
-
-    if not editor_html:
-        raise HTTPException(status_code=400, detail="editor_html is required to regenerate template")
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail=f"Template not found: {template_id}")
 
     try:
         import json
-        from smart_mail_merge_converter import SmartMailMergeConverter
-
-        # Parse current fields
-        current_fields = json.loads(fields)
-
-        # Load original field mapping
-        with open(field_mapping_path, 'r', encoding='utf-8') as f:
-            mapping = json.load(f)
-
-        original_fields = mapping.get('original_fields', [])
-
-        # Create new DOCX template from original backup
-        # by replacing placeholders while preserving formatting
         from docx import Document
-        import re
 
-        # Open original backup
-        doc = Document(str(original_backup_path))
+        # Parse new field names
+        new_fields = json.loads(fields)
+
+        # Load template
+        doc = Document(str(template_path))
+
+        # Find all MERGEFIELD fields and process them (rename or delete)
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
-        # Create mapping: old_field -> new_field (for renamed placeholders)
-        # And track: position -> new_field (for new placeholders)
-        field_name_map = {}
-        for i, new_name in enumerate(current_fields):
-            if i < len(original_fields):
-                field_name_map[original_fields[i]] = new_name
+        # Collect all fldSimple elements with their parents
+        fields_to_process = []
 
-        # Update placeholders in DOCX (rename existing)
         for para in doc.paragraphs:
-            _update_placeholders_in_element(para._p, current_fields, field_name_map, w_ns)
+            for element in para._p.iter():
+                if element.tag == f"{w_ns}fldSimple":
+                    instr = element.get(f"{w_ns}instr", "")
+                    if "MERGEFIELD" in instr:
+                        fields_to_process.append((element, para._p))
 
+        # Process tables
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
-                        _update_placeholders_in_element(para._p, current_fields, field_name_map, w_ns)
+                        for element in para._p.iter():
+                            if element.tag == f"{w_ns}fldSimple":
+                                instr = element.get(f"{w_ns}instr", "")
+                                if "MERGEFIELD" in instr:
+                                    fields_to_process.append((element, para._p))
 
-        # Check for new placeholders (added in HTML editor)
-        new_fields = [f for f in current_fields if f not in original_fields]
-        deleted_fields = [f for f in original_fields if f not in current_fields]
+        # Process fields: rename or delete
+        for idx, (fld_element, parent) in enumerate(fields_to_process):
+            if idx < len(new_fields):
+                # Rename existing field
+                new_name = new_fields[idx]
+                fld_element.set(f"{w_ns}instr", f' MERGEFIELD {new_name} \\* MERGEFORMAT ')
 
-        # Handle new placeholders: Add them to the DOCX template
-        if new_fields:
-            # Add new placeholders at the end of document as separate section
-            note_para = doc.add_paragraph()
-            note_run = note_para.add_run(f"\n[New placeholders added: {', '.join(f'«{f}»' for f in new_fields)}]")
-            note_run.font.size = Pt(8)
-            note_run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)  # Gray
-
-            # Insert new placeholders as merge fields at the end
-            for field_name in new_fields:
-                _insert_merge_field(doc, field_name)
-
-            # Update original_fields to include new ones for future reference
-            mapping['original_fields'] = current_fields
-
-        # Handle deleted placeholders: Already removed from current_fields list
-        # The rename logic above handles removal by not including deleted fields in the map
+                # Update the display text «fieldName»
+                nested_run = fld_element.find(f"{w_ns}r")
+                if nested_run is not None:
+                    t_elem = nested_run.find(f"{w_ns}t")
+                    if t_elem is not None:
+                        t_elem.text = f"«{new_name}»"
+            else:
+                # DELETE extra fields that user removed
+                parent.remove(fld_element)
 
         # Save updated template
         doc.save(str(template_path))
 
-        # Update field mapping
-        mapping['fields'] = current_fields
-        mapping['has_modifications'] = True
-
-        with open(field_mapping_path, 'w', encoding='utf-8') as f:
-            json.dump(mapping, f, ensure_ascii=False, indent=2)
-
         return JSONResponse(content={
             "template_id": template_id,
-            "fields": current_fields,
+            "fields": new_fields,
             "updated": True,
-            "method": "docx_regenerated",
-            "fields_added": len(current_fields) - len(original_fields),
-            "original_field_count": len(original_fields)
+            "fields_updated": len(new_fields),
+            "fields_deleted": len(fields_to_process) - len(new_fields)
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}\n{traceback.format_exc()}")
-
-
-def _update_placeholders_in_element(element, current_fields, field_name_map, w_ns):
-    """Update mail merge placeholders in an XML element
-
-    Args:
-        element: lxml element (paragraph or table cell)
-        current_fields: List of current field names (in order)
-        field_name_map: Mapping from old field names to new field names
-        w_ns: Word namespace
-    """
-    import re
-
-    # Process all fldSimple elements (mail merge fields)
-    for fldSimple in element.findall(f".//{w_ns}fldSimple"):
-        # Get field instruction
-        instr = fldSimple.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", "")
-        match = re.search(r'MERGEFIELD\s+(\S+)', instr)
-
-        if match:
-            old_field_name = match.group(1)
-            # Map to new field name if renamed
-            new_field_name = field_name_map.get(old_field_name, old_field_name)
-
-            # Update instruction attribute
-            new_instr = instr.replace(f'MERGEFIELD {old_field_name}', f'MERGEFIELD {new_field_name}')
-            fldSimple.set(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", new_instr)
-
-            # Update text content in nested w:r/w:t
-            for r in fldSimple.findall(f"{w_ns}r"):
-                for t in r.findall(f"{w_ns}t"):
-                    if t.text:
-                        # Replace old placeholder with new placeholder
-                        t.text = t.text.replace(f"«{old_field_name}»", f"«{new_field_name}»")
-
-
-def _insert_merge_field(doc, field_name):
-    """Insert a mail merge field at the end of document
-
-    Args:
-        doc: python-docx Document object
-        field_name: Name of the field to insert
-    """
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-
-    # Create new paragraph
-    para = doc.add_paragraph()
-
-    # Create fldSimple element (mail merge field)
-    w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    fldSimple = OxmlElement(f'{w_ns}fldSimple')
-    fldSimple.set(f'{w_ns}instr', f'MERGEFIELD {field_name} \\* MERGEFORMAT')
-
-    # Create run element
-    r = OxmlElement(f'{w_ns}r')
-
-    # Create run properties (optional formatting)
-    rPr = OxmlElement(f'{w_ns}rPr')
-    # Add simple formatting
-    b = OxmlElement(f'{w_ns}b')  # Bold
-    rPr.append(b)
-
-    # Create text element with placeholder
-    t = OxmlElement(f'{w_ns}t')
-    t.set(qn('xml:space'), 'preserve')
-    t.text = f'«{field_name}»'
-
-    # Assemble
-    r.append(rPr)
-    r.append(t)
-    fldSimple.append(r)
-
-    # Add to paragraph
-    para._p.append(fldSimple)
-
-
 def _extract_data_from_context(
     gemini_client: GeminiClient,
     context: str,

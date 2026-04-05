@@ -1,10 +1,20 @@
 {
-  "enabledPlugins": {
-    "everything-claude-code@everything-claude-code": true
-  },
   "permissions": {
     "allow": [
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(python -c \"from smart_mail_merge_converter import SmartMailMergeConverter; print\\(''✓ Module import OK''\\)\")",
+      "Bash(npm run:*)",
+      "Bash(python -c \":*)",
+      "Bash(python -m py_compile main.py)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(timeout 5 python main.py)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(cd:*)",
+      "Bash(find E:WorkPhenikaaXPlaceholder-Wordbackenduploads -name *.docx -type f)"
     ]
+  },
+  "enabledPlugins": {
+    "everything-claude-code@everything-claude-code": true
   }
 }
