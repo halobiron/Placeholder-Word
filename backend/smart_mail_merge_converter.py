@@ -69,25 +69,23 @@ class SmartMailMergeConverter:
             return f"{base_label}_{self.used_labels[base_label]}"
 
     def _generate_label(self, pre_text, paragraph_context):
-        """Logic đặt tên Field thông minh dựa trên ngữ cảnh
+        """Logic đặt tên Field thông minh dựa trên ngữ cảnh (ưu tiên phần text ngay trước đó)"""
+        # Split by common separators to find most recent meaningful text
+        parts = re.split(r'[:\-–—\._…□■]', pre_text)
+        recent_text = parts[-1].strip()
 
-        Priority order:
-        1. Inline Context (label before placeholder)
-        2. Section-Based Context (heading name)
-
-        Args:
-            pre_text: Text immediately before placeholder
-            paragraph_context: Full paragraph text for fallback
-
-        Returns:
-            Field name in snake_case
-        """
-        # Inline Context (Trước dấu hai chấm hoặc vài từ gần nhất)
-        inline_label = self._slugify(pre_text)
+        # Inline Context (Trước dấu hai chấm hoặc vài từ gần nhất trong phân đoạn này)
+        inline_label = self._slugify(recent_text)
         if inline_label:
             return inline_label
 
-        # Fallback: Section-Based
+        # Fallback 1: Trở về slugify toàn bộ pre_text (để lấy ho_va_ten nếu không có dấu phân tách)
+        # Nhưng tối ưu hơn bằng cách chỉ lấy vài từ gần nhất (ví dụ: 4 từ)
+        full_prefix_label = self._slugify(pre_text)
+        if full_prefix_label:
+            return full_prefix_label
+
+        # Fallback 2: Section-Based
         return self._slugify(paragraph_context) or "field"
 
     def _process_paragraph(self, paragraph):
@@ -111,9 +109,9 @@ class SmartMailMergeConverter:
         if not full_text:
             return
 
-        # Regex tìm placeholder có ý nghĩa: tối thiểu 3 ký tự placeholder liên tiếp
-        # Match: "...", "___", "... ...", nhưng KHÔNG match dấu chấm trong ngày (05.04.2026)
-        placeholder_pattern = re.compile(r'([._…]{3,}(?:\s+[._…]{3,})*)')
+        # Regex tìm placeholder có ý nghĩa: hỗ trợ cả dấu chấm lửng (ellipsis) và dấu lặp lại (min 3)
+        # Match: "...", "___", "…", "…." (ellipsis common in VN forms)
+        placeholder_pattern = re.compile(r'([._]{3,}|…+[._…]*)')
 
         segments = []
         last_idx = 0
@@ -169,9 +167,26 @@ class SmartMailMergeConverter:
                 )
                 final_label = self._get_unique_label(raw_label)
 
+                # Phân tích casing từ chữ ngay trước placeholder để áp dụng format switch
+                parts = re.split(r'[:\-–—\._…□■\n]', pre_text)
+                recent_text = ""
+                for part in reversed(parts):
+                    if part.strip():
+                        recent_text = part.strip()
+                        break
+                
+                format_switch = "\\* MERGEFORMAT"
+                if recent_text:
+                    # Rút gọn chỉ lấy các chữ và số để đánh giá case
+                    alpha_text = " ".join(re.findall(r'\w+', recent_text, re.UNICODE))
+                    if alpha_text and alpha_text.isupper():
+                        format_switch = "\\* Upper"
+                    elif alpha_text and alpha_text.istitle():
+                        format_switch = "\\* Caps"
+
                 # Tạo cấu trúc w:fldSimple
                 fld_simple = OxmlElement('w:fldSimple')
-                fld_simple.set(qn('w:instr'), f' MERGEFIELD {final_label} \\* MERGEFORMAT ')
+                fld_simple.set(qn('w:instr'), f' MERGEFIELD {final_label} {format_switch} \\z "{content}" ')
 
                 # Bọc trong fldSimple là một run để hiển thị placeholder text
                 nested_run = OxmlElement('w:r')

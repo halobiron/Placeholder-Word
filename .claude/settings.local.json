@@ -11,7 +11,8 @@
       "Bash(pip install:*)",
       "Bash(python:*)",
       "Bash(cd:*)",
-      "Bash(find E:WorkPhenikaaXPlaceholder-Wordbackenduploads -name *.docx -type f)"
+      "Bash(find E:WorkPhenikaaXPlaceholder-Wordbackenduploads -name *.docx -type f)",
+      "Bash(ls:*)"
     ]
   },
   "enabledPlugins": {

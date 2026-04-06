@@ -5,7 +5,6 @@ import uuid
 from pathlib import Path
 from typing import Dict
 from smart_mail_merge_converter import SmartMailMergeConverter
-import mammoth
 
 
 class MailMergeProcessor:
@@ -198,12 +197,16 @@ class MailMergeProcessor:
 
                 elif tag_name == 'fldSimple':
                     # Mail merge field - extract from instr attribute OR nested text
-                    instr = element.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", "")
+                    instr = element.get(f"{w_ns}instr", "")
+                    # Try to get field name and original value from instr
                     match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+                    field_original = ""
 
-                    # Try to get field name from instr first
                     if match:
                         field_name = match.group(1)
+                        z_match = re.search(r'\\z\s*"([^"]*)"', instr)
+                        if z_match:
+                            field_original = z_match.group(1)
                     else:
                         # Fallback: extract from nested w:r/w:t text
                         nested_r = element.find(f"{w_ns}r")
@@ -239,7 +242,7 @@ class MailMergeProcessor:
                         return f'<span style="{style_text}">{actual_text}</span>'
                     else:
                         # Still a placeholder - highlight it
-                        return f'<span class="mail-merge-placeholder" data-field="{field_name}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
+                        return f'<span class="mail-merge-placeholder" data-field="{field_name}" data-original="{field_original}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
 
                 elif tag_name == 'smartTag' or tag_name == 'hyperlink':
                     # Nested structures - process all children recursively

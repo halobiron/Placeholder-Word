@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+import json
+from docx import Document
 from mail_merge_processor import MailMergeProcessor
 from merge_executor import MergeExecutor
 from gemini_client import GeminiClient
@@ -34,6 +36,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 # Configuration
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 # Initialize FastAPI
 app = FastAPI(
@@ -56,9 +59,7 @@ app.add_middleware(
 async def health_check():
     """Health check endpoint"""
     return {
-        "status": "healthy",
-        "service": "Mail Merge Placeholder System",
-        "version": "1.0.0"
+        "status": "OK"
     }
 
 
@@ -117,10 +118,7 @@ async def convert_to_template(file: UploadFile = File(...)):
         print(f"=== HTML PREVIEW DEBUG ===")
         print(f"Fields detected: {result['fields']}")
         print(f"HTML preview length: {len(html_preview)}")
-        print(f"Contains « characters: {'«' in html_preview}")
         print(f"Contains mail-merge-placeholder: {'mail-merge-placeholder' in html_preview}")
-        # Print first 1000 chars
-        print(f"First 1000 chars:\n{html_preview[:1000]}")
         print(f"=== END DEBUG ===")
 
         # Build response
@@ -147,7 +145,8 @@ async def convert_to_template(file: UploadFile = File(...)):
 async def merge_template(
     template_id: str = Form(...),
     context: str = Form(None),
-    field_values: str = Form(None)
+    field_values: str = Form(None),
+    active_fields: str = Form(None)
 ):
     """Fill Mail Merge template with data
 
@@ -155,6 +154,8 @@ async def merge_template(
         template_id: ID of template from /convert endpoint
         context: Text context with data to fill (optional, for Gemini extraction)
         field_values: JSON string of field-value pairs (optional, for direct values)
+        active_fields: JSON string array of active fields to be filled
+
 
     Returns:
         JSON with result_id and download_url
@@ -169,8 +170,6 @@ async def merge_template(
 
         # Determine data source
         if field_values:
-            # Use direct field values
-            import json
             data = json.loads(field_values)
 
             # Ensure all required fields have values (empty string if missing)
@@ -187,6 +186,11 @@ async def merge_template(
                 )
 
             gemini_client = GeminiClient(GEMINI_API_KEY)
+            
+            if active_fields:
+                active_f = set(json.loads(active_fields))
+                template_fields = [f for f in template_fields if f in active_f]
+
             data = _extract_data_from_context(
                 gemini_client,
                 context,
@@ -223,23 +227,20 @@ async def download_file(file_id: str):
     Returns:
         .docx file download
     """
-    # Check templates
-    template_path = TEMPLATE_DIR / f"{file_id}.docx"
-    if template_path.exists():
-        return FileResponse(
-            path=str(template_path),
-            filename=f"template_{file_id}.docx",
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+    # Folders to search: (Path, filename_prefix)
+    search_folders = [
+        (TEMPLATE_DIR, "template_"),
+        (RESULT_DIR, "document_")
+    ]
 
-    # Check results
-    result_path = RESULT_DIR / f"{file_id}.docx"
-    if result_path.exists():
-        return FileResponse(
-            path=str(result_path),
-            filename=f"document_{file_id}.docx",
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+    for directory, prefix in search_folders:
+        file_path = directory / f"{file_id}.docx"
+        if file_path.exists():
+            return FileResponse(
+                path=str(file_path),
+                filename=f"{prefix}{file_id}.docx",
+                media_type=DOCX_MEDIA_TYPE
+            )
 
     raise HTTPException(status_code=404, detail="File not found")
 
@@ -274,93 +275,46 @@ async def preview_result(result_id: str):
 
 
 @app.post("/update-template")
-async def update_template(
-    template_id: str = Form(...),
-    fields: str = Form(...),
-    editor_html: str = Form(None)
-):
-    """Update template field names by renaming MERGEFIELD fields directly in DOCX
-    DELETES extra fields if user removed placeholders
-
-    Args:
-        template_id: ID of template to update
-        fields: JSON string of field names
-        editor_html: Not used
-
-    Returns:
-        JSON with updated template_id and fields
-    """
+async def update_template(template_id: str = Form(...), rename_map: str = Form(...), editor_html: str = Form(None)):
+    """Update template fields directly in DOCX using XPath for efficiency"""
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
-        raise HTTPException(status_code=404, detail=f"Template not found: {template_id}")
+        raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        import json
-        from docx import Document
-
-        # Parse new field names
-        new_fields = json.loads(fields)
-
-        # Load template
+        rename_mapping = json.loads(rename_map)
         doc = Document(str(template_path))
-
-        # Find all MERGEFIELD fields and process them (rename or delete)
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        flds = [f for f in doc.element.iter(f"{w_ns}fldSimple") if "MERGEFIELD" in f.get(f"{w_ns}instr", "")]
 
-        # Collect all fldSimple elements with their parents
-        fields_to_process = []
+        count_updated = 0
+        count_deleted = 0
+        for fld in flds:
+            instr = fld.get(f"{w_ns}instr", "")
+            match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+            if match:
+                current_name = match.group(1)
+                new_name = rename_mapping.get(current_name)
+                
+                if new_name is not None and new_name != current_name:
+                    # Keep the original \z part
+                    z_match = re.search(r'\\z\s*"([^"]*)"', instr)
+                    z_part = f' \\z "{z_match.group(1)}"' if z_match else ""
 
-        for para in doc.paragraphs:
-            for element in para._p.iter():
-                if element.tag == f"{w_ns}fldSimple":
-                    instr = element.get(f"{w_ns}instr", "")
-                    if "MERGEFIELD" in instr:
-                        fields_to_process.append((element, para._p))
+                    fld.set(f"{w_ns}instr", f' MERGEFIELD {new_name} \\* MERGEFORMAT{z_part} ')
+                    for t in fld.iter(f"{w_ns}t"):
+                        t.text = f"«{new_name}»"
+                    count_updated += 1
+                elif new_name is None:
+                    count_deleted += 1
+                    # It was deleted by the user. DO NOT remove it from DOCX
+                    # We just leave it as is so it falls back to \z
 
-        # Process tables
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        for element in para._p.iter():
-                            if element.tag == f"{w_ns}fldSimple":
-                                instr = element.get(f"{w_ns}instr", "")
-                                if "MERGEFIELD" in instr:
-                                    fields_to_process.append((element, para._p))
-
-        # Process fields: rename or delete
-        for idx, (fld_element, parent) in enumerate(fields_to_process):
-            if idx < len(new_fields):
-                # Rename existing field
-                new_name = new_fields[idx]
-                fld_element.set(f"{w_ns}instr", f' MERGEFIELD {new_name} \\* MERGEFORMAT ')
-
-                # Update the display text «fieldName»
-                nested_run = fld_element.find(f"{w_ns}r")
-                if nested_run is not None:
-                    t_elem = nested_run.find(f"{w_ns}t")
-                    if t_elem is not None:
-                        t_elem.text = f"«{new_name}»"
-            else:
-                # DELETE extra fields that user removed
-                parent.remove(fld_element)
-
-        # Save updated template
         doc.save(str(template_path))
-
-        return JSONResponse(content={
-            "template_id": template_id,
-            "fields": new_fields,
-            "updated": True,
-            "fields_updated": len(new_fields),
-            "fields_deleted": len(fields_to_process) - len(new_fields)
-        })
-
-    except HTTPException:
-        raise
+        return {"template_id": template_id, "updated": True, 
+                "fields_updated": count_updated, "fields_deleted": count_deleted}
     except Exception as e:
-        import traceback
-        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 def _extract_data_from_context(
     gemini_client: GeminiClient,
     context: str,

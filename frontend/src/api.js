@@ -14,7 +14,7 @@ export const convertDocx = async (file) => {
   return response.data
 }
 
-export const mergeTemplate = async (templateId, data, isDirectValues = false) => {
+export const mergeTemplate = async (templateId, data, isDirectValues = false, activeFields = null) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
 
@@ -24,6 +24,10 @@ export const mergeTemplate = async (templateId, data, isDirectValues = false) =>
   } else {
     // Send context text for Gemini extraction
     formData.append('context', data)
+  }
+  
+  if (activeFields) {
+    formData.append('active_fields', JSON.stringify(activeFields))
   }
 
   const response = await axios.post(`${API_BASE}/merge`, formData, {
@@ -43,10 +47,10 @@ export const getPreview = async (resultId) => {
   return response.data
 }
 
-export const updateTemplate = async (templateId, fields, editorHtml) => {
+export const updateTemplate = async (templateId, renameMap, editorHtml) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
-  formData.append('fields', JSON.stringify(fields))
+  formData.append('rename_map', JSON.stringify(renameMap))
   formData.append('editor_html', editorHtml)
 
   const response = await axios.post(`${API_BASE}/update-template`, formData, {

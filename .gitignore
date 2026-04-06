@@ -3,3 +3,6 @@
 */venv
 */__pycache__
 */dist
+.gitnexus
+.claude/skills/gitnexus
+backend/uploads

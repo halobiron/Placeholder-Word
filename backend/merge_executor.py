@@ -115,13 +115,23 @@ class MergeExecutor:
             # Get field instruction
             instr = fldSimple.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", "")
 
-            # Extract field name from instruction
+            # Extract field name and original text from instruction
             match = re.search(r'MERGEFIELD\s+(\S+)', instr)
             if match:
                 field_name = match.group(1)
+                z_match = re.search(r'\\z\s*"([^"]*)"', instr)
+                original_text = z_match.group(1) if z_match else ""
 
-                # Get replacement value
+                # Get replacement value, fallback to original_text if empty
                 replacement = data.get(field_name, "")
+                if replacement is None or str(replacement).strip() == "":
+                    replacement = original_text
+                else:
+                    # Apply Word format switches manually since we are replacing the field purely in XML
+                    if re.search(r'\\\*\s*Upper', instr, re.IGNORECASE):
+                        replacement = str(replacement).upper()
+                    elif re.search(r'\\\*\s*Caps', instr, re.IGNORECASE):
+                        replacement = str(replacement).title()
 
                 # Get formatting from the nested run
                 nested_run = fldSimple.find(f"{w_ns}r")

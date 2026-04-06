@@ -14,6 +14,7 @@ function App() {
   const [previewHtml, setPreviewHtml] = useState(null) // Preview of merged result
   const [merging, setMerging] = useState(false)
   const [templateNeedsUpdate, setTemplateNeedsUpdate] = useState(false) // Track if template was modified
+  const [renameMap, setRenameMap] = useState({}) // Track oldName -> currentName mapping
   const [error, setError] = useState(null)
 
   // Extract placeholders from HTML
@@ -64,6 +65,14 @@ function App() {
       }
     })
 
+    const newMap = { ...renameMap }
+    for (const original in newMap) {
+      if (newMap[original] === oldName) {
+        newMap[original] = newName
+      }
+    }
+    setRenameMap(newMap)
+
     const newHtml = editor.innerHTML
     setEditorHtml(newHtml)
     setFields(extractFields(newHtml))
@@ -75,8 +84,21 @@ function App() {
     const editor = document.getElementById('document-editor')
     if (!editor) return
 
-    const newHtml = editor.innerHTML.replace(new RegExp(`«${fieldName}»`, 'g'), '')
-    editor.innerHTML = newHtml
+    // Replace each matching span with its original text
+    editor.querySelectorAll(`.mail-merge-placeholder[data-field="${fieldName}"]`).forEach(span => {
+      const originalText = span.getAttribute('data-original') || ''
+      span.outerHTML = originalText
+    })
+
+    const newMap = { ...renameMap }
+    for (const original in newMap) {
+      if (newMap[original] === fieldName) {
+        newMap[original] = null // marked as deleted
+      }
+    }
+    setRenameMap(newMap)
+
+    const newHtml = editor.innerHTML
     setEditorHtml(newHtml)
     setFields(extractFields(newHtml))
     setTemplateNeedsUpdate(true) // Mark template as modified
@@ -88,6 +110,12 @@ function App() {
     setEditorHtml(data.previewHtml)
     setFields(data.fields)
     setOriginalFields(data.fields) // Store original fields
+    
+    // Initialize renameMap mapping original fields to themselves
+    const initMap = {}
+    data.fields.forEach(f => initMap[f] = f)
+    setRenameMap(initMap)
+    
     setTemplateNeedsUpdate(false) // Reset update flag
     setStep('preview')
   }
@@ -110,14 +138,14 @@ function App() {
       // Update template if fields were modified (renamed/added/deleted)
       if (templateNeedsUpdate) {
         console.log('Updating template with modified fields...')
-        await updateTemplate(templateId, fields, editorHtml)
+        await updateTemplate(templateId, renameMap, editorHtml)
         console.log('Template updated successfully')
         setTemplateNeedsUpdate(false)
       }
 
       // Use direct values if available, otherwise use context
       const data = hasDirectValues ? fieldValues : context
-      const result = await mergeTemplate(templateId, data, hasDirectValues)
+      const result = await mergeTemplate(templateId, data, hasDirectValues, fields)
       setResultId(result.result_id)
 
       // Fetch preview
