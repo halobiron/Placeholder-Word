@@ -68,140 +68,60 @@ class SmartMailMergeConverter:
             self.used_labels[base_label] += 1
             return f"{base_label}_{self.used_labels[base_label]}"
 
-    def _generate_label(self, pre_text, paragraph_context):
-        """Logic đặt tên Field thông minh dựa trên ngữ cảnh (ưu tiên phần text ngay trước đó)"""
-        # Split by common separators to find most recent meaningful text
-        parts = re.split(r'[:\-–—\._…□■]', pre_text)
-        recent_text = parts[-1].strip()
-
-        # Inline Context (Trước dấu hai chấm hoặc vài từ gần nhất trong phân đoạn này)
-        inline_label = self._slugify(recent_text)
-        if inline_label:
-            return inline_label
-
-        # Fallback 1: Trở về slugify toàn bộ pre_text (để lấy ho_va_ten nếu không có dấu phân tách)
-        # Nhưng tối ưu hơn bằng cách chỉ lấy vài từ gần nhất (ví dụ: 4 từ)
-        full_prefix_label = self._slugify(pre_text)
-        if full_prefix_label:
-            return full_prefix_label
-
-        # Fallback 2: Section-Based
-        return self._slugify(paragraph_context) or "field"
+    def _generate_label(self, pre_text, para_context):
+        """Tạo field name và format switch dựa trên text ngay trước placeholder"""
+        parts = [p.strip() for p in re.split(r'[:\-–—\._…□■\n]', pre_text) if p.strip()]
+        recent = parts[-1] if parts else ""
+        label = self._slugify(recent) or self._slugify(pre_text) or self._slugify(para_context) or "field"
+        unique_label = self._get_unique_label(label)
+        sw = "\\* Upper" if recent.isupper() else "\\* Caps" if recent.istitle() else "\\* MERGEFORMAT"
+        return unique_label, sw
 
     def _process_paragraph(self, paragraph):
-        """Xử lý một paragraph: tìm placeholder và inject Mail Merge field
+        """Xử lý paragraph: inject Mail Merge field với định dạng chính xác"""
+        p_element, pattern = paragraph._p, re.compile(r'([._]{3,}|…+[._…]*)')
+        if not pattern.search(paragraph.text): return
 
-        Args:
-            paragraph: docx paragraph object
-        """
-        p_element = paragraph._p
-        full_text = ""
-        offset_map = []  # Lưu rPr (định dạng) cho từng ký tự
-
-        # Bước 1: Lập bản đồ Offset và thu thập Text
+        # Map định dạng và thu thập text
+        full_text, offset_map = "", []
         for run in paragraph.runs:
-            run_text = run.text
             rPr = run.element.find(f"{self.w_ns}rPr")
-            for char in run_text:
+            for char in run.text:
                 full_text += char
                 offset_map.append(rPr)
 
-        if not full_text:
-            return
+        # Phân mảnh paragraph
+        segments, last_idx = [], 0
+        for match in pattern.finditer(full_text):
+            s, e = match.start(), match.end()
+            if s > last_idx: segments.append(('text', full_text[last_idx:s], last_idx))
+            segments.append(('field', full_text[s:e], s))
+            last_idx = e
+        if last_idx < len(full_text): segments.append(('text', full_text[last_idx:], last_idx))
 
-        # Regex tìm placeholder có ý nghĩa: hỗ trợ cả dấu chấm lửng (ellipsis) và dấu lặp lại (min 3)
-        # Match: "...", "___", "…", "…." (ellipsis common in VN forms)
-        placeholder_pattern = re.compile(r'([._]{3,}|…+[._…]*)')
+        # Rebuild XML
+        for r in p_element.findall(f"{self.w_ns}r"): p_element.remove(r)
 
-        segments = []
-        last_idx = 0
-
-        # Bước 2: Phân mảnh Paragraph thành Text và Field
-        for match in placeholder_pattern.finditer(full_text):
-            start, end = match.start(), match.end()
-
-            # Đoạn text tĩnh trước placeholder
-            if start > last_idx:
-                segments.append(('text', full_text[last_idx:start], last_idx))
-
-            # Đoạn placeholder cần chuyển thành Mail Merge
-            segments.append(('field', full_text[start:end], start))
-            last_idx = end
-
-        if last_idx < len(full_text):
-            segments.append(('text', full_text[last_idx:], last_idx))
-
-        # Nếu không có placeholder nào, bỏ qua
-        if not any(s[0] == 'field' for s in segments):
-            return
-
-        # Bước 3: Xóa sạch nội dung cũ của Paragraph XML
-        for r in p_element.findall(f"{self.w_ns}r"):
-            p_element.remove(r)
-
-        # Bước 4: Xây dựng lại XML Paragraph với "Surgical Injection"
         for kind, content, offset in segments:
-            # Lấy rPr tại vị trí bắt đầu của segment để kế thừa format
             original_rPr = offset_map[offset] if offset < len(offset_map) else None
-
             if kind == 'text':
-                new_run = OxmlElement('w:r')
-                if original_rPr is not None:
-                    # DEEP CLONE để preserve toàn bộ format properties
-                    cloned_rPr = copy.deepcopy(original_rPr)
-                    new_run.append(cloned_rPr)
-
+                run = OxmlElement('w:r')
+                if original_rPr is not None: run.append(copy.deepcopy(original_rPr))
                 t = OxmlElement('w:t')
-                if content.startswith(' ') or content.endswith(' '):
-                    t.set(qn('xml:space'), 'preserve')
-                t.text = content
-                new_run.append(t)
-                p_element.append(new_run)
-
-            else:  # Mail Merge Field
-                # Lấy ngữ cảnh từ đoạn text ngay trước đó
-                pre_text = full_text[:offset]
-                raw_label = self._generate_label(
-                    pre_text,
-                    paragraph.text if len(paragraph.text) > 10 else self.last_section_label
-                )
-                final_label = self._get_unique_label(raw_label)
-
-                # Phân tích casing từ chữ ngay trước placeholder để áp dụng format switch
-                parts = re.split(r'[:\-–—\._…□■\n]', pre_text)
-                recent_text = ""
-                for part in reversed(parts):
-                    if part.strip():
-                        recent_text = part.strip()
-                        break
-                
-                format_switch = "\\* MERGEFORMAT"
-                if recent_text:
-                    # Rút gọn chỉ lấy các chữ và số để đánh giá case
-                    alpha_text = " ".join(re.findall(r'\w+', recent_text, re.UNICODE))
-                    if alpha_text and alpha_text.isupper():
-                        format_switch = "\\* Upper"
-                    elif alpha_text and alpha_text.istitle():
-                        format_switch = "\\* Caps"
-
-                # Tạo cấu trúc w:fldSimple
-                fld_simple = OxmlElement('w:fldSimple')
-                fld_simple.set(qn('w:instr'), f' MERGEFIELD {final_label} {format_switch} \\z "{content}" ')
-
-                # Bọc trong fldSimple là một run để hiển thị placeholder text
-                nested_run = OxmlElement('w:r')
-                if original_rPr is not None:
-                    # DEEP CLONE để preserve toàn bộ format properties
-                    # Dùng deepcopy để copy hoàn toàn element với tất cả properties
-                    cloned_rPr = copy.deepcopy(original_rPr)
-                    nested_run.append(cloned_rPr)
-
+                if ' ' in (content[0], content[-1]): t.set(qn('xml:space'), 'preserve')
+                t.text, _ = content, run.append(t)
+                p_element.append(run)
+            else:
+                ctx = paragraph.text if len(paragraph.text) > 10 else self.last_section_label
+                label, sw = self._generate_label(full_text[:offset], ctx)
+                fld = OxmlElement('w:fldSimple')
+                fld.set(qn('w:instr'), f' MERGEFIELD {label} {sw} \\z "{content}" ')
+                run = OxmlElement('w:r')
+                if original_rPr is not None: run.append(copy.deepcopy(original_rPr))
                 t = OxmlElement('w:t')
-                t.text = f"«{final_label}»"
-                nested_run.append(t)
-                fld_simple.append(nested_run)
-
-                p_element.append(fld_simple)
+                t.text, _ = f"«{label}»", run.append(t)
+                fld.append(run)
+                p_element.append(fld)
 
     def convert(self, output_path):
         """Duyệt toàn bộ tài liệu để thực thi chuyển đổi
