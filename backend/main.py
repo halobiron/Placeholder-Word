@@ -101,6 +101,9 @@ async def convert_to_template(file: UploadFile = File(...)):
             detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024*1024)}MB"
         )
 
+    # Ensure upload directory exists
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    
     # Save uploaded file temporarily
     temp_path = UPLOAD_DIR / f"temp_{file.filename}"
     try:
@@ -191,11 +194,17 @@ async def merge_template(
                 active_f = set(json.loads(active_fields))
                 template_fields = [f for f in template_fields if f in active_f]
 
+            print(f"=== MERGE DEBUG ===")
+            print(f"Template fields to extract: {template_fields}")
+            print(f"Context (first 300 chars): {context[:300]}")
+
             data = _extract_data_from_context(
                 gemini_client,
                 context,
                 template_fields
             )
+            print(f"Extracted data: {data}")
+            print(f"=== END MERGE DEBUG ===")
         else:
             raise HTTPException(
                 status_code=400,
@@ -347,7 +356,10 @@ JSON:"""
         # Parse JSON response
         import json
         response_text = response.text.strip()
-
+        print(f"=== GEMINI RAW RESPONSE ===")
+        print(response_text)
+        print(f"=== END GEMINI RESPONSE ===")
+        
         # Try to extract JSON if there's extra text
         if "```json" in response_text:
             response_text = response_text.split("```json")[1].split("```")[0].strip()
@@ -355,16 +367,19 @@ JSON:"""
             response_text = response_text.split("```")[1].split("```")[0].strip()
 
         data = json.loads(response_text)
+        print(f"Parsed JSON keys: {list(data.keys())}")
 
         # Ensure all required fields are present
         # If missing, use empty string as default
         for field in template_fields:
             if field not in data:
+                print(f"  ⚠ Field '{field}' missing in Gemini response → set to empty")
                 data[field] = ""
 
         return data
 
     except Exception as e:
+        print(f"Extraction failed: {e}")
         # Fallback: return empty values for all fields
         return {field: "" for field in template_fields}
 

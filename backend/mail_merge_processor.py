@@ -32,7 +32,10 @@ class MailMergeProcessor:
         # Generate output path if not provided
         if output_path is None:
             template_id = str(uuid.uuid4())
-            output_path = Path("backend/uploads/templates") / f"{template_id}.docx"
+            base_dir = Path(__file__).parent
+            output_dir = base_dir / "uploads" / "templates"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / f"{template_id}.docx"
         else:
             output_path = Path(output_path)
             template_id = output_path.stem

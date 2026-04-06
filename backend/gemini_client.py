@@ -16,4 +16,4 @@ class GeminiClient:
             api_key: Gemini API key
         """
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('models/gemini-2.5-flash')
+        self.model = genai.GenerativeModel('models/gemini-3.1-flash-lite-preview')

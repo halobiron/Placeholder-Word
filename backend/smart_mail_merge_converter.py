@@ -21,8 +21,10 @@ class SmartMailMergeConverter:
             doc_path: Path to input .docx file
         """
         self.doc = Document(doc_path)
-        self.used_labels = {}
+        self.used_labels = {}   # base_label -> count of times used
+        self.all_field_names = []  # ordered list of all generated field names (incl. _2, _3)
         self.last_section_label = "field"
+        self.last_meaningful_text = "field"
         # Namespace chuẩn cho Word
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
@@ -48,8 +50,8 @@ class SmartMailMergeConverter:
         text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
         words = re.findall(r'\w+', text.lower())
 
-        # Lấy tối đa 4 từ quan trọng
-        slug = "_".join(words[:4])
+        # Lấy tối đa 4 từ quan trọng ở cuối (sát với placeholder nhất)
+        slug = "_".join(words[-4:]) if len(words) > 4 else "_".join(words)
         return slug if slug else None
 
     def _get_unique_label(self, base_label):
@@ -63,10 +65,12 @@ class SmartMailMergeConverter:
         """
         if base_label not in self.used_labels:
             self.used_labels[base_label] = 1
-            return base_label
+            result = base_label
         else:
             self.used_labels[base_label] += 1
-            return f"{base_label}_{self.used_labels[base_label]}"
+            result = f"{base_label}_{self.used_labels[base_label]}"
+        self.all_field_names.append(result)
+        return result
 
     def _generate_label(self, pre_text, para_context):
         """Tạo field name và format switch dựa trên text ngay trước placeholder"""
@@ -112,7 +116,8 @@ class SmartMailMergeConverter:
                 t.text, _ = content, run.append(t)
                 p_element.append(run)
             else:
-                ctx = paragraph.text if len(paragraph.text) > 10 else self.last_section_label
+                text_no_dots = re.sub(r'([._]{3,}|…+[._…]*)', '', paragraph.text).strip()
+                ctx = paragraph.text if len(text_no_dots) > 5 else self.last_meaningful_text
                 label, sw = self._generate_label(full_text[:offset], ctx)
                 fld = OxmlElement('w:fldSimple')
                 fld.set(qn('w:instr'), f' MERGEFIELD {label} {sw} \\z "{content}" ')
@@ -144,14 +149,23 @@ class SmartMailMergeConverter:
 
             self._process_paragraph(para)
 
+            # Cập nhật context text để dùng cho paragraph sau nếu cần
+            cleaned = re.sub(r'([._]{3,}|…+[._…]*)', ' ', text_strip).strip()
+            if cleaned and any(c.isalpha() for c in cleaned):
+                self.last_meaningful_text = cleaned
+
         # Xử lý Table nếu có
         for table in self.doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
+                        text_strip = para.text.strip()
                         self._process_paragraph(para)
+                        cleaned = re.sub(r'([._]{3,}|…+[._…]*)', ' ', text_strip).strip()
+                        if cleaned and any(c.isalpha() for c in cleaned):
+                            self.last_meaningful_text = cleaned
 
         self.doc.save(output_path)
         print(f"Chuyển đổi hoàn tất! File đã lưu tại: {output_path}")
 
-        return list(self.used_labels.keys())
+        return self.all_field_names

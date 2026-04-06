@@ -23,8 +23,9 @@ class MergeExecutor:
             result_dir: Directory to save merged documents
         """
         if result_dir is None:
-            # Use relative path from current working directory
-            self.result_dir = Path("uploads/results")
+            # Determine directory relative to script
+            base_dir = Path(__file__).parent
+            self.result_dir = base_dir / "uploads" / "results"
         else:
             self.result_dir = Path(result_dir)
 
