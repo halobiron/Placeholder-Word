@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import FileUpload from './components/FileUpload'
-import { mergeTemplate, getPreview, updateTemplate } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -16,6 +16,18 @@ function App() {
   const [templateNeedsUpdate, setTemplateNeedsUpdate] = useState(false) // Track if template was modified
   const [renameMap, setRenameMap] = useState({}) // Track oldName -> currentName mapping
   const [error, setError] = useState(null)
+  const [suggestions, setSuggestions] = useState([]) // AI suggestions for missing placeholders
+  const [analyzing, setAnalyzing] = useState(false) // AI analysis in progress
+  const [selectedSuggestions, setSelectedSuggestions] = useState([]) // Suggestions user wants to apply
+  const [isAddMode, setIsAddMode] = useState(false) // Manual add placeholder mode
+  const [selectedBlockIndex, setSelectedBlockIndex] = useState(null) // Selected block for adding placeholder
+  const [selectedCellIndex, setSelectedCellIndex] = useState(null) // Selected cell index within table (for table cells)
+  const [selectedTableBlockIndex, setSelectedTableBlockIndex] = useState(null) // Table block index when cell is selected
+  const [selectedParaInCell, setSelectedParaInCell] = useState(null) // Selected paragraph index within cell (for table cell paragraphs)
+  const [newFieldName, setNewFieldName] = useState('') // New placeholder name
+  const [newFieldPosition, setNewFieldPosition] = useState('right') // Position for new placeholder (left/right/new_line)
+  const [useGeminiForNaming, setUseGeminiForNaming] = useState(false) // Use Gemini to suggest field name
+  const [editedSuggestions, setEditedSuggestions] = useState({}) // Track user edits for suggestions: {block_index-suggested_name-position: {suggested_name: string, position: string}}
 
   // Extract placeholders from HTML
   const extractFields = (html) => {
@@ -45,13 +57,125 @@ function App() {
       span.onclick = (e) => {
         e.preventDefault()
         e.stopPropagation()
+
+        // If in add mode, don't rename - show message
+        if (isAddMode) {
+          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
+          return
+        }
+
         const newName = prompt('Đổi tên placeholder:', fieldName)
         if (newName?.trim() && newName.trim() !== fieldName) {
           renameField(fieldName, newName.trim())
         }
       }
     })
-  }, [editorHtml, step]) // Add step to re-attach handlers when returning to preview
+
+    // Add click handlers for block selection in add mode
+    if (isAddMode) {
+      // First, remove existing handlers
+      editor.querySelectorAll('[data-block-index], [data-cell-index]').forEach(element => {
+        element.onclick = null
+        element.style.cursor = ''
+        element.style.outline = ''
+      })
+
+      // Handle block-level clicks (paragraphs, tables)
+      // Allow clicking on empty lines too (data-block-index="-1")
+      editor.querySelectorAll('[data-block-index]:not([data-cell-index])').forEach(element => {
+        const blockIndex = parseInt(element.getAttribute('data-block-index'))
+        const blockType = element.getAttribute('data-type')
+
+        // Skip empty paragraphs that are not in tables
+        // But allow selecting empty paragraphs within tables
+        if (blockIndex === -1 && !element.closest('[data-cell-index]')) {
+          element.style.cursor = 'default'
+          return
+        }
+
+        element.style.cursor = 'crosshair'
+        element.onclick = (e) => {
+          e.preventDefault()
+          e.stopPropagation()
+
+          const blockIndex = parseInt(element.getAttribute('data-block-index'))
+          const blockType = element.getAttribute('data-type')
+
+          setSelectedBlockIndex(blockIndex)
+          setSelectedCellIndex(null) // Reset cell index when selecting block
+          setSelectedTableBlockIndex(null)
+          setSelectedParaInCell(null) // Reset paragraph index
+
+          // Highlight selected block
+          editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
+            el.style.outline = ''
+          })
+          element.style.outline = '2px solid #8b5cf6'
+
+          setError(`Đã chọn ${blockType === 'table' ? 'bảng' : 'đoạn'} #${blockIndex}. Nhập tên placeholder và nhấn "Thêm".`)
+        }
+      })
+
+      // Handle cell-level clicks within tables
+      // Also handle paragraph-level clicks within table cells for more precise targeting
+      editor.querySelectorAll('[data-cell-index]').forEach(element => {
+        element.style.cursor = 'crosshair'
+        element.onclick = (e) => {
+          e.preventDefault()
+          e.stopPropagation()
+
+          const cellIndex = parseInt(element.getAttribute('data-cell-index'))
+          const tableBlockIndex = parseInt(element.getAttribute('data-table-block'))
+
+          setSelectedBlockIndex(tableBlockIndex) // Set block index to table's block index
+          setSelectedCellIndex(cellIndex) // Set cell index within the table
+          setSelectedTableBlockIndex(tableBlockIndex)
+          setSelectedParaInCell(null) // Reset paragraph index when clicking whole cell
+
+          // Highlight selected cell
+          editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
+            el.style.outline = ''
+          })
+          element.style.outline = '2px solid #8b5cf6'
+
+          setError(`Đã chọn ô #${cellIndex} trong bảng #${tableBlockIndex}. Nhập tên placeholder và nhấn "Thêm".`)
+        }
+      })
+
+      // Handle paragraph-level clicks within table cells (for empty lines)
+      editor.querySelectorAll('.cell-paragraph').forEach(element => {
+        element.style.cursor = 'crosshair'
+        element.onclick = (e) => {
+          e.preventDefault()
+          e.stopPropagation()
+
+          const cellIndex = parseInt(element.getAttribute('data-cell'))
+          const tableBlockIndex = parseInt(element.getAttribute('data-table'))
+          const paraInCell = parseInt(element.getAttribute('data-para-in-cell'))
+
+          setSelectedBlockIndex(tableBlockIndex) // Set block index to table's block index
+          setSelectedCellIndex(cellIndex) // Set cell index within the table
+          setSelectedTableBlockIndex(tableBlockIndex)
+          setSelectedParaInCell(paraInCell) // Set paragraph index within cell
+
+          // Highlight selected paragraph
+          editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
+            el.style.outline = ''
+          })
+          element.style.outline = '2px solid #8b5cf6'
+
+          setError(`Đã chọn dòng #${paraInCell} trong ô #${cellIndex} của bảng #${tableBlockIndex}. Nhập tên placeholder và nhấn "Thêm".`)
+        }
+      })
+    } else {
+      // Remove highlight and handlers when not in add mode
+      editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(element => {
+        element.style.cursor = ''
+        element.style.outline = ''
+        element.onclick = null
+      })
+    }
+  }, [editorHtml, step, isAddMode]) // Add isAddMode dependency
 
   // Rename placeholder
   const renameField = (oldName, newName) => {
@@ -80,28 +204,53 @@ function App() {
   }
 
   // Delete placeholder
-  const deleteField = (fieldName) => {
+  const deleteField = async (fieldName) => {
     const editor = document.getElementById('document-editor')
     if (!editor) return
 
-    // Replace each matching span with its original text
-    editor.querySelectorAll(`.mail-merge-placeholder[data-field="${fieldName}"]`).forEach(span => {
-      const originalText = span.getAttribute('data-original') || ''
-      span.outerHTML = originalText
-    })
+    // Store current state for rollback
+    const oldHtml = editorHtml
+    const oldFields = [...fields]
+    const oldRenameMap = { ...renameMap }
 
-    const newMap = { ...renameMap }
-    for (const original in newMap) {
-      if (newMap[original] === fieldName) {
-        newMap[original] = null // marked as deleted
+    try {
+      // Replace each matching span with its original text
+      editor.querySelectorAll(`.mail-merge-placeholder[data-field="${fieldName}"]`).forEach(span => {
+        const originalText = span.getAttribute('data-original') || ''
+        span.outerHTML = originalText
+      })
+
+      const newMap = { ...renameMap }
+      for (const original in newMap) {
+        if (newMap[original] === fieldName) {
+          newMap[original] = null // marked as deleted
+        }
       }
-    }
-    setRenameMap(newMap)
 
-    const newHtml = editor.innerHTML
-    setEditorHtml(newHtml)
-    setFields(extractFields(newHtml))
-    setTemplateNeedsUpdate(true) // Mark template as modified
+      const newHtml = editor.innerHTML
+
+      // IMPORTANT: Call updateTemplate FIRST before updating state
+      // This ensures deletion is saved to DOCX before UI changes
+      await updateTemplate(templateId, newMap, newHtml)
+
+      // Only update local state after successful server update
+      setRenameMap(newMap)
+      setEditorHtml(newHtml)
+      setFields(extractFields(newHtml))
+      setTemplateNeedsUpdate(false) // Reset flag since we just updated
+
+    } catch (err) {
+      console.error('Failed to update template after deletion:', err)
+      setError('Xóa placeholder thất bại. Thao tác đã được hoàn tác.')
+
+      // Rollback UI changes
+      editor.innerHTML = oldHtml
+      setEditorHtml(oldHtml)
+      setFields(oldFields)
+      setRenameMap(oldRenameMap)
+
+      setTimeout(() => setError(null), 3000)
+    }
   }
 
   // Handle upload complete
@@ -110,12 +259,12 @@ function App() {
     setEditorHtml(data.previewHtml)
     setFields(data.fields)
     setOriginalFields(data.fields) // Store original fields
-    
+
     // Initialize renameMap mapping original fields to themselves
     const initMap = {}
     data.fields.forEach(f => initMap[f] = f)
     setRenameMap(initMap)
-    
+
     setTemplateNeedsUpdate(false) // Reset update flag
     setStep('preview')
   }
@@ -164,6 +313,178 @@ function App() {
     }
   }
 
+  // AI Analysis for missing placeholders
+  const handleAIAnalyze = async () => {
+    if (!templateId) return
+
+    setAnalyzing(true)
+    setError(null)
+
+    try {
+      const result = await analyzeTemplate(templateId)
+      setSuggestions(result.suggestions || [])
+      setSelectedSuggestions([]) // Reset selection
+    } catch (err) {
+      setError(err.response?.data?.detail || 'AI phân tích thất bại. Kiểm tra GEMINI_API_KEY.')
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  // Apply AI suggestions
+  const handleApplySuggestions = async () => {
+    if (!templateId || selectedSuggestions.length === 0) return
+
+    setAnalyzing(true)
+    setError(null)
+
+    try {
+      // Apply edits to selected suggestions before sending
+      const editedSuggestionsToApply = selectedSuggestions.map(s => {
+        const uniqueId = `${s.block_index}-${s.suggested_name}-${s.position}`
+        const edits = editedSuggestions[uniqueId]
+        return {
+          ...s,
+          suggested_name: edits?.suggested_name || s.suggested_name,
+          position: edits?.position || s.position
+        }
+      })
+
+      const result = await applySuggestions(templateId, editedSuggestionsToApply)
+
+      // Reload template to get updated fields
+      const templateInfo = await getTemplateInfo(templateId)
+      setEditorHtml(templateInfo.html_preview)
+      setFields(templateInfo.fields)
+      setOriginalFields(templateInfo.fields)
+
+      // Clear suggestions and edits after successful apply
+      setSuggestions([])
+      setSelectedSuggestions([])
+      setEditedSuggestions({})
+
+      // Show success message
+      setError(`✅ Đã thêm thành công ${result.successful} placeholder!`)
+      setTimeout(() => setError(null), 3000)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Áp dụng suggestions thất bại')
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  // Update suggestion edit
+  const updateSuggestionEdit = (suggestion, field, value) => {
+    const uniqueId = `${suggestion.block_index}-${suggestion.suggested_name}-${suggestion.position}`
+    setEditedSuggestions(prev => ({
+      ...prev,
+      [uniqueId]: {
+        ...prev[uniqueId],
+        [field]: value
+      }
+    }))
+  }
+
+  // Get edited suggestion (with user edits applied)
+  const getEditedSuggestion = (suggestion) => {
+    const uniqueId = `${suggestion.block_index}-${suggestion.suggested_name}-${suggestion.position}`
+    const edits = editedSuggestions[uniqueId]
+    return {
+      ...suggestion,
+      suggested_name: edits?.suggested_name || suggestion.suggested_name,
+      position: edits?.position || suggestion.position
+    }
+  }
+
+  // Toggle suggestion selection
+  const toggleSuggestion = (suggestion) => {
+    // Use unique identifier: block_index + suggested_name + position
+    // This handles multiple suggestions in the same block (e.g., table cells)
+    const uniqueId = `${suggestion.block_index}-${suggestion.suggested_name}-${suggestion.position}`
+    const editedSuggestion = getEditedSuggestion(suggestion)
+
+    const index = selectedSuggestions.findIndex(s =>
+      `${s.block_index}-${s.suggested_name}-${s.position}` === uniqueId
+    )
+    if (index >= 0) {
+      setSelectedSuggestions(prev => prev.filter((_, i) => i !== index))
+    } else {
+      setSelectedSuggestions(prev => [...prev, editedSuggestion])
+    }
+  }
+
+  // Handle manual placeholder addition
+  const handleAddPlaceholder = async () => {
+    if (!templateId || selectedBlockIndex === null) {
+      setError('Vui lòng chọn vị trí để thêm placeholder')
+      return
+    }
+
+    if (!newFieldName.trim()) {
+      setError('Vui lòng nhập tên placeholder')
+      return
+    }
+
+    setAnalyzing(true)
+    setError(null)
+
+    try {
+      const result = await addPlaceholder(
+        templateId,
+        selectedBlockIndex,
+        newFieldName.trim(),
+        newFieldPosition,
+        useGeminiForNaming,
+        selectedCellIndex, // Pass cell index if selecting a table cell
+        selectedParaInCell // Pass paragraph index within cell for precise targeting
+      )
+
+      // Update UI with new data
+      setEditorHtml(result.html_preview)
+      setFields(result.updated_fields)
+      setOriginalFields(result.updated_fields)
+
+      // Reset add mode
+      setIsAddMode(false)
+      setSelectedBlockIndex(null)
+      setSelectedCellIndex(null)
+      setSelectedTableBlockIndex(null)
+      setSelectedParaInCell(null)
+      setNewFieldName('')
+      setNewFieldPosition('right')
+      setUseGeminiForNaming(false)
+
+      // Show success message
+      setError(`✅ Đã thêm placeholder «${result.field_name}» thành công!`)
+      setTimeout(() => setError(null), 3000)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Thêm placeholder thất bại')
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  // Cancel add mode
+  const handleCancelAddMode = () => {
+    setIsAddMode(false)
+    setSelectedBlockIndex(null)
+    setSelectedCellIndex(null)
+    setSelectedTableBlockIndex(null)
+    setSelectedParaInCell(null)
+    setNewFieldName('')
+    setNewFieldPosition('inline')
+    setUseGeminiForNaming(false)
+    setError(null)
+
+    // Remove highlights
+    const editor = document.getElementById('document-editor')
+    if (editor) {
+      editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
+        el.style.outline = ''
+      })
+    }
+  }
+
   // Reset
   const handleReset = () => {
     setStep('upload')
@@ -175,6 +496,7 @@ function App() {
     setResultId(null)
     setPreviewHtml(null)
     setError(null)
+    setEditedSuggestions({}) // Clear suggestion edits
   }
 
   return (
@@ -228,6 +550,271 @@ function App() {
                 </div>
               )}
 
+              {/* AI Analysis Section */}
+              <div className="p-4 bg-purple-50 border border-purple-200 rounded-lg">
+                <div className="flex justify-between items-center mb-3">
+                  <div>
+                    <p className="text-sm font-semibold text-purple-900">
+                      🤖 AI Phân tích - Tìm placeholder bị thiếu
+                    </p>
+                    <p className="text-xs text-purple-700">
+                      Gemini sẽ phân tích tài liệu và gợi ý các placeholder cần thêm
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleAIAnalyze}
+                    disabled={analyzing}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg disabled:opacity-50 text-sm font-medium"
+                  >
+                    {analyzing ? '⏳ Đang phân tích...' : '🔍 Phân tích'}
+                  </button>
+                </div>
+
+                {/* Manual Add Placeholder Section */}
+                <div className="mt-4 pt-4 border-t border-purple-200">
+                  <div className="flex justify-between items-center mb-3">
+                    <div>
+                      <p className="text-sm font-semibold text-purple-900">
+                        ✏️ Thêm Placeholder Thủ Công
+                      </p>
+                      <p className="text-xs text-purple-700">
+                        Click vào vị trí trong tài liệu để thêm placeholder mới
+                      </p>
+                    </div>
+                    {!isAddMode ? (
+                      <button
+                        onClick={() => setIsAddMode(true)}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium"
+                      >
+                        ➕ Thêm Placeholder
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleCancelAddMode}
+                        className="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg text-sm font-medium"
+                      >
+                        ✕ Hủy
+                      </button>
+                    )}
+                  </div>
+
+                  {isAddMode && (
+                    <div className="mt-3 p-3 bg-white border border-purple-300 rounded-lg">
+                      {selectedBlockIndex === null ? (
+                        <p className="text-sm text-gray-600">
+                          👆 Click vào vị trí trong tài liệu bên dưới để chọn nơi thêm placeholder
+                        </p>
+                      ) : (
+                        <div className="space-y-3">
+                          <p className="text-sm text-green-700 font-semibold">
+                            {selectedParaInCell !== null
+                              ? `✓ Đã chọn dòng #${selectedParaInCell} trong ô #${selectedCellIndex} của bảng #${selectedTableBlockIndex}`
+                              : selectedCellIndex !== null
+                                ? `✓ Đã chọn ô #${selectedCellIndex} trong bảng #${selectedTableBlockIndex}`
+                                : `✓ Đã chọn vị trí #${selectedBlockIndex}`
+                            }
+                          </p>
+
+                          <div>
+                            <label className="text-xs font-semibold text-gray-700 block mb-1">
+                              Tên placeholder:
+                            </label>
+                            <input
+                              type="text"
+                              value={newFieldName}
+                              onChange={(e) => setNewFieldName(e.target.value)}
+                              placeholder="ten_placeholder"
+                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-xs font-semibold text-gray-700 block mb-1">
+                              Vị trí chèn:
+                            </label>
+                            <select
+                              value={newFieldPosition}
+                              onChange={(e) => setNewFieldPosition(e.target.value)}
+                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            >
+                              <option value="left">⬅️ Trước text</option>
+                              <option value="right">➡️ Sau text</option>
+                              <option value="new_line">⬇️ Xuống dòng</option>
+                            </select>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              id="useGemini"
+                              checked={useGeminiForNaming}
+                              onChange={(e) => setUseGeminiForNaming(e.target.checked)}
+                              className="rounded"
+                            />
+                            <label htmlFor="useGemini" className="text-xs text-gray-700">
+                              Dùng Gemini để gợi ý tên tốt hơn
+                            </label>
+                          </div>
+
+                          <button
+                            onClick={handleAddPlaceholder}
+                            disabled={analyzing || !newFieldName.trim()}
+                            className="w-full px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                          >
+                            {analyzing ? '⏳ Đang thêm...' : '✓ Thêm Placeholder'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Suggestions Display */}
+              {suggestions.length > 0 && (
+                <div className="mt-4 p-3 bg-white border border-purple-300 rounded-lg">
+                  <div className="flex justify-between items-center mb-2">
+                    <p className="text-sm font-semibold text-purple-900">
+                      Gợi ý ({suggestions.length}):
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setSelectedSuggestions(suggestions)}
+                        className="px-3 py-1 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded text-xs"
+                      >
+                        Chọn tất cả
+                      </button>
+                      <button
+                        onClick={() => setSelectedSuggestions([])}
+                        className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-xs"
+                      >
+                        Bỏ chọn
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {suggestions.map((s, idx) => {
+                      const uniqueId = `${s.block_index}-${s.suggested_name}-${s.position}`
+                      const edits = editedSuggestions[uniqueId] || {}
+                      const editedName = edits.suggested_name || s.suggested_name
+                      const editedPosition = edits.position || s.position
+
+                      const isSelected = selectedSuggestions.some(sel =>
+                        `${sel.block_index}-${sel.suggested_name}-${sel.position}` === uniqueId
+                      )
+                      return (
+                        <div
+                          key={idx}
+                          className={`p-2 border rounded transition-colors ${isSelected
+                              ? 'bg-purple-100 border-purple-400'
+                              : 'bg-gray-50 border-gray-200 hover:bg-gray-100'
+                            }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleSuggestion(s)}
+                              className="mt-1"
+                            />
+                            <div className="flex-1">
+                              {/* Editable name and position */}
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {/* Editable name */}
+                                <div className="flex items-center gap-1">
+                                  <span className="font-mono text-sm">«</span>
+                                  <input
+                                    type="text"
+                                    value={editedName}
+                                    onChange={(e) => updateSuggestionEdit(s, 'suggested_name', e.target.value)}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`font-mono text-sm font-semibold border rounded px-1 ${editedName !== s.suggested_name ? 'border-yellow-400 bg-yellow-50' : 'border-transparent bg-transparent'}`}
+                                    style={{ width: `${Math.max(editedName.length * 8, 80)}px` }}
+                                  />
+                                  <span className="font-mono text-sm">»</span>
+                                  {editedName !== s.suggested_name && (
+                                    <span className="text-xs text-yellow-600">✏️</span>
+                                  )}
+                                </div>
+
+                                {/* Editable position */}
+                                <select
+                                  value={editedPosition}
+                                  onChange={(e) => updateSuggestionEdit(s, 'position', e.target.value)}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className={`text-xs px-2 py-0.5 rounded border ${editedPosition !== s.position ? 'border-yellow-400 bg-yellow-50' : 'border-transparent bg-transparent'} ${
+                                    editedPosition === 'left'
+                                      ? 'bg-blue-100 text-blue-700'
+                                      : editedPosition === 'right'
+                                        ? 'bg-purple-100 text-purple-700'
+                                        : 'bg-orange-100 text-orange-700'
+                                  }`}
+                                >
+                                  <option value="left">⬅️ Trước text</option>
+                                  <option value="right">➡️ Sau text</option>
+                                  <option value="new_line">⬇️ Xuống dòng</option>
+                                </select>
+
+                                {/* Confidence badge */}
+                                <span className={`px-2 py-0.5 rounded text-xs ${s.confidence === 'high'
+                                    ? 'bg-green-100 text-green-700'
+                                    : s.confidence === 'medium'
+                                      ? 'bg-yellow-100 text-yellow-700'
+                                      : 'bg-gray-100 text-gray-700'
+                                  }`}>
+                                  {s.confidence}
+                                </span>
+
+                                {/* Field type badge */}
+                                <span className="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">
+                                  {s.field_type}
+                                </span>
+                              </div>
+
+                              {/* Context with surrounding info */}
+                              <div className="mt-2 p-2 bg-gray-50 rounded text-xs">
+                                {s.before_context && s.before_context.length > 0 && (
+                                  <div className="text-gray-500 mb-1">
+                                    <span className="font-semibold">Trước:</span> {s.before_context.join(' ← ')}
+                                  </div>
+                                )}
+                                <div className="font-semibold text-gray-700 my-1">
+                                  → {s.context.substring(0, 80)}{s.context.length > 80 ? '...' : ''}
+                                </div>
+                                {s.after_context && s.after_context.length > 0 && (
+                                  <div className="text-gray-500 mt-1">
+                                    <span className="font-semibold">Sau:</span> {s.after_context.join(' → ')}
+                                  </div>
+                                )}
+                              </div>
+
+                              <p className="text-xs text-gray-500 mt-1">
+                                {s.reason}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {selectedSuggestions.length > 0 && (
+                    <div className="mt-3 pt-3 border-t">
+                      <button
+                        onClick={handleApplySuggestions}
+                        disabled={analyzing}
+                        className="w-full px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg disabled:opacity-50 font-medium"
+                      >
+                        {analyzing
+                          ? '⏳ Đang áp dụng...'
+                          : `✓ Áp dụng ${selectedSuggestions.length} gợi ý`}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <h3 className="text-lg font-semibold">Tài liệu</h3>
@@ -236,17 +823,50 @@ function App() {
                   id="document-editor"
                   contentEditable
                   className="border border-gray-300 rounded-lg p-6 bg-white min-h-[400px] overflow-auto focus:ring-2 focus:ring-blue-500"
-                  style={{maxHeight: '600px'}}
+                  style={{ maxHeight: '600px' }}
                   suppressContentEditableWarning={true}
-                  onInput={(e) => {
+                  onInput={async (e) => {
                     const newHtml = e.target.innerHTML
+                    const newFields = extractFields(newHtml)
+
+                    // Check if any placeholders were deleted
+                    const deletedFields = fields.filter(f => !newFields.includes(f))
+
                     setEditorHtml(newHtml)
-                    setFields(extractFields(newHtml))
+                    setFields(newFields)
+
+                    // If placeholders were deleted, update template immediately
+                    if (deletedFields.length > 0) {
+                      try {
+                        // Update renameMap to mark deleted fields
+                        const newMap = { ...renameMap }
+                        deletedFields.forEach(fieldName => {
+                          for (const original in newMap) {
+                            if (newMap[original] === fieldName) {
+                              newMap[original] = null // marked as deleted
+                            }
+                          }
+                        })
+
+                        // Save to server
+                        await updateTemplate(templateId, newMap, newHtml)
+                        setRenameMap(newMap)
+                        setTemplateNeedsUpdate(false)
+
+                        // Show success message
+                        setError(`✅ Đã xóa ${deletedFields.length} placeholder`)
+                        setTimeout(() => setError(null), 2000)
+                      } catch (err) {
+                        console.error('Failed to update template after deletion:', err)
+                        setError('⚠️ Xóa placeholder thất bại. Thay đổi chưa được lưu.')
+                        setTimeout(() => setError(null), 3000)
+                      }
+                    }
                   }}
                   dangerouslySetInnerHTML={{ __html: editorHtml }}
                 />
                 <p className="text-xs text-gray-500 mt-2">
-                  💡 Click vào placeholder để đổi tên. Muốn thêm placeholder mới, upload lại file .docx với dấu chấm.
+                  💡 Click vào placeholder để đổi tên. Click "➕ Thêm Placeholder" để thêm placeholder thủ công vào vị trí bất kỳ.
                 </p>
               </div>
 
@@ -412,6 +1032,27 @@ function App() {
           .mail-merge-placeholder:hover {
             transform: scale(1.05);
             box-shadow: 0 2px 8px rgba(74, 144, 217, 0.3);
+          }
+          /* Cell paragraphs - ensure each line is separate */
+          .cell-paragraph {
+            display: block;
+            min-height: 1.2em;
+            margin: 4px 0;
+            padding: 2px;
+            border-radius: 2px;
+            transition: background-color 0.2s;
+          }
+          .cell-paragraph:hover {
+            background-color: rgba(139, 92, 246, 0.1);
+          }
+          .cell-paragraph[outline] {
+            background-color: rgba(139, 92, 246, 0.2);
+          }
+          /* Table cells styling */
+          .docx-table td p,
+          .docx-table th p {
+            margin: 4px 0;
+            line-height: 1.4;
           }
         `}</style>
       </div>

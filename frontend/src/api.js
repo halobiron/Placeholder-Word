@@ -14,6 +14,36 @@ export const convertDocx = async (file) => {
   return response.data
 }
 
+export const analyzeTemplate = async (templateId) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+
+  const response = await axios.post(`${API_BASE}/analyze-template`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const applySuggestions = async (templateId, suggestions) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('suggestions', JSON.stringify(suggestions))
+
+  const response = await axios.post(`${API_BASE}/apply-suggestions`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const getTemplateInfo = async (templateId) => {
+  const response = await axios.get(`${API_BASE}/template-info/${templateId}`)
+  return response.data
+}
+
 export const mergeTemplate = async (templateId, data, isDirectValues = false, activeFields = null) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
@@ -54,6 +84,28 @@ export const updateTemplate = async (templateId, renameMap, editorHtml) => {
   formData.append('editor_html', editorHtml)
 
   const response = await axios.post(`${API_BASE}/update-template`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const addPlaceholder = async (templateId, blockIndex, fieldName, position = 'right', useGeminiSuggestion = false, cellIndex = null, paraInCell = null) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('block_index', blockIndex)
+  formData.append('field_name', fieldName)
+  formData.append('position', position)
+  formData.append('use_gemini_suggestion', useGeminiSuggestion)
+  if (cellIndex !== null) {
+    formData.append('cell_index', cellIndex)
+  }
+  if (paraInCell !== null) {
+    formData.append('para_in_cell', paraInCell)
+  }
+
+  const response = await axios.post(`${API_BASE}/add-placeholder`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },

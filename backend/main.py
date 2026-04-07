@@ -30,8 +30,18 @@ TEMPLATE_DIR = UPLOAD_DIR / "templates"
 RESULT_DIR = UPLOAD_DIR / "results"
 
 # Ensure directories exist
-TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
-RESULT_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_directories():
+    """Create required directories if they don't exist"""
+    dirs_to_create = [UPLOAD_DIR, TEMPLATE_DIR, RESULT_DIR]
+    for directory in dirs_to_create:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            print(f"✓ Directory ensured: {directory}")
+        except Exception as e:
+            print(f"✗ Failed to create directory {directory}: {e}")
+
+# Create directories on startup
+ensure_directories()
 
 # Configuration
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
@@ -44,6 +54,15 @@ app = FastAPI(
     description="Convert Word documents with placeholders to Mail Merge templates",
     version="1.0.0"
 )
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Ensure directories exist on startup"""
+    ensure_directories()
+    print(f"✓ Application started. Uploads directory: {UPLOAD_DIR}")
+    print(f"✓ Templates directory: {TEMPLATE_DIR}")
+    print(f"✓ Results directory: {RESULT_DIR}")
 
 # Configure CORS
 app.add_middleware(
@@ -101,17 +120,17 @@ async def convert_to_template(file: UploadFile = File(...)):
             detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024*1024)}MB"
         )
 
-    # Ensure upload directory exists
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    
+    # Ensure directories exist before processing
+    ensure_directories()
+
     # Save uploaded file temporarily
     temp_path = UPLOAD_DIR / f"temp_{file.filename}"
     try:
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        # Process document with SmartMailMergeConverter (no API key needed)
-        processor = MailMergeProcessor()
+        # Process document with SmartMailMergeConverter (with Gemini API key for smart naming)
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path))
@@ -210,6 +229,9 @@ async def merge_template(
                 status_code=400,
                 detail="Either 'context' or 'field_values' must be provided"
             )
+
+        # Ensure result directory exists
+        ensure_directories()
 
         # Execute merge
         result_path, result_id = executor.execute_merge(str(template_path), data)
@@ -316,8 +338,37 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
                     count_updated += 1
                 elif new_name is None:
                     count_deleted += 1
-                    # It was deleted by the user. DO NOT remove it from DOCX
-                    # We just leave it as is so it falls back to \z
+                    # It was deleted by the user. Replace with original text from \z switch
+                    z_match = re.search(r'\\z\s*"([^"]*)"', instr)
+                    original_text = z_match.group(1) if z_match else ""
+
+                    # Get parent element to replace fldSimple with text
+                    parent = fld.getparent()
+
+                    # Create a new run (w:r) element with the original text
+                    from docx.oxml import OxmlElement
+                    from docx.oxml.ns import qn
+
+                    # Try to get style from the fldSimple's run
+                    rPr = None
+                    existing_r = fld.find(f"{w_ns}r")
+                    if existing_r is not None:
+                        rPr = existing_r.find(f"{w_ns}rPr")
+
+                    # Create new run with original text
+                    new_r = OxmlElement('w:r')
+                    if rPr is not None:
+                        import copy
+                        new_r.append(copy.deepcopy(rPr))
+
+                    new_t = OxmlElement('w:t')
+                    if original_text and (original_text[0] in ' \t\n' or original_text[-1] in ' \t\n'):
+                        new_t.set(qn('xml:space'), 'preserve')
+                    new_t.text = original_text
+                    new_r.append(new_t)
+
+                    # Replace fldSimple with the new run
+                    parent.replace(fld, new_r)
 
         doc.save(str(template_path))
         return {"template_id": template_id, "updated": True, 
@@ -382,6 +433,350 @@ JSON:"""
         print(f"Extraction failed: {e}")
         # Fallback: return empty values for all fields
         return {field: "" for field in template_fields}
+
+
+@app.post("/analyze-template")
+async def analyze_template(template_id: str = Form(...)):
+    """Analyze template with AI to detect missing placeholders
+
+    Args:
+        template_id: ID of template to analyze
+
+    Returns:
+        JSON with AI suggestions for missing placeholders
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Check API key
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key_here":
+        raise HTTPException(
+            status_code=500,
+            detail="GEMINI_API_KEY not configured. Please set it in .env file"
+        )
+
+    try:
+        # Get existing fields from template
+        executor = MergeExecutor()
+        existing_fields = executor.get_template_fields(str(template_path))
+
+        # Extract structured content for analysis
+        processor = MailMergeProcessor()
+        structured_content = processor.extract_structured_content(str(template_path))
+
+        if not structured_content:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to extract content from template"
+            )
+
+        # Analyze with Gemini
+        gemini_client = GeminiClient(GEMINI_API_KEY)
+        analysis = gemini_client.analyze_document_for_placeholders(
+            structured_content,
+            existing_fields
+        )
+
+        suggestions = analysis.get("suggestions", [])
+
+        return {
+            "template_id": template_id,
+            "existing_fields": existing_fields,
+            "existing_field_count": len(existing_fields),
+            "suggestions": suggestions,
+            "suggestion_count": len(suggestions),
+            "structured_content_preview": structured_content[:5]  # First 5 blocks for reference
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analysis failed: {str(e)}"
+        )
+
+
+@app.post("/apply-suggestions")
+async def apply_ai_suggestions(
+    template_id: str = Form(...),
+    suggestions: str = Form(...)  # JSON string of suggestions to apply
+):
+    """Apply AI-generated placeholder suggestions to template
+
+    Args:
+        template_id: ID of template to update
+        suggestions: JSON array of suggestions to apply
+
+    Returns:
+        JSON with update results
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        # Parse suggestions
+        import json
+        suggestions_list = json.loads(suggestions)
+
+        if not suggestions_list:
+            raise HTTPException(
+                status_code=400,
+                detail="No suggestions provided"
+            )
+
+        # Apply each suggestion
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+        results = {
+            "template_id": template_id,
+            "total_suggestions": len(suggestions_list),
+            "successful": 0,
+            "failed": 0,
+            "applied_fields": []
+        }
+
+        for suggestion in suggestions_list:
+            block_index = suggestion.get("block_index")
+            field_name = suggestion.get("suggested_name")
+            context = suggestion.get("context", "")
+            before_context = suggestion.get("before_context", [])
+            after_context = suggestion.get("after_context", [])
+            position = suggestion.get("position", "right")
+
+            if block_index is None or not field_name:
+                results["failed"] += 1
+                continue
+
+            # Inject placeholder with full context and position
+            success = processor.inject_placeholder_at_location(
+                str(template_path),
+                block_index,
+                field_name,
+                context,
+                before_context,
+                after_context,
+                position
+            )
+
+            if success:
+                results["successful"] += 1
+                results["applied_fields"].append(field_name)
+            else:
+                results["failed"] += 1
+
+        # Get updated field list
+        executor = MergeExecutor()
+        updated_fields = executor.get_template_fields(str(template_path))
+
+        results["updated_field_count"] = len(updated_fields)
+        results["updated_fields"] = updated_fields
+
+        return results
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to apply suggestions: {str(e)}"
+        )
+
+
+@app.post("/add-placeholder")
+async def add_placeholder_manual(
+    template_id: str = Form(...),
+    block_index: int = Form(...),
+    field_name: str = Form(...),
+    position: str = Form("right"),
+    use_gemini_suggestion: bool = Form(False),
+    cell_index: int = Form(None),
+    para_in_cell: int = Form(None)
+):
+    """Manually add a placeholder to a template at a specific location
+
+    Args:
+        template_id: ID of template to update
+        block_index: Index of content block to inject placeholder into
+        field_name: Name for the new placeholder
+        position: Where to insert (left=before text, right=after text, new_line)
+        use_gemini_suggestion: Whether to use Gemini for better field naming
+        cell_index: Optional cell index within a table (for table cells)
+        para_in_cell: Optional paragraph index within a cell (for specific paragraph targeting)
+
+    Returns:
+        JSON with update results
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        # Validate field name
+        if not field_name or not field_name.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Field name cannot be empty"
+            )
+
+        # Clean field name
+        field_name = field_name.strip().lower().replace(" ", "_")
+
+        # Validate position
+        valid_positions = ["left", "right", "new_line"]
+        if position not in valid_positions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid position. Must be one of: {', '.join(valid_positions)}"
+            )
+
+        # Initialize processor
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+
+        # Optional: Use Gemini to suggest better field name
+        if use_gemini_suggestion and GEMINI_API_KEY:
+            try:
+                # Extract structured content
+                structured_content = processor.extract_structured_content(str(template_path))
+
+                # Find the target block
+                target_block = None
+                for block in structured_content:
+                    if block.get("docx_index") == block_index:
+                        target_block = block
+                        break
+
+                if target_block:
+                    # Get existing fields
+                    executor = MergeExecutor()
+                    existing_fields = executor.get_template_fields(str(template_path))
+
+                    # Ask Gemini for better name
+                    gemini_client = GeminiClient(GEMINI_API_KEY)
+
+                    # Create a simple prompt for field naming
+                    prompt = f"""Bạn là chuyên gia đặt tên trường cho biểu mẫu tiếng Việt.
+
+NGỮ CẢNH:
+{target_block.get('text', '')}
+
+TRƯỚC: {target_block.get('before_context', [])}
+SAU: {target_block.get('after_context', [])}
+
+TÊN ĐỀ XUẤT: {field_name}
+
+Nhiệm vụ: Đề xuất TÊN TỐT HƠN (tiếng Việt không dấu, snake_case) cho placeholder này.
+
+Trả về JSON format:
+{{"suggested_name": "<tên tốt hơn>", "reason": "<lý do>"}}
+
+JSON:"""
+
+                response = gemini_client.model.generate_content(prompt)
+                result = response.text.strip()
+
+                # Clean response
+                if result.startswith("```json"):
+                    result = result[7:]
+                if result.startswith("```"):
+                    result = result[3:]
+                if result.endswith("```"):
+                    result = result[:-3]
+
+                import json
+                suggestion = json.loads(result.strip())
+                suggested_name = suggestion.get("suggested_name", field_name)
+
+                if suggested_name and suggested_name != field_name:
+                    print(f"Gemini suggested: {field_name} → {suggested_name}")
+                    field_name = suggested_name
+
+            except Exception as e:
+                print(f"Gemini field naming failed, using original: {e}")
+                # Continue with original field name
+
+        # Inject placeholder (with cell_index and para_in_cell if provided)
+        success = processor.inject_placeholder_at_location(
+            str(template_path),
+            block_index,
+            field_name,
+            "",  # No context hint needed for manual add
+            [],  # No before_context needed
+            [],  # No after_context needed
+            position,
+            cell_index,  # Pass cell_index for table cells
+            para_in_cell  # Pass para_in_cell for specific paragraph targeting within cell
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to inject placeholder into document"
+            )
+
+        # Get updated field list and HTML preview
+        executor = MergeExecutor()
+        updated_fields = executor.get_template_fields(str(template_path))
+        html_preview = processor._generate_html_preview(str(template_path), updated_fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "field_name": field_name,
+            "block_index": block_index,
+            "cell_index": cell_index,
+            "para_in_cell": para_in_cell,
+            "position": position,
+            "updated_fields": updated_fields,
+            "field_count": len(updated_fields),
+            "html_preview": html_preview
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to add placeholder: {str(e)}"
+        )
+
+
+@app.get("/template-info/{template_id}")
+async def get_template_info(template_id: str):
+    """Get current template information including fields
+
+    Args:
+        template_id: ID of template
+
+    Returns:
+        JSON with template fields and HTML preview
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        # Get fields from template
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        # Generate HTML preview
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "fields": fields,
+            "field_count": len(fields),
+            "html_preview": html_preview
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get template info: {str(e)}"
+        )
 
 
 if __name__ == "__main__":
