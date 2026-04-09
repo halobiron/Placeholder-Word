@@ -5,4 +5,5 @@
 */dist
 .gitnexus
 .claude/skills/gitnexus
-backend/uploads
+backend/uploads.DS_Store
+backend/uploads/
