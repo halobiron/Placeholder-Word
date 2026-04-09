@@ -2,6 +2,8 @@
 Mail Merge Processor - Uses SmartMailMergeConverter for Vietnamese forms
 """
 import uuid
+import re
+import json
 from pathlib import Path
 from typing import Dict
 from smart_mail_merge_converter import SmartMailMergeConverter
@@ -20,6 +22,30 @@ class MailMergeProcessor:
         """
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         self.gemini_client = GeminiClient(gemini_api_key) if gemini_api_key else None
+
+    def _clean_gemini_json_response(self, response_text: str) -> dict:
+        """Clean Gemini JSON response by removing markdown code blocks
+
+        Args:
+            response_text: Raw response text from Gemini
+
+        Returns:
+            Parsed JSON dict, or empty dict if parsing fails
+        """
+        result = response_text.strip()
+
+        # Remove markdown code blocks
+        if result.startswith("```json"):
+            result = result[7:]
+        if result.startswith("```"):
+            result = result[3:]
+        if result.endswith("```"):
+            result = result[:-3]
+
+        try:
+            return json.loads(result.strip())
+        except json.JSONDecodeError:
+            return {}
 
     def convert_to_mail_merge(self, docx_path: str, output_path: str = None) -> Dict:
         """Convert .docx to Mail Merge template using SmartMailMergeConverter
@@ -141,31 +167,35 @@ class MailMergeProcessor:
 
                 elif isinstance(child, CT_Tbl):
                     table = Table(child, doc)
+                    table_has_content = False
 
-                    # Check if table has content (same logic as inject_placeholder_at_location)
-                    has_content = False
-                    table_text = ""
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for p in cell.paragraphs:
-                                cell_text = ""
-                                for t in p._p.findall(f".//{self.w_ns}t"):
+                    # Track starting block index for this table (for first cell)
+                    table_start_block_index = block_index
+
+                    # Process each cell as a separate block (matching extract_structured_content logic)
+                    cell_index = 0
+                    for row_idx, row in enumerate(table.rows):
+                        for cell_idx, cell in enumerate(row.cells):
+                            # Extract cell text to check if it has content
+                            cell_text = ""
+                            for para in cell.paragraphs:
+                                for t in para._p.findall(f".//{self.w_ns}t"):
                                     if t.text:
                                         cell_text += t.text
-                                if cell_text.strip():
-                                    has_content = True
-                                    table_text += cell_text.strip() + " "
-                            if has_content:
-                                break
-                        if has_content:
-                            break
 
-                    # Only increment block_index if table has content
-                    if has_content:
-                        html = self._process_table_to_html(table, block_index)
+                            cell_text = cell_text.strip()
+
+                            if cell_text:
+                                table_has_content = True
+                                print(f"[HTML Preview] Block {block_index}: TABLE_CELL[{row_idx},{cell_idx}] - {cell_text[:60]}...")
+                                block_index += 1
+                                cell_index += 1
+
+                    # Only render table HTML if it has content
+                    if table_has_content:
+                        # Use the starting block index for the table (first cell's block_index)
+                        html = self._process_table_to_html(table, table_start_block_index)
                         html_parts.append(html)
-                        print(f"[HTML Preview] Block {block_index}: TABLE - {table_text[:60]}...")
-                        block_index += 1
 
             print(f"=== TOTAL BLOCKS IN HTML PREVIEW: {block_index} ===")
 
@@ -305,6 +335,129 @@ class MailMergeProcessor:
         except Exception as e:
             print(f"Error extracting structured content: {e}")
             return []
+
+    def extract_text_from_block_with_fallback(
+        self,
+        structured_content: list,
+        block_index: int,
+        para_in_cell: int = None
+    ) -> str:
+        """Extract text from a block, falling back to previous meaningful blocks if empty
+
+        Args:
+            structured_content: List of content blocks from extract_structured_content
+            block_index: Target block index to extract text from
+            para_in_cell: Optional paragraph index within cell (for table cells)
+
+        Returns:
+            Extracted text string, or empty string if no meaningful text found
+        """
+        if not structured_content or block_index < 0 or block_index >= len(structured_content):
+            return ""
+
+        target_block = structured_content[block_index]
+        text = target_block.get("text", "")
+
+        # If it's a table cell and para_in_cell is specified, extract that specific paragraph
+        if para_in_cell is not None and target_block.get("type") == "table_cell":
+            # Split text by newlines and get the specific paragraph
+            paragraphs = text.split("\n")
+            if 0 <= para_in_cell < len(paragraphs):
+                text = paragraphs[para_in_cell].strip()
+            else:
+                text = ""
+
+        # Check if meaningful (not just dots/underscores)
+        def has_content(t: str) -> bool:
+            return bool(re.sub(r'[\s._]+', '', t))
+
+        if has_content(text):
+            print(f"→ Found text: {text[:60]}...")
+            return text
+
+        # Fallback: search backwards
+        print(f"→ Block empty, searching backwards...")
+        for i in range(block_index - 1, -1, -1):
+            candidate_text = structured_content[i].get("text", "")
+            if has_content(candidate_text):
+                print(f"→ Found in block #{i}: {candidate_text[:60]}...")
+                return candidate_text
+
+        print("→ No meaningful text found")
+        return ""
+
+    def generate_smart_field_name(
+        self,
+        text: str,
+        structured_content: list = None,
+        block_index: int = None
+    ) -> str:
+        """Generate a smart field name from text, with optional Gemini refinement
+
+        Args:
+            text: Source text to extract field name from
+            structured_content: Optional full content for context
+            block_index: Optional target block index for additional context
+
+        Returns:
+            Generated field name in snake_case
+        """
+        if not text:
+            return "field"
+
+        # Step 1: Clean and create base field name from text
+        # Remove common Vietnamese field markers
+        text = re.sub(
+            r'^(họ và tên|tên|ngày sinh|năm sinh|số cmnd|số cccd|địa chỉ|email|điện thoại|sdt|nơi sinh|quốc tịch|dân tộc|tôn giáo|nghề nghiệp|người liên hệ):\s*',
+            '',
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Remove special chars but keep Vietnamese letters
+        text = re.sub(r'[^\w\sàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ]', ' ', text)
+
+        # Convert to snake_case
+        base_name = text.lower().strip()
+        base_name = re.sub(r'\s+', '_', base_name)
+        base_name = re.sub(r'(_lưu|_ghi_chú|_note)?$', '', base_name)
+        base_name = base_name[:30].strip('_')
+        base_name = re.sub(r'_+', '_', base_name)
+
+        if not base_name:
+            base_name = "field"
+
+        print(f"→ Base field name: {base_name}")
+
+        # Step 2: Use Gemini to refine if available (shorter prompt)
+        if self.gemini_client and structured_content and block_index is not None:
+            try:
+                target_block = structured_content[block_index] if 0 <= block_index < len(structured_content) else None
+                if not target_block:
+                    return base_name
+
+                # Simplified prompt - focus on result
+                prompt = f"""Tối ưu tên trường tiếng Việt (snake_case, không dấu):
+
+Base: {base_name}
+Context: {target_block.get('text', '')[:50]}
+
+Trả về JSON: {{"suggested_name": "<tên>", "reason": "<lý do>"}}
+
+JSON:"""
+
+                response = self.gemini_client.model.generate_content(prompt)
+                suggestion = self._clean_gemini_json_response(response.text)
+                suggested_name = suggestion.get("suggested_name", base_name)
+
+                if suggested_name and suggested_name != base_name:
+                    print(f"→ Gemini refined: {base_name} → {suggested_name}")
+                    return suggested_name
+
+            except Exception as e:
+                print(f"→ Gemini refinement failed: {e}")
+
+        return base_name
 
     def inject_placeholder_at_location(
         self,
@@ -455,10 +608,12 @@ class MailMergeProcessor:
                 # PRIMARY: Use verified block_index directly
                 if candidate['index'] == block_index:
                     best_match = candidate
-                    print(f"✓ DIRECT INDEX MATCH: [{candidate['index']}]")
+                    print(f"✓ DIRECT INDEX MATCH: [{candidate['index']}] ({candidate['type']})")
                     print(f"  Text: {candidate['text'][:60]}...")
-                    print(f"  Before: {candidate['before_context']}")
-                    print(f"  After: {candidate['after_context']}")
+
+                    # For table cells, show location
+                    if candidate['type'] == 'table_cell':
+                        print(f"  Cell location: [{candidate.get('row', '?')},{candidate.get('col', '?')}]")
 
                     # VERIFY: Check if before/after context matches
                     if before_context or after_context:
@@ -1303,53 +1458,78 @@ class MailMergeProcessor:
         )
 
     def _process_table_to_html(self, table, block_index: int) -> str:
-        """Xử lý Table thành thẻ table html với block_index metadata và cell-index cho từng ô"""
-        table_html = ['<table class="docx-table" data-block-index="{0}" data-type="table" style="border-collapse: collapse; width: 100%; margin: 10px 0;">'.format(block_index)]
-        cell_index = 0  # Track cell index within this table
+        """Xử lý Table thành thẻ table html với block_index metadata cho từng ô
+
+        Args:
+            table: docx Table object
+            block_index: Starting block index for first cell in table
+
+        Returns:
+            HTML string for the entire table
+        """
+        table_html = ['<table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; margin: 10px 0;">']
+
+        # Track block index for each cell (matching extract_structured_content logic)
+        current_cell_block_index = block_index
+
         for row_idx, row in enumerate(table.rows):
             table_html.append('<tr style="border: 1px solid #ccc;">')
-            for cell in row.cells:
-                # Process each paragraph in the cell separately to preserve empty lines
-                # This is important for maintaining the original document structure
-                cell_paragraphs_html = []
-                para_index = 0  # Track paragraph index within cell for targeting
+            for cell_idx, cell in enumerate(row.cells):
+                # Extract cell text to check if it has content
+                cell_text = ""
                 for para in cell.paragraphs:
-                    # Extract text content to check if paragraph is empty
-                    text_from_xml = ""
                     for t in para._p.findall(f".//{self.w_ns}t"):
                         if t.text:
-                            text_from_xml += t.text
+                            cell_text += t.text
 
-                    # Process paragraph content
-                    para_content = "".join(self._process_xml_element_to_html(child) for child in para._p)
+                cell_text = cell_text.strip()
 
-                    # Add metadata for each paragraph to enable precise targeting
-                    # This allows clicking on empty lines to add placeholders
-                    para_metadata = f'data-para-in-cell="{para_index}" data-cell="{cell_index}" data-table="{block_index}"'
+                # Only add cells with content (matching extract_structured_content)
+                if cell_text:
+                    # Process each paragraph in the cell separately to preserve empty lines
+                    cell_paragraphs_html = []
+                    para_index = 0  # Track paragraph index within cell for targeting
 
-                    if not para_content.strip():
-                        # Empty paragraph in cell - preserve it but make it clickable
-                        cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="min-height: 1.2em; margin: 2px 0; cursor: crosshair;" title="Click để thêm placeholder">&nbsp;</p>')
-                    else:
-                        # Non-empty paragraph - wrap in p tag with metadata
-                        # Preserve leading/trailing whitespace by adding white-space: pre-wrap when needed
-                        # Check the actual text content (stripping HTML tags) to detect leading/trailing spaces
-                        para_style = "margin: 2px 0;"
-                        import re
-                        text_content = re.sub(r'<[^>]+>', '', para_content)
-                        if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
-                            para_style += " white-space: pre-wrap;"
-                        cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="{para_style}">{para_content}</p>')
-                    para_index += 1
+                    for para in cell.paragraphs:
+                        # Extract text content to check if paragraph is empty
+                        text_from_xml = ""
+                        for t in para._p.findall(f".//{self.w_ns}t"):
+                            if t.text:
+                                text_from_xml += t.text
 
-                cell_content = "".join(cell_paragraphs_html)
-                tag = "th" if row_idx == 0 else "td"
-                table_html.append('<{0} data-cell-index="{1}" data-table-block="{2}" style="border: 1px solid #ccc; padding: 5px;">{3}</{0}>'.format(
-                    tag, cell_index, block_index, cell_content
-                ))
-                cell_index += 1
+                        # Process paragraph content
+                        para_content = "".join(self._process_xml_element_to_html(child) for child in para._p)
+
+                        # Add metadata for each paragraph to enable precise targeting
+                        para_metadata = f'data-para-in-cell="{para_index}" data-cell="{cell_idx}" data-cell-block-index="{current_cell_block_index}"'
+
+                        if not para_content.strip():
+                            # Empty paragraph in cell - preserve it but make it clickable
+                            cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="min-height: 1.2em; margin: 2px 0; cursor: crosshair;" title="Click để thêm placeholder">&nbsp;</p>')
+                        else:
+                            # Non-empty paragraph - wrap in p tag with metadata
+                            para_style = "margin: 2px 0;"
+                            import re
+                            text_content = re.sub(r'<[^>]+>', '', para_content)
+                            if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
+                                para_style += " white-space: pre-wrap;"
+                            cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="{para_style}">{para_content}</p>')
+                        para_index += 1
+
+                    cell_content = "".join(cell_paragraphs_html)
+                    tag = "th" if row_idx == 0 else "td"
+
+                    # Add data-block-index for this cell (matching extract_structured_content)
+                    table_html.append('<{0} data-block-index="{1}" data-type="table_cell" data-row="{2}" data-col="{3}" style="border: 1px solid #ccc; padding: 5px;">{4}</{0}>'.format(
+                        tag, current_cell_block_index, row_idx, cell_idx, cell_content
+                    ))
+
+                    # Increment block index for next cell
+                    current_cell_block_index += 1
+
             table_html.append('</tr>')
         table_html.append('</table>')
         return "\n".join(table_html)
+
 
 

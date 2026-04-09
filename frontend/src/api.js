@@ -91,13 +91,12 @@ export const updateTemplate = async (templateId, renameMap, editorHtml) => {
   return response.data
 }
 
-export const addPlaceholder = async (templateId, blockIndex, fieldName, position = 'right', useGeminiSuggestion = false, cellIndex = null, paraInCell = null) => {
+export const addPlaceholder = async (templateId, blockIndex, fieldName, position = 'right', cellIndex = null, paraInCell = null) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
   formData.append('block_index', blockIndex)
   formData.append('field_name', fieldName)
   formData.append('position', position)
-  formData.append('use_gemini_suggestion', useGeminiSuggestion)
   if (cellIndex !== null) {
     formData.append('cell_index', cellIndex)
   }
@@ -106,6 +105,22 @@ export const addPlaceholder = async (templateId, blockIndex, fieldName, position
   }
 
   const response = await axios.post(`${API_BASE}/add-placeholder`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const suggestFieldName = async (templateId, blockIndex, paraInCell = null) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('block_index', blockIndex)
+  if (paraInCell !== null) {
+    formData.append('para_in_cell', paraInCell)
+  }
+
+  const response = await axios.post(`${API_BASE}/suggest-field-name`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },

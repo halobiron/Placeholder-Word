@@ -583,13 +583,76 @@ async def apply_ai_suggestions(
         )
 
 
+@app.post("/suggest-field-name")
+async def suggest_field_name(
+    template_id: str = Form(...),
+    block_index: int = Form(...),
+    para_in_cell: int = Form(None)
+):
+    """Suggest a field name based on the selected block's text
+
+    Args:
+        template_id: ID of template
+        block_index: Index of content block to extract text from
+        para_in_cell: Optional paragraph index within cell
+
+    Returns:
+        JSON with suggested field name
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        # Initialize processor
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+
+        # Extract structured content
+        structured_content = processor.extract_structured_content(str(template_path))
+
+        # Extract text from block with fallback
+        extracted_text = processor.extract_text_from_block_with_fallback(
+            structured_content,
+            block_index,
+            para_in_cell
+        )
+
+        if not extracted_text:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract meaningful text from selected location"
+            )
+
+        # Generate smart field name
+        field_name = processor.generate_smart_field_name(
+            extracted_text,
+            structured_content,
+            block_index
+        )
+
+        return {
+            "success": True,
+            "field_name": field_name,
+            "extracted_text": extracted_text[:100],  # Return first 100 chars for preview
+            "block_index": block_index,
+            "para_in_cell": para_in_cell
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to suggest field name: {str(e)}"
+        )
+
+
 @app.post("/add-placeholder")
 async def add_placeholder_manual(
     template_id: str = Form(...),
     block_index: int = Form(...),
     field_name: str = Form(...),
     position: str = Form("right"),
-    use_gemini_suggestion: bool = Form(False),
     cell_index: int = Form(None),
     para_in_cell: int = Form(None)
 ):
@@ -598,9 +661,8 @@ async def add_placeholder_manual(
     Args:
         template_id: ID of template to update
         block_index: Index of content block to inject placeholder into
-        field_name: Name for the new placeholder
+        field_name: Name for the new placeholder (auto-generated if empty)
         position: Where to insert (left=before text, right=after text, new_line)
-        use_gemini_suggestion: Whether to use Gemini for better field naming
         cell_index: Optional cell index within a table (for table cells)
         para_in_cell: Optional paragraph index within a cell (for specific paragraph targeting)
 
@@ -612,15 +674,36 @@ async def add_placeholder_manual(
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        # Validate field name
+        # Initialize processor
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+
+        # Extract structured content for smart field naming
+        structured_content = processor.extract_structured_content(str(template_path))
+
+        # Auto-generate field name if not provided
         if not field_name or not field_name.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Field name cannot be empty"
+            print("→ No field name provided, auto-generating from block text...")
+            extracted_text = processor.extract_text_from_block_with_fallback(
+                structured_content,
+                block_index,
+                para_in_cell
             )
 
-        # Clean field name
-        field_name = field_name.strip().lower().replace(" ", "_")
+            if extracted_text:
+                field_name = processor.generate_smart_field_name(
+                    extracted_text,
+                    structured_content,
+                    block_index
+                )
+                print(f"→ Auto-generated field name: {field_name}")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract meaningful text from selected location"
+                )
+        else:
+            # Clean user-provided field name
+            field_name = field_name.strip().lower().replace(" ", "_")
 
         # Validate position
         valid_positions = ["left", "right", "new_line"]
@@ -633,67 +716,31 @@ async def add_placeholder_manual(
         # Initialize processor
         processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
 
-        # Optional: Use Gemini to suggest better field name
-        if use_gemini_suggestion and GEMINI_API_KEY:
-            try:
-                # Extract structured content
-                structured_content = processor.extract_structured_content(str(template_path))
+        # Extract structured content for smart field naming
+        structured_content = processor.extract_structured_content(str(template_path))
 
-                # Find the target block
-                target_block = None
-                for block in structured_content:
-                    if block.get("docx_index") == block_index:
-                        target_block = block
-                        break
+        # Auto-generate field name if not provided, or refine with Gemini if requested
+        if not field_name or not field_name.strip():
+            # Auto-generate from block text
+            print("→ No field name provided, auto-generating from block text...")
+            extracted_text = processor.extract_text_from_block_with_fallback(
+                structured_content,
+                block_index,
+                para_in_cell
+            )
 
-                if target_block:
-                    # Get existing fields
-                    executor = MergeExecutor()
-                    existing_fields = executor.get_template_fields(str(template_path))
-
-                    # Ask Gemini for better name
-                    gemini_client = GeminiClient(GEMINI_API_KEY)
-
-                    # Create a simple prompt for field naming
-                    prompt = f"""Bạn là chuyên gia đặt tên trường cho biểu mẫu tiếng Việt.
-
-NGỮ CẢNH:
-{target_block.get('text', '')}
-
-TRƯỚC: {target_block.get('before_context', [])}
-SAU: {target_block.get('after_context', [])}
-
-TÊN ĐỀ XUẤT: {field_name}
-
-Nhiệm vụ: Đề xuất TÊN TỐT HƠN (tiếng Việt không dấu, snake_case) cho placeholder này.
-
-Trả về JSON format:
-{{"suggested_name": "<tên tốt hơn>", "reason": "<lý do>"}}
-
-JSON:"""
-
-                response = gemini_client.model.generate_content(prompt)
-                result = response.text.strip()
-
-                # Clean response
-                if result.startswith("```json"):
-                    result = result[7:]
-                if result.startswith("```"):
-                    result = result[3:]
-                if result.endswith("```"):
-                    result = result[:-3]
-
-                import json
-                suggestion = json.loads(result.strip())
-                suggested_name = suggestion.get("suggested_name", field_name)
-
-                if suggested_name and suggested_name != field_name:
-                    print(f"Gemini suggested: {field_name} → {suggested_name}")
-                    field_name = suggested_name
-
-            except Exception as e:
-                print(f"Gemini field naming failed, using original: {e}")
-                # Continue with original field name
+            if extracted_text:
+                field_name = processor.generate_smart_field_name(
+                    extracted_text,
+                    structured_content,
+                    block_index
+                )
+                print(f"→ Auto-generated field name: {field_name}")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract meaningful text from selected location"
+                )
 
         # Inject placeholder (with cell_index and para_in_cell if provided)
         success = processor.inject_placeholder_at_location(

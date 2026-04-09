@@ -17,7 +17,9 @@
       "Bash(chmod +x:*)",
       "Bash(lsof -ti:8000)",
       "Bash(xargs kill:*)",
-      "Bash(python3)"
+      "Bash(python3)",
+      "Bash(python3:*)",
+      "Bash(tail -50 backend/logs/*.log)"
     ]
   },
   "enabledPlugins": {

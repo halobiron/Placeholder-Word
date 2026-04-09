@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import FileUpload from './components/FileUpload'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -26,7 +26,6 @@ function App() {
   const [selectedParaInCell, setSelectedParaInCell] = useState(null) // Selected paragraph index within cell (for table cell paragraphs)
   const [newFieldName, setNewFieldName] = useState('') // New placeholder name
   const [newFieldPosition, setNewFieldPosition] = useState('right') // Position for new placeholder (left/right/new_line)
-  const [useGeminiForNaming, setUseGeminiForNaming] = useState(false) // Use Gemini to suggest field name
   const [editedSuggestions, setEditedSuggestions] = useState({}) // Track user edits for suggestions: {block_index-suggested_name-position: {suggested_name: string, position: string}}
 
   // Extract placeholders from HTML
@@ -118,18 +117,19 @@ function App() {
 
       // Handle cell-level clicks within tables
       // Also handle paragraph-level clicks within table cells for more precise targeting
-      editor.querySelectorAll('[data-cell-index]').forEach(element => {
+      editor.querySelectorAll('[data-block-index][data-type="table_cell"]').forEach(element => {
         element.style.cursor = 'crosshair'
         element.onclick = (e) => {
           e.preventDefault()
           e.stopPropagation()
 
-          const cellIndex = parseInt(element.getAttribute('data-cell-index'))
-          const tableBlockIndex = parseInt(element.getAttribute('data-table-block'))
+          const cellBlockIndex = parseInt(element.getAttribute('data-block-index'))
+          const row = parseInt(element.getAttribute('data-row'))
+          const col = parseInt(element.getAttribute('data-col'))
 
-          setSelectedBlockIndex(tableBlockIndex) // Set block index to table's block index
-          setSelectedCellIndex(cellIndex) // Set cell index within the table
-          setSelectedTableBlockIndex(tableBlockIndex)
+          setSelectedBlockIndex(cellBlockIndex) // Each cell now has its own block_index
+          setSelectedCellIndex(null) // No need for cell_index anymore
+          setSelectedTableBlockIndex(null)
           setSelectedParaInCell(null) // Reset paragraph index when clicking whole cell
 
           // Highlight selected cell
@@ -138,7 +138,7 @@ function App() {
           })
           element.style.outline = '2px solid #8b5cf6'
 
-          setError(`Đã chọn ô #${cellIndex} trong bảng #${tableBlockIndex}. Nhập tên placeholder và nhấn "Thêm".`)
+          setError(`Đã chọn ô [${row},${col}]. Nhập tên placeholder và nhấn "Thêm".`)
         }
       })
 
@@ -149,13 +149,12 @@ function App() {
           e.preventDefault()
           e.stopPropagation()
 
-          const cellIndex = parseInt(element.getAttribute('data-cell'))
-          const tableBlockIndex = parseInt(element.getAttribute('data-table'))
+          const cellBlockIndex = parseInt(element.getAttribute('data-cell-block-index'))
           const paraInCell = parseInt(element.getAttribute('data-para-in-cell'))
 
-          setSelectedBlockIndex(tableBlockIndex) // Set block index to table's block index
-          setSelectedCellIndex(cellIndex) // Set cell index within the table
-          setSelectedTableBlockIndex(tableBlockIndex)
+          setSelectedBlockIndex(cellBlockIndex) // Each cell has its own block_index
+          setSelectedCellIndex(null) // No need for cell_index anymore
+          setSelectedTableBlockIndex(null)
           setSelectedParaInCell(paraInCell) // Set paragraph index within cell
 
           // Highlight selected paragraph
@@ -164,7 +163,7 @@ function App() {
           })
           element.style.outline = '2px solid #8b5cf6'
 
-          setError(`Đã chọn dòng #${paraInCell} trong ô #${cellIndex} của bảng #${tableBlockIndex}. Nhập tên placeholder và nhấn "Thêm".`)
+          setError(`Đã chọn dòng #${paraInCell}. Nhập tên placeholder và nhấn "Thêm".`)
         }
       })
     } else {
@@ -176,6 +175,31 @@ function App() {
       })
     }
   }, [editorHtml, step, isAddMode]) // Add isAddMode dependency
+
+  // Auto-suggest field name when block is selected
+  useEffect(() => {
+    const autoSuggestFieldName = async () => {
+      // Only auto-suggest when in add mode and a block is selected
+      if (!isAddMode || selectedBlockIndex === null || !templateId) {
+        return
+      }
+
+      try {
+        setError('⏳ Đang phân tích để gợi ý tên placeholder...')
+        const result = await suggestFieldName(templateId, selectedBlockIndex, selectedParaInCell)
+
+        if (result.success && result.field_name) {
+          setNewFieldName(result.field_name)
+          setError(`✅ Đã chọn vị trí #${selectedBlockIndex}${selectedParaInCell !== null ? ` (dòng #${selectedParaInCell})` : ''}. Tên gợi ý: "${result.field_name}"`)
+        }
+      } catch (err) {
+        console.error('Failed to suggest field name:', err)
+        setError(`⚠️ Không thể gợi ý tên tự động. Vui lòng nhập tên thủ công.`)
+      }
+    }
+
+    autoSuggestFieldName()
+  }, [selectedBlockIndex, selectedParaInCell, isAddMode, templateId])
 
   // Rename placeholder
   const renameField = (oldName, newName) => {
@@ -434,8 +458,7 @@ function App() {
         selectedBlockIndex,
         newFieldName.trim(),
         newFieldPosition,
-        useGeminiForNaming,
-        selectedCellIndex, // Pass cell index if selecting a table cell
+        null, // No need for cell_index anymore (each cell has its own block_index)
         selectedParaInCell // Pass paragraph index within cell for precise targeting
       )
 
@@ -452,7 +475,6 @@ function App() {
       setSelectedParaInCell(null)
       setNewFieldName('')
       setNewFieldPosition('right')
-      setUseGeminiForNaming(false)
 
       // Show success message
       setError(`✅ Đã thêm placeholder «${result.field_name}» thành công!`)
@@ -473,7 +495,6 @@ function App() {
     setSelectedParaInCell(null)
     setNewFieldName('')
     setNewFieldPosition('inline')
-    setUseGeminiForNaming(false)
     setError(null)
 
     // Remove highlights
@@ -617,7 +638,7 @@ function App() {
 
                           <div>
                             <label className="text-xs font-semibold text-gray-700 block mb-1">
-                              Tên placeholder:
+                              Tên placeholder: <span className="text-green-600">(✨ Đã tự động gợi ý từ nội dung)</span>
                             </label>
                             <input
                               type="text"
@@ -641,19 +662,6 @@ function App() {
                               <option value="right">➡️ Sau text</option>
                               <option value="new_line">⬇️ Xuống dòng</option>
                             </select>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="checkbox"
-                              id="useGemini"
-                              checked={useGeminiForNaming}
-                              onChange={(e) => setUseGeminiForNaming(e.target.checked)}
-                              className="rounded"
-                            />
-                            <label htmlFor="useGemini" className="text-xs text-gray-700">
-                              Dùng Gemini để gợi ý tên tốt hơn
-                            </label>
                           </div>
 
                           <button
