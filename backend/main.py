@@ -129,8 +129,9 @@ async def convert_to_template(file: UploadFile = File(...)):
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        # Process document with SmartMailMergeConverter (with Gemini API key for smart naming)
-        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+        # Process document with SmartMailMergeConverter
+        # Temporarily disable Gemini renaming for preview by not passing the API key
+        processor = MailMergeProcessor(gemini_api_key=None)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path))

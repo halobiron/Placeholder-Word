@@ -820,6 +820,17 @@ class MailMergeProcessor:
         # Create new paragraph
         new_p = OxmlElement('w:p')
 
+        # Check if original paragraph has leading spaces in text
+        # If so, preserve them by adding a run with spaces before the placeholder
+        original_text_content = ""
+        for t in original_p_element.findall(f".//{self.w_ns}t"):
+            if t.text:
+                original_text_content += t.text
+
+        # Count leading spaces
+        leading_spaces = len(original_text_content) - len(original_text_content.lstrip(' \t'))
+        has_leading_spaces = leading_spaces > 0
+
         # Copy paragraph properties from original paragraph (indentation, alignment, etc.)
         pPr = original_p_element.find(f"{self.w_ns}pPr")
         if pPr is not None:
@@ -830,15 +841,52 @@ class MailMergeProcessor:
             new_pPr = OxmlElement('w:pPr')
             new_p.append(new_pPr)
 
-        # Check if original paragraph has leading spaces in text
-        # If so, preserve them by adding a run with spaces before the placeholder
-        original_text_content = ""
-        for t in original_p_element.findall(f".//{self.w_ns}t"):
-            if t.text:
-                original_text_content += t.text
+        # IMPORTANT: After copying pPr, handle alignment and right indent when there are leading spaces
+        # This matches HTML preview behavior: align="both" + leading spaces → right alignment
+        # This ensures DOCX output matches HTML preview
+        new_pPr = new_p.find(f"{self.w_ns}pPr")
+        if new_pPr is not None:
+            # Check current alignment
+            jc = new_pPr.find(f"{self.w_ns}jc")
+            current_align = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val") if jc is not None else None
 
-        # Count leading spaces
-        leading_spaces = len(original_text_content) - len(original_text_content.lstrip(' \t'))
+            # Convert "both" alignment to "right" when there are leading spaces
+            # This matches HTML preview logic exactly
+            if current_align == "both" and has_leading_spaces:
+                if jc is not None:
+                    jc.set(qn('w:val'), 'right')
+                else:
+                    new_jc = OxmlElement('w:jc')
+                    new_jc.set(qn('w:val'), 'right')
+                    new_pPr.append(new_jc)
+                print(f"  [new_line] Changed alignment from 'both' to 'right' to match HTML preview")
+
+        # Add right indent when there are leading spaces
+        # This creates partial right alignment (keeps some space from right edge)
+        if new_pPr is not None and has_leading_spaces:
+            # Calculate right indent in twips (1 twip = 1/20 point)
+            # Calibrated: matches HTML preview margin-right behavior
+            right_indent_twips = int(leading_spaces * 20)
+
+            # Get or create ind element
+            ind = new_pPr.find(f"{self.w_ns}ind")
+            if ind is not None:
+                # Update existing right indent
+                current_right = ind.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}right")
+                if current_right:
+                    # Add to existing right indent
+                    new_right = int(current_right) + right_indent_twips
+                    ind.set(qn('w:right'), str(new_right))
+                else:
+                    # Set new right indent
+                    ind.set(qn('w:right'), str(right_indent_twips))
+            else:
+                # Create new ind element with right indent
+                new_ind = OxmlElement('w:ind')
+                new_ind.set(qn('w:right'), str(right_indent_twips))
+                new_pPr.append(new_ind)
+
+            print(f"  [new_line] Added right indent: {right_indent_twips} twips to match HTML preview")
 
         if leading_spaces > 0:
             # Add a run with leading spaces to match original indentation
@@ -1149,7 +1197,7 @@ class MailMergeProcessor:
                 if c_tag == 't' and child.text:
                     text_parts.append(child.text)
                 elif c_tag == 'tab':
-                    text_parts.append("    ")
+                    text_parts.append("                              ")
                 elif c_tag == 'br':
                     text_parts.append("<br>")
                     
@@ -1195,10 +1243,41 @@ class MailMergeProcessor:
             block_index: Index of content block
             is_empty: Whether this is an empty paragraph (for styling)
         """
+        import re
         jc = para._p.find(f"{self.w_ns}pPr/{self.w_ns}jc")
         align = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val") if jc is not None else "left"
+
+        # Extract text content to check for leading spaces BEFORE mapping alignment
+        # This is critical because Word uses "both" + leading spaces for partial right alignment
+        text_from_xml = ""
+        for t in para._p.findall(f".//{self.w_ns}t"):
+            if t.text:
+                text_from_xml += t.text
+        has_leading_spaces = len(text_from_xml) > 0 and text_from_xml[0] in ' \t'
+
+        # Calculate margin-right percentage based on leading spaces
+        # Word uses leading spaces to create partial right alignment
+        # Check BOTH "both" and "right" alignment because:
+        # - Original label lines: align="both" + leading spaces (converted from original doc)
+        # - New placeholder lines: align="right" + leading spaces (added by our code)
+        margin_right = ""
+        if (align == "both" or align == "right") and has_leading_spaces:
+            leading_space_count = len(text_from_xml) - len(text_from_xml.lstrip(' \t'))
+            # Approximate: each leading space ≈ 0.4-0.5% of line width for standard fonts
+            # Calibrated: 84 spaces ≈ 20% margin-right for signature lines
+            margin_right_pct = leading_space_count * 0.20
+            margin_right = f"margin-right: {margin_right_pct:.1f}%;"
+
+        # Map alignment: "both" + leading spaces → "right" (Word's partial right alignment trick)
+        # This fixes HTML preview where "justify" doesn't work like Word's "both" with leading spaces
         align_map = {"center": "center", "right": "right", "both": "justify"}
         alignment = align_map.get(align, "left")
+
+        # Override: if "both" alignment with leading spaces, use "right" for HTML preview
+        # NOTE: After conversion, placeholder lines will have align="right" already, so this
+        # only affects original label lines that still have align="both"
+        if align == "both" and has_leading_spaces:
+            alignment = "right"
 
         style_name = para.style.name if para.style else "Normal"
         tag = "h1" if "Heading 1" in style_name else "h2" if "Heading 2" in style_name else "h3" if "Heading 3" in style_name else "p"
@@ -1212,10 +1291,10 @@ class MailMergeProcessor:
             )
 
         align_style = f"text-align: {alignment};" if alignment != "left" else ""
+        align_style += margin_right  # Add margin-right if calculated
         # Preserve leading/trailing whitespace by adding white-space: pre-wrap when needed
         # This fixes issue where leading spaces used for right-alignment are collapsed in HTML
         # Check the actual text content (stripping HTML tags) to detect leading/trailing spaces
-        import re
         text_content = re.sub(r'<[^>]+>', '', content)
         if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
             align_style += " white-space: pre-wrap;"
