@@ -16,7 +16,7 @@ from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 import json
 from docx import Document
-from mail_merge_processor import MailMergeProcessor
+from template_manager import MailMergeProcessor
 from merge_executor import MergeExecutor
 from gemini_client import GeminiClient
 
@@ -131,7 +131,7 @@ async def convert_to_template(file: UploadFile = File(...)):
 
         # Process document with SmartMailMergeConverter
         # Temporarily disable Gemini renaming for preview by not passing the API key
-        processor = MailMergeProcessor(gemini_api_key=None)
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path))
@@ -216,8 +216,6 @@ async def merge_template(
 
             print(f"=== MERGE DEBUG ===")
             print(f"Template fields to extract: {template_fields}")
-            print(f"Context (first 300 chars): {context[:300]}")
-
             data = _extract_data_from_context(
                 gemini_client,
                 context,

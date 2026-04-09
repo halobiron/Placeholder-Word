@@ -13,7 +13,7 @@
       "Bash(cd:*)",
       "Bash(find E:WorkPhenikaaXPlaceholder-Wordbackenduploads -name *.docx -type f)",
       "Bash(ls:*)",
-      "Bash(python3 -m py_compile gemini_client.py mail_merge_processor.py main.py)",
+      "Bash(python3 -m py_compile gemini_client.py template_manager.py main.py)",
       "Bash(chmod +x:*)",
       "Bash(lsof -ti:8000)",
       "Bash(xargs kill:*)",

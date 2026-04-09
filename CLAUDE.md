@@ -33,7 +33,7 @@ Detailed in docs/
 placeholder/
 ├── backend/                    # FastAPI standalone (not yet created)
 │   ├── main.py                # FastAPI app
-│   ├── mail_merge_processor.py # Core conversion logic
+│   ├── template_manager.py # Core conversion logic
 │   ├── gemini_client.py        # Gemini integration
 │   └── requirements.txt
 ├── frontend/                   # React + Vite (not yet created)
@@ -73,7 +73,7 @@ After successful demo implementation, port code as follows:
 ai-server-xbot/modules/
 ├── utils/
 │   └── mail_merge/
-│       ├── processor.py        # From mail_merge_processor.py
+│       ├── processor.py        # From template_manager.py
 │       ├── field_analyzer.py   # Field naming with Gemini
 │       └── executor.py         # docx-mailmerge2 execution
 ├── api/v3/endpoints/

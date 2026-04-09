@@ -36,7 +36,7 @@
 
 ### Backend Components
 
-#### 1. MailMergeProcessor (`mail_merge_processor.py`)
+#### 1. MailMergeProcessor (`template_manager.py`)
 
 **Responsibility:** Convert .docx to Mail Merge template
 
@@ -189,7 +189,7 @@ NOISE_PATTERN = r'\s*(\(nếu có\)|\(ghi rõ.*?\))\s*'
 ```
 backend/
 ├── main.py                    # FastAPI app + endpoints
-├── mail_merge_processor.py    # Core conversion logic
+├── template_manager.py    # Core conversion logic
 ├── gemini_client.py           # AI integration
 ├── merge_executor.py          # Mail merge execution
 ├── requirements.txt
@@ -218,7 +218,7 @@ frontend/
 ```
 Demo                          →  ai-server-xbot
 ─────────────────────────────────────────────────
-backend/mail_merge_processor.py  →  modules/utils/mail_merge/processor.py
+backend/template_manager.py  →  modules/utils/mail_merge/processor.py
 backend/gemini_client.py          →  modules/utils/mail_merge/field_analyzer.py
 backend/merge_executor.py         →  modules/utils/mail_merge/executor.py
 backend/main.py                   →  modules/api/v3/endpoints/mail_merge.py
