@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import FileUpload from './components/FileUpload'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName } from './api'
+import EditPopup from './components/EditPopup'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -27,6 +28,10 @@ function App() {
   const [newFieldName, setNewFieldName] = useState('') // New placeholder name
   const [newFieldPosition, setNewFieldPosition] = useState('right') // Position for new placeholder (left/right/new_line)
   const [editedSuggestions, setEditedSuggestions] = useState({}) // Track user edits for suggestions: {block_index-suggested_name-position: {suggested_name: string, position: string}}
+
+  // New states for enhanced editing
+  const [showEditPopup, setShowEditPopup] = useState(false)
+  const [selectedTextForEdit, setSelectedTextForEdit] = useState(null)
 
   // Extract placeholders from HTML
   const extractFields = (html) => {
@@ -200,6 +205,24 @@ function App() {
 
     autoSuggestFieldName()
   }, [selectedBlockIndex, selectedParaInCell, isAddMode, templateId])
+
+  // Handle text selection for enhanced editing (NOT in add mode)
+  useEffect(() => {
+    const editor = document.getElementById('document-editor')
+    if (!editor || !editorHtml || isAddMode) return
+
+    const handleMouseUp = () => {
+      setTimeout(() => {
+        handleTextSelection()
+      }, 10)
+    }
+
+    editor.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      editor.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [editorHtml, isAddMode])
 
   // Rename placeholder
   const renameField = (oldName, newName) => {
@@ -518,6 +541,67 @@ function App() {
     setPreviewHtml(null)
     setError(null)
     setEditedSuggestions({}) // Clear suggestion edits
+    setShowEditPopup(false)
+    setSelectedTextForEdit(null)
+  }
+
+  // Handle text selection for editing
+  const handleTextSelection = () => {
+    const selection = window.getSelection()
+    const selectedText = selection.toString().trim()
+
+    if (selectedText && !isAddMode) {
+      setSelectedTextForEdit({
+        text: selectedText,
+        element: selection.anchorNode.parentElement
+      })
+      setShowEditPopup(true)
+    }
+  }
+
+  // Handle edit submission
+  const handleEditSubmit = async (editData) => {
+    if (!templateId) return
+
+    try {
+      const result = await editSelection(templateId, editData)
+
+      // Update UI
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      setShowEditPopup(false)
+      setSelectedTextForEdit(null)
+
+      // Show success message
+      setError(`✅ Đã ${editData.type === 'delete' ? 'xóa' : 'cập nhật'} thành công!`)
+      setTimeout(() => setError(null), 3000)
+    } catch (err) {
+      console.error('Edit failed:', err)
+      setError('Cập nhật thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
+  // Handle add content
+  const handleAddContent = async (addData) => {
+    if (!templateId) return
+
+    try {
+      const result = await addContent(templateId, addData)
+
+      // Update UI
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      // Show success message
+      setError(`✅ Đã thêm ${addData.type} thành công!`)
+      setTimeout(() => setError(null), 3000)
+    } catch (err) {
+      console.error('Add content failed:', err)
+      setError('Thêm nội dung thất bại: ' + (err.response?.data?.detail || err.message))
+    }
   }
 
   return (
@@ -826,6 +910,32 @@ function App() {
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <h3 className="text-lg font-semibold">Tài liệu</h3>
+
+                  {/* Enhanced editing buttons */}
+                  {!isAddMode && (
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          const editor = document.getElementById('document-editor')
+                          if (editor) {
+                            editor.focus()
+                            setError('💡 Chọn văn bản trong tài liệu để mở menu chỉnh sửa')
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 font-medium"
+                        title="Click để chọn text để sửa"
+                      >
+                        ✏️ Chỉnh sửa
+                      </button>
+                      <button
+                        onClick={() => handleAddContent({ type: 'placeholder', position: 'end', fieldName: prompt('Tên placeholder:') })}
+                        className="ml-2 px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 transition-colors text-sm"
+                        title="Thêm placeholder"
+                      >
+                        ➕ Thêm
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div
                   id="document-editor"
@@ -1064,6 +1174,18 @@ function App() {
           }
         `}</style>
       </div>
+
+      {/* Enhanced editing popups */}
+      {showEditPopup && selectedTextForEdit && (
+        <EditPopup
+          selectedText={selectedTextForEdit}
+          onSubmit={handleEditSubmit}
+          onClose={() => {
+            setShowEditPopup(false)
+            setSelectedTextForEdit(null)
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -127,3 +127,62 @@ export const suggestFieldName = async (templateId, blockIndex, paraInCell = null
   })
   return response.data
 }
+
+// New API functions for enhanced editing
+export const editSelection = async (templateId, editData) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('edit_type', editData.type)
+  formData.append('selected_text', editData.selectedText)
+
+  if (editData.type === 'text' && editData.newText) {
+    formData.append('new_text', editData.newText)
+  }
+
+  if (editData.type === 'format' && editData.format) {
+    formData.append('format_config', JSON.stringify(editData.format))
+  }
+
+  const response = await axios.post(`${API_BASE}/edit-selection`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const addContent = async (templateId, addData) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('add_type', addData.type)
+  formData.append('position', addData.position)
+  formData.append('inherit_format', addData.inheritFormat ? 'true' : 'false')
+
+  if (addData.content) {
+    formData.append('content', addData.content)
+  }
+
+  if (addData.fieldName) {
+    formData.append('field_name', addData.fieldName)
+  }
+
+  if (addData.file) {
+    formData.append('file', addData.file)
+  }
+
+  if (addData.format) {
+    formData.append('format_config', JSON.stringify(addData.format))
+  }
+
+  const response = await axios.post(`${API_BASE}/add-content`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const refreshTemplateInfo = async (templateId) => {
+  const response = await axios.get(`${API_BASE}/template-info/${templateId}`)
+  return response.data
+}

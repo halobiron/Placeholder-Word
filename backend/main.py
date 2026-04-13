@@ -45,7 +45,7 @@ ensure_directories()
 
 # Configuration
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = None
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 # Initialize FastAPI
@@ -823,6 +823,239 @@ async def get_template_info(template_id: str):
             status_code=500,
             detail=f"Failed to get template info: {str(e)}"
         )
+
+
+def map_camel_to_snake(format_data: dict) -> dict:
+    """Map camelCase keys to snake_case for Python functions"""
+    format_mapping = {
+        'fontSize': 'font_size',
+        'fontName': 'font_name'
+    }
+    return {format_mapping.get(k, k): v for k, v in format_data.items()}
+
+
+@app.post("/edit-selection")
+async def edit_selection(
+    template_id: str = Form(...),
+    edit_type: str = Form(...),  # "text", "format", "delete"
+    selected_text: str = Form(...),
+    new_text: str = Form(None),
+    format_config: str = Form(None)  # JSON string
+):
+    """
+    Edit DOCX based on user selection from HTML preview
+
+    Args:
+        template_id: Template ID
+        edit_type: Type of edit ("text", "format", "delete")
+        selected_text: Text that user selected in HTML
+        new_text: New text to replace with (for text edit)
+        format_config: Format configuration (for format edit)
+
+    Returns:
+        Updated template and preview
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        from docx_editor import DocxFullEditor
+
+        editor = DocxFullEditor(str(template_path))
+
+        if edit_type == "text":
+            # Replace text
+            if not new_text:
+                raise HTTPException(status_code=400, detail="new_text required for text edit")
+
+            editor.replace_text_keep_format(
+                old_text=selected_text,
+                new_text=new_text
+            )
+
+        elif edit_type == "format":
+            # Apply formatting
+            if not format_config:
+                raise HTTPException(status_code=400, detail="format_config required for format edit")
+
+            format_data = json.loads(format_config)
+            editor.apply_format_to_text(
+                text=selected_text,
+                **map_camel_to_snake(format_data)
+            )
+
+        elif edit_type == "delete":
+            # Delete text
+            editor.delete_text(selected_text)
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid edit_type: {edit_type}")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Get updated fields and preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "fields": fields,
+            "html_preview": html_preview,
+            "updated": True,
+            "edit_type": edit_type
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Edit failed: {str(e)}")
+
+
+@app.post("/add-content")
+async def add_content(
+    template_id: str = Form(...),
+    add_type: str = Form(...),  # "text", "paragraph", "placeholder", "image", "pagebreak"
+    position: str = Form(...),   # "end", "after:text", "before:text"
+    content: str = Form(None),   # Text content
+    field_name: str = Form(None), # Field name for placeholder
+    file: UploadFile = None,     # Image file
+    inherit_format: bool = Form(True),  # Inherit format from nearby text
+    format_config: str = Form(None)  # Format options for new content
+):
+    """
+    Add new content to template
+
+    Args:
+        template_id: Template ID
+        add_type: Type of content to add
+        position: Where to add ("end", "after:text", "before:text")
+        content: Text/paragraph content
+        field_name: Field name for placeholder
+        file: Image file (for image type)
+        inherit_format: True = inherit format from nearby text
+        format_config: Format options (optional)
+
+    Returns:
+        Updated template and preview
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        from docx_editor import DocxFullEditor
+        import tempfile
+
+        editor = DocxFullEditor(str(template_path))
+
+        if add_type == "text":
+            # Add text
+            if not content:
+                raise HTTPException(status_code=400, detail="content required for text addition")
+
+            if position == "end":
+                # Add text at end
+                last_para = editor.doc.paragraphs[-1]
+                last_para.add_run(content)
+            elif position.startswith("after:"):
+                target_text = position.split("after:")[1].strip()
+                success = editor.add_text_after(target_text, content, inherit_format=inherit_format)
+                if not success:
+                    raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
+            elif position.startswith("before:"):
+                target_text = position.split("before:")[1].strip()
+                success = editor.add_text_before(target_text, content, inherit_format=inherit_format)
+                if not success:
+                    raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
+
+            # Apply format if provided
+            if format_config:
+                format_data = json.loads(format_config)
+                editor.apply_format_to_text(content, **map_camel_to_snake(format_data))
+
+        elif add_type == "paragraph":
+            # Add paragraph
+            if not content:
+                raise HTTPException(status_code=400, detail="content required for paragraph addition")
+
+            if position == "end":
+                editor.add_paragraph_at_end(content)
+            elif position.startswith("after:"):
+                target_text = position.split("after:")[1].strip()
+                success = editor.add_paragraph_after(target_text, content, inherit_format=inherit_format)
+                if not success:
+                    raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
+
+            # Apply paragraph format if provided
+            if format_config:
+                format_data = json.loads(format_config)
+                # Apply paragraph-level formatting
+                if "alignment" in format_data:
+                    editor.apply_paragraph_format(content, alignment=format_data["alignment"])
+
+        elif add_type == "placeholder":
+            # Add placeholder
+            if not field_name:
+                raise HTTPException(status_code=400, detail="field_name required for placeholder addition")
+
+            editor.add_placeholder(field_name, position)
+
+        elif add_type == "image":
+            # Add image
+            if not file:
+                raise HTTPException(status_code=400, detail="file required for image addition")
+
+            # Save uploaded image temporarily
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                tmp.write(await file.read())
+                tmp_path = tmp.name
+
+            try:
+                # Extract width from format_config if provided
+                width = 4.0  # Default width
+                if format_config:
+                    format_data = json.loads(format_config)
+                    width = format_data.get("width", 4.0)
+
+                success = editor.add_image(tmp_path, position, width=width)
+                if not success and position != "end":
+                    raise HTTPException(status_code=404, detail="Target text not found for image placement")
+            finally:
+                # Cleanup temp file
+                import os
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+        elif add_type == "pagebreak":
+            # Add page break
+            editor.add_page_break(position)
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid add_type: {add_type}")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Get updated fields and preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "fields": fields,
+            "html_preview": html_preview,
+            "added": True,
+            "add_type": add_type
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Add content failed: {str(e)}")
 
 
 if __name__ == "__main__":

@@ -19,7 +19,9 @@
       "Bash(xargs kill:*)",
       "Bash(python3)",
       "Bash(python3:*)",
-      "Bash(tail -50 backend/logs/*.log)"
+      "Bash(tail -50 backend/logs/*.log)",
+      "Bash(find E:/Work/PhenikaaX/Placeholder-Word/backend -name *.py -not -path */.venv/* -not -path */__pycache__/*)",
+      "Bash(grep -n \"class DocxFullEditor\" *.py)"
     ]
   },
   "enabledPlugins": {
