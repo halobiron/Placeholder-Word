@@ -25,7 +25,11 @@
       "Bash(grep -n \"^class\\\\|^    def\\\\|^$\" /Users/aiot/workspace/placeholder/backend/template_manager.py)",
       "Bash(npx eslint:*)",
       "Bash(node -c /Users/aiot/workspace/placeholder/frontend/src/components/EditPopup.jsx)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(curl -s http://localhost:8000/docs)",
+      "Bash(curl -X POST http://localhost:8000/edit-selection -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -X POST http://localhost:8000/edit-selection -F template_id=test -F edit_type=format -F selected_text=test -F 'format_config={}')",
+      "Bash(curl -X OPTIONS http://localhost:8000/edit-selection -H \"Origin: http://localhost:5173\" -H \"Access-Control-Request-Method: POST\" -v)"
     ]
   },
   "enabledPlugins": {

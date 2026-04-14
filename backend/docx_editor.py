@@ -26,7 +26,10 @@ class DocxFullEditor:
         """
         Build mapping from block_index (HTML preview) to paragraph_index (DOCX)
 
-        This matches the logic in template_manager.py _generate_html_preview
+        Uses EXACTLY the same logic as template_manager.py _generate_html_preview
+        to ensure block_index consistency between HTML preview and editing.
+
+        Iteration order: doc.element.body.iterchildren() (document order)
         """
         if self._block_to_para_index_map is not None:
             return
@@ -34,52 +37,58 @@ class DocxFullEditor:
         from docx.oxml.text.paragraph import CT_P
         from docx.oxml.table import CT_Tbl
         from docx.table import Table
+        from docx.text.paragraph import Paragraph
 
         self._block_to_para_index_map = {}
         block_index = 0
-        para_index = 0
 
-        # First pass: map all paragraphs
-        para_element_to_index = {}
+        # Build map using EXACTLY the same logic as _generate_html_preview
+        # Use body children directly to preserve document order
         for child in self.doc.element.body.iterchildren():
             if isinstance(child, CT_P):
-                para_element_to_index[child] = para_index
-                para_index += 1
+                para = Paragraph(child, self.doc)
 
-        # Second pass: build block_index map
-        for child in self.doc.element.body.iterchildren():
-            if isinstance(child, CT_P):
-                # Regular paragraph
+                # Extract text from XML to match _generate_html_preview logic
+                text_from_xml = ""
+                for t in child.findall(f".//{self.w_ns}t"):
+                    if t.text:
+                        text_from_xml += t.text
+                text = text_from_xml.strip()
+
+                # Process ALL paragraphs (including empty ones) like _generate_html_preview
+                # Store reference to paragraph object instead of index
                 self._block_to_para_index_map[block_index] = {
                     'type': 'paragraph',
-                    'para_index': para_element_to_index[child],
+                    'paragraph': para,  # Store paragraph object directly
                     'table_context': None
                 }
                 block_index += 1
 
             elif isinstance(child, CT_Tbl):
-                table = Table(child)
-                # Process each cell as a separate block
+                table = Table(child, self.doc)
+
+                # Process each cell as a separate block (matching _generate_html_preview logic)
                 for row_idx, row in enumerate(table.rows):
                     for cell_idx, cell in enumerate(row.cells):
-                        # Check if cell has content
-                        cell_text = "".join(
-                            t.text for para in cell.paragraphs
-                            for t in para._p.findall(f".//{self.w_ns}t")
-                            if t.text
-                        ).strip()
+                        # Extract cell text to check if it has content
+                        cell_text = ""
+                        for para in cell.paragraphs:
+                            for t in para._p.findall(f".//{self.w_ns}t"):
+                                if t.text:
+                                    cell_text += t.text
+
+                        cell_text = cell_text.strip()
 
                         if cell_text:
                             # Find the first paragraph in this cell
                             for para in cell.paragraphs:
-                                if para._element in para_element_to_index:
-                                    self._block_to_para_index_map[block_index] = {
-                                        'type': 'table_cell',
-                                        'para_index': para_element_to_index[para._element],
-                                        'table_context': f"Row {row_idx}, Col {cell_idx}"
-                                    }
-                                    block_index += 1
-                                    break
+                                self._block_to_para_index_map[block_index] = {
+                                    'type': 'table_cell',
+                                    'paragraph': para,  # Store paragraph object directly
+                                    'table_context': f"Row {row_idx}, Col {cell_idx}"
+                                }
+                                block_index += 1
+                                break
 
     def get_paragraph_index_from_block(self, block_index: int) -> int:
         """
@@ -89,30 +98,62 @@ class DocxFullEditor:
             block_index: Block index from HTML preview
 
         Returns:
-            Paragraph index in DOCX, or None if not found
+            Paragraph index in document order (matching _generate_html_preview),
+            or None if not found
         """
         self._build_block_index_map()
 
-        if block_index in self._block_to_para_index_map:
-            return self._block_to_para_index_map[block_index]['para_index']
+        if block_index not in self._block_to_para_index_map:
+            return None
+
+        block_data = self._block_to_para_index_map[block_index]
+        target_paragraph = block_data['paragraph']
+
+        # Use the same iteration logic to find the index
+        for idx, para in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if para._element == target_paragraph._element:
+                return idx
 
         return None
 
     # ===== HELPER METHODS =====
 
-    def _iterate_paragraphs(self):
-        """Yield all paragraphs (document + tables)"""
-        for paragraph in self.doc.paragraphs:
-            yield paragraph
-        for table in self.doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for paragraph in cell.paragraphs:
-                        yield paragraph
+    def _iterate_paragraphs_in_doc_order(self):
+        """
+        Yield paragraphs in document order (matching _generate_html_preview logic)
+
+        Uses doc.element.body.iterchildren() to preserve exact document structure.
+        """
+        from docx.oxml.text.paragraph import CT_P
+        from docx.oxml.table import CT_Tbl
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        for child in self.doc.element.body.iterchildren():
+            if isinstance(child, CT_P):
+                para = Paragraph(child, self.doc)
+                yield para
+            elif isinstance(child, CT_Tbl):
+                table = Table(child, self.doc)
+                # Process each cell as a separate block
+                for row_idx, row in enumerate(table.rows):
+                    for cell_idx, cell in enumerate(row.cells):
+                        cell_text = ""
+                        for para in cell.paragraphs:
+                            for t in para._p.findall(f".//{self.w_ns}t"):
+                                if t.text:
+                                    cell_text += t.text
+
+                        cell_text = cell_text.strip()
+
+                        if cell_text:
+                            for para in cell.paragraphs:
+                                yield para
+                                break
 
     def _iterate_runs(self):
         """Yield all runs with context from all paragraphs"""
-        for paragraph in self._iterate_paragraphs():
+        for paragraph in self._iterate_paragraphs_in_doc_order():
             for run in paragraph.runs:
                 yield run, paragraph
 
@@ -139,7 +180,7 @@ class DocxFullEditor:
         """
         search_text_normalized = re.sub(r'\s+', ' ', old_text.strip())
 
-        for p_idx, paragraph in enumerate(self._iterate_paragraphs()):
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             # If paragraph_index is specified, only process that paragraph
             if paragraph_index is not None and p_idx != paragraph_index:
                 continue
@@ -221,7 +262,7 @@ class DocxFullEditor:
 
         search_text_normalized = re.sub(r'\s+', ' ', text.strip())
 
-        for p_idx, paragraph in enumerate(self._iterate_paragraphs()):
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if p_idx != paragraph_index:
                 continue
 
@@ -230,7 +271,7 @@ class DocxFullEditor:
             full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
 
             if search_text_normalized not in full_text_normalized:
-                continue
+                return False  # Text not found in this paragraph
 
             start_idx = full_text_normalized.find(search_text_normalized)
             if start_idx == -1:
@@ -414,7 +455,7 @@ class DocxFullEditor:
         """
         search_text_normalized = re.sub(r'\s+', ' ', old_text.strip())
 
-        for paragraph in self._iterate_paragraphs():
+        for paragraph in self._iterate_paragraphs_in_doc_order():
             full_text = "".join(run.text for run in paragraph.runs)
             full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
 
@@ -554,7 +595,7 @@ class DocxFullEditor:
         """Helper: apply format to single text segment"""
         search_text_normalized = re.sub(r'\s+', ' ', text.strip())
 
-        for paragraph in self._iterate_paragraphs():
+        for paragraph in self._iterate_paragraphs_in_doc_order():
             para_text = "".join(run.text for run in paragraph.runs)
             para_text_normalized = re.sub(r'\s+', ' ', para_text.strip())
 
