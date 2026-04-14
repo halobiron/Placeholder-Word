@@ -1007,17 +1007,31 @@ async def add_content(
             if not content:
                 raise HTTPException(status_code=400, detail="content required for text addition")
 
+            # Helper function to find paragraph index by text or element
+            def find_paragraph_index(target_text=None, target_element=None):
+                for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
+                    if target_text is not None and target_text in para.text:
+                        return idx
+                    if target_element is not None and para._element == target_element:
+                        return idx
+                return None
+
+            content_paragraph_index = None
+
             if position == "end":
                 # Add text at end
                 last_para = editor.doc.paragraphs[-1]
                 last_para.add_run(content)
+                content_paragraph_index = find_paragraph_index(target_element=last_para._element)
             elif position.startswith("after:"):
                 target_text = position.split("after:")[1].strip()
+                content_paragraph_index = find_paragraph_index(target_text=target_text)
                 success = editor.add_text_after(target_text, content, inherit_format=inherit_format)
                 if not success:
                     raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
             elif position.startswith("before:"):
                 target_text = position.split("before:")[1].strip()
+                content_paragraph_index = find_paragraph_index(target_text=target_text)
                 success = editor.add_text_before(target_text, content, inherit_format=inherit_format)
                 if not success:
                     raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
@@ -1025,7 +1039,8 @@ async def add_content(
             # Apply format if provided
             if format_config:
                 format_data = json.loads(format_config)
-                editor.apply_format_to_text(content, **map_camel_to_snake(format_data))
+                # Pass paragraph_index to only format the newly added content
+                editor.apply_format_to_text(content, paragraph_index=content_paragraph_index, **map_camel_to_snake(format_data))
 
         elif add_type == "paragraph":
             # Add paragraph

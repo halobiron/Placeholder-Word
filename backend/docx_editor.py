@@ -260,24 +260,49 @@ class DocxFullEditor:
         """
         import re
 
-        search_text_normalized = re.sub(r'\s+', ' ', text.strip())
-
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if p_idx != paragraph_index:
                 continue
 
             # Tìm vị trí chính xác của text trong paragraph
             full_text = "".join(run.text for run in paragraph.runs)
-            full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
 
-            if search_text_normalized not in full_text_normalized:
-                return False  # Text not found in this paragraph
-
-            start_idx = full_text_normalized.find(search_text_normalized)
+            # Try direct search first (most accurate)
+            start_idx = full_text.find(text)
             if start_idx == -1:
-                continue
+                # Fallback: try normalized search for fuzzy matching
+                search_text_normalized = re.sub(r'\s+', ' ', text.strip())
+                full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
 
-            end_idx = start_idx + len(search_text_normalized)
+                if search_text_normalized not in full_text_normalized:
+                    return False
+
+                # Map normalized position back to original text position
+                start_idx_normalized = full_text_normalized.find(search_text_normalized)
+                end_idx_normalized = start_idx_normalized + len(search_text_normalized)
+
+                # Build position mapping from normalized to original
+                norm_to_orig = []
+                norm_pos = 0
+                orig_pos = 0
+
+                for orig_idx, char in enumerate(full_text):
+                    if not char.isspace():
+                        norm_to_orig.append((norm_pos, orig_idx))
+                        norm_pos += 1
+                    orig_pos += 1
+
+                # Find original position from normalized position
+                if start_idx_normalized < len(norm_to_orig):
+                    start_idx = norm_to_orig[start_idx_normalized][1]
+                    if end_idx_normalized <= len(norm_to_orig):
+                        end_idx = norm_to_orig[end_idx_normalized - 1][1] + 1
+                    else:
+                        end_idx = start_idx + len(text)
+                else:
+                    return False
+            else:
+                end_idx = start_idx + len(text)
 
             # Tìm runs chứa text cần format
             char_count = 0
@@ -292,6 +317,8 @@ class DocxFullEditor:
                     overlap_start = max(start_idx, run_start)
                     overlap_end = min(end_idx, run_end)
 
+                    text_to_format = run.text[overlap_start - run_start:overlap_end - run_start]
+
                     runs_to_format.append({
                         'run': run,
                         'r_idx': r_idx,
@@ -299,7 +326,7 @@ class DocxFullEditor:
                         'run_end': run_end,
                         'overlap_start': overlap_start,
                         'overlap_end': overlap_end,
-                        'text_to_format': run.text[overlap_start - run_start:overlap_end - run_start]
+                        'text_to_format': text_to_format
                     })
 
                 char_count += len(run.text)
@@ -359,6 +386,7 @@ class DocxFullEditor:
                 continue
 
             # Case 2: Cần split run
+
             # Get original format properties
             original_rpr = run._r.get_or_add_rPr()
 
@@ -368,20 +396,29 @@ class DocxFullEditor:
             # Tạo runs mới và chèn vào đúng vị trí
             insert_index = r_idx
 
-            # Chèn text_before (nếu có)
+            # Determine which properties will be explicitly set
+            skip_props = []
+            if bold is not None:
+                skip_props.append('b')
+            if italic is not None:
+                skip_props.append('i')
+            if underline is not None:
+                skip_props.append('u')
+
+            # Chèn text_before (nếu có) - keep all original format
             if text_before:
                 new_run = self._create_run_with_format(paragraph, original_rpr, text_before)
                 paragraph._element.insert(insert_index, new_run._element)
                 insert_index += 1
 
-            # Chèn text_to_format với format mới
+            # Chèn text_to_format với format mới - skip properties that will be set
             if text_to_format:
-                formatted_run = self._create_run_with_format(paragraph, original_rpr, text_to_format)
+                formatted_run = self._create_run_with_format(paragraph, original_rpr, text_to_format, skip_props=skip_props)
                 self._apply_format_to_run(formatted_run, bold, italic, underline, color, highlight, font_name, font_size)
                 paragraph._element.insert(insert_index, formatted_run._element)
                 insert_index += 1
 
-            # Chèn text_after (nếu có)
+            # Chèn text_after (nếu có) - keep all original format
             if text_after:
                 new_run = self._create_run_with_format(paragraph, original_rpr, text_after)
                 paragraph._element.insert(insert_index, new_run._element)
@@ -389,7 +426,7 @@ class DocxFullEditor:
             # Xóa run gốc
             paragraph._element.remove(run._element)
 
-    def _create_run_with_format(self, paragraph, rpr_element, text: str):
+    def _create_run_with_format(self, paragraph, rpr_element, text: str, skip_props: list = None):
         """
         Tạo run mới với format từ rpr_element
 
@@ -397,21 +434,32 @@ class DocxFullEditor:
             paragraph: Paragraph object
             rpr_element: RunProperties element để copy format
             text: Text cho run mới
+            skip_props: List of properties to skip (e.g., ['b', 'i', 'u'] for bold, italic, underline)
 
         Returns:
             New Run object
         """
         from docx.oxml import OxmlElement
+        import copy
 
         new_run = paragraph.add_run(text)
 
-        # Copy format properties
+        # Copy format properties, excluding specified ones
         if rpr_element is not None:
             new_rpr = new_run._r.get_or_add_rPr()
 
-            # Copy tất cả children của rpr_element
+            # Properties to skip when copying (default: none)
+            if skip_props is None:
+                skip_props = []
+
+            # Copy children except skipped properties
             for child in rpr_element:
-                new_rpr.append(child)
+                # Skip if this property tag is in skip_props
+                prop_tag = child.tag.replace(f'{self.w_ns}', '')
+                if prop_tag not in skip_props:
+                    # Deep copy to avoid reference issues
+                    child_copy = copy.deepcopy(child)
+                    new_rpr.append(child_copy)
 
         return new_run
 
@@ -426,21 +474,100 @@ class DocxFullEditor:
         font_name: str = None,
         font_size: int = None
     ):
-        """Apply formatting to a run"""
+        """Apply formatting to a run - handles removing format when set to False"""
+        rpr = run._r.get_or_add_rPr()
+
+        # Handle bold - remove element when False, set when True
         if bold is not None:
-            run.font.bold = bold
+            bold_elem = rpr.find(f'{self.w_ns}b')
+            if bold:
+                if bold_elem is None:
+                    bold_elem = rpr.makeelement(f'{self.w_ns}b')
+                    rpr.append(bold_elem)
+                bold_elem.set(f'{self.w_ns}val', '1')
+            else:
+                # Remove bold element entirely when False
+                if bold_elem is not None:
+                    rpr.remove(bold_elem)
+
+        # Handle italic - remove element when False, set when True
         if italic is not None:
-            run.font.italic = italic
+            italic_elem = rpr.find(f'{self.w_ns}i')
+            if italic:
+                if italic_elem is None:
+                    italic_elem = rpr.makeelement(f'{self.w_ns}i')
+                    rpr.append(italic_elem)
+                italic_elem.set(f'{self.w_ns}val', '1')
+            else:
+                # Remove italic element entirely when False
+                if italic_elem is not None:
+                    rpr.remove(italic_elem)
+
+        # Handle underline - remove element when False, set when True
         if underline is not None:
-            run.font.underline = underline
+            underline_elem = rpr.find(f'{self.w_ns}u')
+            if underline:
+                if underline_elem is None:
+                    underline_elem = rpr.makeelement(f'{self.w_ns}u')
+                    rpr.append(underline_elem)
+                underline_elem.set(f'{self.w_ns}val', 'single')
+            else:
+                # Remove underline element entirely when False
+                if underline_elem is not None:
+                    rpr.remove(underline_elem)
+
+        # Handle color
         if color:
-            run.font.color.rgb = self._parse_color(color)
+            color_elem = rpr.find(f'{self.w_ns}color')
+            if color_elem is None:
+                color_elem = rpr.makeelement(f'{self.w_ns}color')
+                rpr.append(color_elem)
+
+            # Parse color directly to hex string
+            if color.startswith("#"):
+                # Hex color - just strip the # and convert to uppercase
+                color_hex = color.lstrip("#").upper()
+            elif color.startswith("rgb"):
+                # RGB format - parse to hex
+                import re
+                rgb_match = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', color)
+                if rgb_match:
+                    r, g, b = int(rgb_match.group(1)), int(rgb_match.group(2)), int(rgb_match.group(3))
+                    color_hex = f'{r:02X}{g:02X}{b:02X}'
+                else:
+                    color_hex = "000000"
+            else:
+                # Named color - use _parse_color to get RGBColor, then extract hex
+                rgb = self._parse_color(color)
+                # RGBColor is a tuple-like object, convert to hex
+                color_hex = f'{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}'
+
+            color_elem.set(f'{self.w_ns}val', color_hex)
+
+        # Handle highlight
         if highlight:
-            run.font.highlight_color = self._parse_highlight_color(highlight)
+            shd_elem = rpr.find(f'{self.w_ns}shd')
+            if shd_elem is None:
+                shd_elem = rpr.makeelement(f'{self.w_ns}shd')
+                rpr.append(shd_elem)
+            shd_elem.set(f'{self.w_ns}fill', self._parse_highlight_color(highlight))
+
+        # Handle font name
         if font_name:
-            run.font.name = font_name
+            rfonts_elem = rpr.find(f'{self.w_ns}rFonts')
+            if rfonts_elem is None:
+                rfonts_elem = rpr.makeelement(f'{self.w_ns}rFonts')
+                rpr.append(rfonts_elem)
+            rfonts_elem.set(f'{self.w_ns}ascii', font_name)
+            rfonts_elem.set(f'{self.w_ns}hAnsi', font_name)
+
+        # Handle font size
         if font_size:
-            run.font.size = Pt(font_size)
+            sz_elem = rpr.find(f'{self.w_ns}sz')
+            if sz_elem is None:
+                sz_elem = rpr.makeelement(f'{self.w_ns}sz')
+                rpr.append(sz_elem)
+            sz_elem.set(f'{self.w_ns}val', str(font_size * 2))  # Stored in half-points
 
     # ===== TEXT EDITING (Giữ format) =====
 
@@ -552,7 +679,8 @@ class DocxFullEditor:
         color: str = None,
         highlight: str = None,
         font_name: str = None,
-        font_size: int = None
+        font_size: int = None,
+        paragraph_index: int = None
     ):
         """
         Apply formatting cho text cụ thể
@@ -567,6 +695,7 @@ class DocxFullEditor:
             highlight: Highlight color
             font_name: Tên font
             font_size: Cỡ chữ (points)
+            paragraph_index: Chỉ format text tại paragraph này (None = format tất cả)
         """
         import re
 
@@ -576,10 +705,10 @@ class DocxFullEditor:
         if len(text_parts) > 1:
             # Multi-paragraph: apply format to each part separately
             for text_part in text_parts:
-                self._apply_format_to_single_text(text_part, bold, italic, underline, color, highlight, font_name, font_size)
+                self._apply_format_to_single_text(text_part, bold, italic, underline, color, highlight, font_name, font_size, paragraph_index)
         else:
             # Single paragraph
-            self._apply_format_to_single_text(text, bold, italic, underline, color, highlight, font_name, font_size)
+            self._apply_format_to_single_text(text, bold, italic, underline, color, highlight, font_name, font_size, paragraph_index)
 
     def _apply_format_to_single_text(
         self,
@@ -590,12 +719,23 @@ class DocxFullEditor:
         color: str = None,
         highlight: str = None,
         font_name: str = None,
-        font_size: int = None
+        font_size: int = None,
+        paragraph_index: int = None
     ):
-        """Helper: apply format to single text segment"""
+        """Helper: apply format to single text segment
+
+        Args:
+            text: Text cần format
+            bold, italic, underline, color, highlight, font_name, font_size: Format options
+            paragraph_index: Chỉ format text tại paragraph này (None = format tất cả)
+        """
         search_text_normalized = re.sub(r'\s+', ' ', text.strip())
 
-        for paragraph in self._iterate_paragraphs_in_doc_order():
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            # Skip if paragraph_index is specified and doesn't match
+            if paragraph_index is not None and p_idx != paragraph_index:
+                continue
+
             para_text = "".join(run.text for run in paragraph.runs)
             para_text_normalized = re.sub(r'\s+', ' ', para_text.strip())
 
@@ -973,25 +1113,65 @@ class DocxFullEditor:
         """
         import re
 
+        # Normalize search text for matching
         search_text_normalized = re.sub(r'\s+', ' ', text.strip())
 
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if paragraph_index is not None and p_idx != paragraph_index:
                 continue
 
+            # Build the full text from runs
             full_text = "".join(run.text for run in paragraph.runs)
             full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
 
             if search_text_normalized not in full_text_normalized:
                 continue
 
-            start_idx = full_text_normalized.find(search_text_normalized)
-            if start_idx == -1:
+            # Find position in normalized text
+            start_idx_normalized = full_text_normalized.find(search_text_normalized)
+            if start_idx_normalized == -1:
                 continue
 
-            end_idx = start_idx + len(search_text_normalized)
+            end_idx_normalized = start_idx_normalized + len(search_text_normalized)
 
-            # Find runs containing the text
+            # Map normalized position back to original text position
+            # by counting non-whitespace characters
+            char_count = 0
+            non_ws_count = 0
+            start_idx_original = None
+            end_idx_original = None
+
+            for char in full_text:
+                if char.isspace():
+                    # Whitespace character - skip counting but increment char_count
+                    pass
+                else:
+                    # Non-whitespace character
+                    if start_idx_original is None and non_ws_count == start_idx_normalized:
+                        start_idx_original = char_count
+                    if non_ws_count == end_idx_normalized - 1:
+                        end_idx_original = char_count + 1
+                        break
+                    non_ws_count += 1
+                char_count += 1
+
+            # If end_idx_original is still None, set it to the end of the text
+            if end_idx_original is None and start_idx_original is not None:
+                end_idx_original = len(full_text)
+
+            # Fallback: if mapping failed, try direct search in original text
+            if start_idx_original is None or end_idx_original is None:
+                start_idx_original = full_text.find(text)
+                if start_idx_original != -1:
+                    end_idx_original = start_idx_original + len(text)
+                else:
+                    # Try finding the search text in the runs directly
+                    for run in paragraph.runs:
+                        if search_text_normalized in re.sub(r'\s+', ' ', run.text.strip()):
+                            return self._extract_run_format(run)
+                    continue
+
+            # Find runs containing the text using original positions
             char_count = 0
             formats_found = []
 
@@ -999,15 +1179,18 @@ class DocxFullEditor:
                 run_start = char_count
                 run_end = char_count + len(run.text)
 
-                if run_end > start_idx and run_start < end_idx:
+                # Check if this run overlaps with the target text range
+                if run_end > start_idx_original and run_start < end_idx_original:
                     # This run contains part of the target text
-                    format_info = self._extract_run_format(run)
-                    formats_found.append(format_info)
+                    # Only extract format from runs that have actual text content
+                    if run.text.strip():
+                        format_info = self._extract_run_format(run)
+                        formats_found.append(format_info)
 
                 char_count += len(run.text)
 
             if formats_found:
-                # Return format from the first non-empty run
+                # Return format from the first non-empty run with actual content
                 for fmt in formats_found:
                     if fmt:
                         return fmt
