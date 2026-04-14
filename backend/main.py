@@ -1205,3 +1205,92 @@ async def update_text_in_template(
             detail=f"Text update failed: {str(e)}\n{traceback.format_exc()}"
         )
 
+
+@app.post("/get-selection-format")
+async def get_selection_format(
+    template_id: str = Form(...),
+    selected_text: str = Form(...),
+    block_index: int = Form(None)
+):
+    """
+    Extract accurate formatting information for selected text from DOCX
+
+    Args:
+        template_id: Template ID
+        selected_text: Text to extract format from
+        block_index: Block index in HTML preview (for precision, optional)
+
+    Returns:
+        JSON with accurate format info from DOCX:
+        {
+            'bold': bool,
+            'italic': bool,
+            'underline': str (none/single/double),
+            'color': str (hex, e.g., 'FF0000'),
+            'highlight': str (hex or null),
+            'fontSize': int (points),
+            'fontName': str
+        }
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        from docx_editor import DocxFullEditor
+
+        editor = DocxFullEditor(str(template_path))
+
+        # Map block_index to paragraph_index if provided
+        actual_para_index = None
+        if block_index is not None:
+            actual_para_index = editor.get_paragraph_index_from_block(block_index)
+
+        # Extract format from DOCX
+        format_info = editor.get_format_at_position(
+            text=selected_text,
+            paragraph_index=actual_para_index
+        )
+
+        if not format_info:
+            # Return default format if not found
+            format_info = {
+                'bold': False,
+                'italic': False,
+                'underline': 'none',
+                'color': '000000',
+                'highlight': None,
+                'fontSize': 12,
+                'fontName': 'Times New Roman'
+            }
+
+        # Convert to frontend format
+        frontend_format = {
+            'bold': format_info.get('bold', False),
+            'italic': format_info.get('italic', False),
+            'underline': format_info.get('underline', 'none') != 'none',
+            'color': '#' + format_info.get('color', '000000'),
+            'fontSize': format_info.get('font_size', 12),
+            'fontName': format_info.get('font_name', 'Times New Roman')
+        }
+
+        # Include highlight color if present
+        if format_info.get('highlight'):
+            frontend_format['highlight'] = '#' + format_info['highlight']
+
+        return {
+            'template_id': template_id,
+            'selected_text': selected_text,
+            'format': frontend_format
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Format extraction failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /get-selection-format ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+

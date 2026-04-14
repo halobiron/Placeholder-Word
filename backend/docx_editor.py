@@ -942,3 +942,173 @@ class DocxFullEditor:
         """Lưu bản copy (giữ nguyên original)"""
         self.doc.save(output_path)
         return output_path
+
+    # ===== FORMAT EXTRACTION =====
+
+    def get_format_at_position(
+        self,
+        text: str,
+        paragraph_index: int = None
+    ) -> Optional[Dict]:
+        """
+        Extract formatting information for text at a specific position
+
+        Args:
+            text: Text to extract format from
+            paragraph_index: Index of paragraph containing the text (optional, for precision)
+
+        Returns:
+            Dict with format info or None if not found:
+            {
+                'bold': bool,
+                'italic': bool,
+                'underline': str (none/single/double/dotted/dash/dashDot/dashDotDot/double/wave),
+                'color': str (hex, e.g., 'FF0000'),
+                'highlight': str (hex, e.g., 'FFFF00'),
+                'font_size': int (points, e.g., 12),
+                'font_name': str,
+                'superscript': bool,
+                'subscript': bool
+            }
+        """
+        import re
+
+        search_text_normalized = re.sub(r'\s+', ' ', text.strip())
+
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if paragraph_index is not None and p_idx != paragraph_index:
+                continue
+
+            full_text = "".join(run.text for run in paragraph.runs)
+            full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
+
+            if search_text_normalized not in full_text_normalized:
+                continue
+
+            start_idx = full_text_normalized.find(search_text_normalized)
+            if start_idx == -1:
+                continue
+
+            end_idx = start_idx + len(search_text_normalized)
+
+            # Find runs containing the text
+            char_count = 0
+            formats_found = []
+
+            for r_idx, run in enumerate(paragraph.runs):
+                run_start = char_count
+                run_end = char_count + len(run.text)
+
+                if run_end > start_idx and run_start < end_idx:
+                    # This run contains part of the target text
+                    format_info = self._extract_run_format(run)
+                    formats_found.append(format_info)
+
+                char_count += len(run.text)
+
+            if formats_found:
+                # Return format from the first non-empty run
+                for fmt in formats_found:
+                    if fmt:
+                        return fmt
+
+                return formats_found[0]
+
+        return None
+
+    def _extract_run_format(self, run) -> Optional[Dict]:
+        """
+        Extract formatting from a single run
+
+        Args:
+            run: python-docx Run object
+
+        Returns:
+            Dict with format info
+        """
+        from docx.oxml import OxmlElement
+
+        format_info = {
+            'bold': False,
+            'italic': False,
+            'underline': 'none',
+            'color': '000000',  # Default black
+            'highlight': None,
+            'font_size': 12,  # Default 12pt
+            'font_name': 'Times New Roman',
+            'superscript': False,
+            'subscript': False
+        }
+
+        try:
+            # Access run properties directly via XML
+            rpr = run._r.get_or_add_rPr()
+
+            # Bold
+            bold_elem = rpr.find(f'{self.w_ns}b')
+            if bold_elem is not None:
+                val = bold_elem.get(f'{self.w_ns}val', '1')
+                format_info['bold'] = val != '0'
+
+            # Italic
+            italic_elem = rpr.find(f'{self.w_ns}i')
+            if italic_elem is not None:
+                val = italic_elem.get(f'{self.w_ns}val', '1')
+                format_info['italic'] = val != '0'
+
+            # Underline
+            underline_elem = rpr.find(f'{self.w_ns}u')
+            if underline_elem is not None:
+                format_info['underline'] = underline_elem.get(f'{self.w_ns}val', 'single')
+
+            # Color
+            color_elem = rpr.find(f'{self.w_ns}color')
+            if color_elem is not None:
+                color_val = color_elem.get(f'{self.w_ns}val', '000000')
+                # Handle theme colors
+                if color_val.startswith('themeColor'):
+                    format_info['color'] = '000000'
+                else:
+                    format_info['color'] = color_val
+
+            # Highlight/Shading
+            shd_elem = rpr.find(f'{self.w_ns}shd')
+            if shd_elem is not None:
+                fill_val = shd_elem.get(f'{self.w_ns}fill', None)
+                if fill_val and fill_val != 'auto':
+                    format_info['highlight'] = fill_val
+
+            # Font size (stored in half-points)
+            sz_elem = rpr.find(f'{self.w_ns}sz')
+            if sz_elem is not None:
+                size_val = sz_elem.get(f'{self.w_ns}val', '24')
+                try:
+                    format_info['font_size'] = int(size_val) // 2  # Convert to points
+                except (ValueError, TypeError):
+                    format_info['font_size'] = 12
+
+            # Font name
+            rfonts_elem = rpr.find(f'{self.w_ns}rFonts')
+            if rfonts_elem is not None:
+                # Try ASCII font first, then HAnsi (High ANSI), then CS (Complex Script)
+                font_name = (
+                    rfonts_elem.get(f'{self.w_ns}ascii', None) or
+                    rfonts_elem.get(f'{self.w_ns}hAnsi', None) or
+                    rfonts_elem.get(f'{self.w_ns}cs', None)
+                )
+                if font_name:
+                    format_info['font_name'] = font_name
+
+            # Vertical alignment (superscript/subscript)
+            vertAlign_elem = rpr.find(f'{self.w_ns}vertAlign')
+            if vertAlign_elem is not None:
+                val = vertAlign_elem.get(f'{self.w_ns}val', '')
+                if val == 'superscript':
+                    format_info['superscript'] = True
+                elif val == 'subscript':
+                    format_info['subscript'] = True
+
+        except Exception as e:
+            print(f"Error extracting run format: {e}")
+
+        return format_info

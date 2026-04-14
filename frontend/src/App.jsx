@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -629,7 +629,7 @@ function App() {
   }
 
   // Handle text selection for editing
-  const handleTextSelection = () => {
+  const handleTextSelection = async () => {
     const selection = window.getSelection()
     const selectedText = selection.toString().trim()
 
@@ -648,16 +648,36 @@ function App() {
         currentElement = currentElement.parentElement
       }
 
-      // Extract format from the selected element
-      const computedStyle = window.getComputedStyle(element)
-      const textDecorationLine = computedStyle.textDecorationLine || ''
-      const format = {
-        bold: computedStyle.fontWeight === '700' || computedStyle.fontWeight === 'bold',
-        italic: computedStyle.fontStyle === 'italic',
-        underline: textDecorationLine.includes('underline'),
-        color: computedStyle.color, // Convert to hex if needed
-        fontSize: parseInt(computedStyle.fontSize) || 12,
-        fontName: computedStyle.fontFamily.split(',')[0].replace(/['"]/g, '').trim()
+      // Get accurate format from DOCX backend (not from HTML computed style)
+      let format = {
+        bold: false,
+        italic: false,
+        underline: false,
+        color: '#000000',
+        fontSize: 12,
+        fontName: 'Times New Roman'
+      }
+
+      try {
+        if (templateId) {
+          const response = await getSelectionFormat(templateId, selectedText, blockIndex)
+          if (response?.format) {
+            format = response.format
+          }
+        }
+      } catch (error) {
+        console.error('Failed to get selection format from backend:', error)
+        // Fall back to computed style if backend fails
+        const computedStyle = window.getComputedStyle(element)
+        const textDecorationLine = computedStyle.textDecorationLine || ''
+        format = {
+          bold: computedStyle.fontWeight === '700' || computedStyle.fontWeight === 'bold',
+          italic: computedStyle.fontStyle === 'italic',
+          underline: textDecorationLine.includes('underline'),
+          color: computedStyle.color,
+          fontSize: parseInt(computedStyle.fontSize) || 12,
+          fontName: computedStyle.fontFamily.split(',')[0].replace(/['"]/g, '').trim()
+        }
       }
 
       setSelectedTextForEdit({

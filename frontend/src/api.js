@@ -227,3 +227,19 @@ export const refreshTemplateInfo = async (templateId) => {
   const response = await axios.get(`${API_BASE}/template-info/${templateId}`)
   return response.data
 }
+
+export const getSelectionFormat = async (templateId, selectedText, blockIndex) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('selected_text', selectedText)
+  if (blockIndex !== null && blockIndex !== undefined) {
+    formData.append('block_index', blockIndex)
+  }
+
+  const response = await axios.post(`${API_BASE}/get-selection-format`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
