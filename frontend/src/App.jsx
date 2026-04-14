@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -44,6 +44,71 @@ function App() {
     }
     return Array.from(found)
   }
+
+  // Helper: Get original text from a specific block
+  const getOriginalTextFromBlock = (html, blockIndex) => {
+    if (!html) return ''
+    const temp = document.createElement('div')
+    temp.innerHTML = html
+    const block = temp.querySelector(`[data-block-index="${blockIndex}"]`)
+    return block ? block.textContent : ''
+  }
+
+  // Helper: Get current text from a specific block
+  const getTextFromBlock = (html, blockIndex) => {
+    if (!html) return ''
+    const temp = document.createElement('div')
+    temp.innerHTML = html
+    const block = temp.querySelector(`[data-block-index="${blockIndex}"]`)
+    return block ? block.textContent : ''
+  }
+
+  // Helper: Get current block index from selection
+  const getCurrentBlockIndex = () => {
+    const selection = window.getSelection()
+    if (!selection.rangeCount) return null
+    const range = selection.getRangeAt(0)
+    const editedBlock = range.startContainer.closest('[data-block-index]')
+    return editedBlock ? parseInt(editedBlock.getAttribute('data-block-index')) : null
+  }
+
+  // Debounced text update function
+  const debouncedUpdateText = useMemo(
+    () => {
+      let timeoutId
+      return async (blockIndex, oldText, newText) => {
+        // Clear previous timeout
+        if (timeoutId) clearTimeout(timeoutId)
+
+        // Set new timeout
+        timeoutId = setTimeout(async () => {
+          try {
+            // Validate blockIndex before making API call
+            if (isNaN(blockIndex) || blockIndex === null || blockIndex === undefined) {
+              console.warn('Invalid blockIndex in debouncedUpdateText, skipping API call:', blockIndex)
+              return
+            }
+
+            await updateTextInTemplate(templateId, {
+              blockIndex,
+              oldText,
+              newText,
+              editType: 'text'
+            })
+            setError('✅ Đã cập nhật text')
+            setTimeout(() => setError(null), 2000)
+            // DON'T refresh HTML after text-only edits - user sees changes in real-time
+            // Only refresh for placeholder operations (add/delete/rename/format)
+          } catch (err) {
+            console.error('Text update failed:', err)
+            setError('⚠️ Cập nhật thất bại: ' + (err.response?.data?.detail || err.message))
+            setTimeout(() => setError(null), 3000)
+          }
+        }, 1000) // 1 second debounce
+      }
+    },
+    [templateId]
+  )
 
   // Attach click handlers to placeholders for rename
   useEffect(() => {
@@ -223,6 +288,24 @@ function App() {
       editor.removeEventListener('mouseup', handleMouseUp)
     }
   }, [editorHtml, isAddMode])
+
+  // Refresh template after text update
+  useEffect(() => {
+    const refreshAfterTextUpdate = async () => {
+      if (templateNeedsUpdate && templateId) {
+        try {
+          const info = await getTemplateInfo(templateId)
+          setEditorHtml(info.html_preview)
+          setFields(info.fields)
+          setTemplateNeedsUpdate(false)
+        } catch (err) {
+          console.error('Failed to refresh template:', err)
+        }
+      }
+    }
+
+    refreshAfterTextUpdate()
+  }, [templateNeedsUpdate, templateId])
 
   // Rename placeholder
   const renameField = (oldName, newName) => {
@@ -550,7 +633,8 @@ function App() {
     const selection = window.getSelection()
     const selectedText = selection.toString().trim()
 
-    if (selectedText && !isAddMode) {
+    // Only show format popup for regular text (not placeholders)
+    if (selectedText && !isAddMode && !selectedText.includes('«')) {
       const element = selection.anchorNode.parentElement
 
       // Find block_index from parent elements
@@ -566,10 +650,11 @@ function App() {
 
       // Extract format from the selected element
       const computedStyle = window.getComputedStyle(element)
+      const textDecorationLine = computedStyle.textDecorationLine || ''
       const format = {
         bold: computedStyle.fontWeight === '700' || computedStyle.fontWeight === 'bold',
         italic: computedStyle.fontStyle === 'italic',
-        underline: computedStyle.textDecorationLine.includes('underline'),
+        underline: textDecorationLine.includes('underline'),
         color: computedStyle.color, // Convert to hex if needed
         fontSize: parseInt(computedStyle.fontSize) || 12,
         fontName: computedStyle.fontFamily.split(',')[0].replace(/['"]/g, '').trim()
@@ -579,18 +664,18 @@ function App() {
         text: selectedText,
         element: element,
         format: format,
-        blockIndex: blockIndex  // Include block index for precise editing
+        blockIndex: blockIndex
       })
       setShowEditPopup(true)
     }
   }
 
-  // Handle edit submission
-  const handleEditSubmit = async (editData) => {
+  // Handle format application from EditPopup
+  const handleFormatApplied = async (formatData) => {
     if (!templateId) return
 
     try {
-      const result = await editSelection(templateId, editData)
+      const result = await editSelection(templateId, formatData)
 
       // Update UI
       setEditorHtml(result.html_preview)
@@ -601,11 +686,11 @@ function App() {
       setSelectedTextForEdit(null)
 
       // Show success message
-      setError(`✅ Đã ${editData.type === 'delete' ? 'xóa' : 'cập nhật'} thành công!`)
-      setTimeout(() => setError(null), 3000)
+      setError(`✅ Đã áp dụng định dạng thành công!`)
+      setTimeout(() => setError(null), 2000)
     } catch (err) {
-      console.error('Edit failed:', err)
-      setError('Cập nhật thất bại: ' + (err.response?.data?.detail || err.message))
+      console.error('Format application failed:', err)
+      setError('Áp dụng định dạng thất bại: ' + (err.response?.data?.detail || err.message))
     }
   }
 
@@ -976,10 +1061,46 @@ function App() {
                     // Check if any placeholders were deleted
                     const deletedFields = fields.filter(f => !newFields.includes(f))
 
-                    setEditorHtml(newHtml)
-                    setFields(newFields)
+                    // DON'T update editorHtml on every keystroke - this causes cursor jumping!
+                    // contentEditable handles text changes natively
+                    // Only update fields state when placeholders change
+                    if (newFields.length !== fields.length || JSON.stringify(newFields) !== JSON.stringify(fields)) {
+                      setFields(newFields)
+                    }
 
-                    // If placeholders were deleted, update template immediately
+                    // NEW: Detect text changes (not just placeholder deletions)
+                    const selection = window.getSelection()
+                    if (selection.rangeCount > 0) {
+                      const range = selection.getRangeAt(0)
+
+                      // Handle text nodes (startContainer might be text, not element)
+                      const startElement = range.startContainer.nodeType === Node.TEXT_NODE
+                        ? range.startContainer.parentElement
+                        : range.startContainer
+
+                      const editedBlock = startElement?.closest('[data-block-index]')
+
+                      if (editedBlock) {
+                        const blockIndex = parseInt(editedBlock.getAttribute('data-block-index'))
+
+                        // Validate blockIndex before proceeding
+                        if (isNaN(blockIndex)) {
+                          console.warn('Invalid blockIndex, skipping text update')
+                          return
+                        }
+
+                        const originalText = getOriginalTextFromBlock(editorHtml, blockIndex)
+                        const newText = getTextFromBlock(newHtml, blockIndex)
+
+                        // Only trigger update if text actually changed (not just placeholder deletion)
+                        if (originalText !== newText && deletedFields.length === 0) {
+                          // Debounce to avoid excessive API calls
+                          debouncedUpdateText(blockIndex, originalText, newText)
+                        }
+                      }
+                    }
+
+                    // Existing: Handle placeholder deletion
                     if (deletedFields.length > 0) {
                       try {
                         // Update renameMap to mark deleted fields
@@ -1201,11 +1322,11 @@ function App() {
         `}</style>
       </div>
 
-      {/* Enhanced editing popups */}
+      {/* Format-only popup for text selection */}
       {showEditPopup && selectedTextForEdit && (
         <EditPopup
           selectedText={selectedTextForEdit}
-          onSubmit={handleEditSubmit}
+          onFormatApplied={handleFormatApplied}
           onClose={() => {
             setShowEditPopup(false)
             setSelectedTextForEdit(null)

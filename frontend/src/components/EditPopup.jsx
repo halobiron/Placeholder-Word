@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 
-function EditPopup({ selectedText, onSubmit, onClose }) {
-  const [newText, setNewText] = useState(selectedText?.text || '')
+function EditPopup({ selectedText, onFormatApplied, onClose }) {
   const [originalFormat, setOriginalFormat] = useState(null)
   const [format, setFormat] = useState({
     bold: false,
@@ -10,6 +9,7 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
     color: '#000000',
     fontSize: 12,
     fontName: 'Times New Roman'
+    // Note: alignment is not currently supported for text-level formatting
   })
   const [submitting, setSubmitting] = useState(false)
 
@@ -21,10 +21,8 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
     }
   }, [selectedText])
 
-  const blockIndex = selectedText?.blockIndex
-
   const hasFormatChanged = () => {
-    if (!originalFormat) return false
+    if (!originalFormat) return true // No original format, apply current format
     return (
       format.bold !== originalFormat.bold ||
       format.italic !== originalFormat.italic ||
@@ -35,68 +33,35 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
     )
   }
 
-  const handleSubmit = async (submitAction) => {
+  const handleApplyFormat = async () => {
+    if (!hasFormatChanged()) {
+      // No format changes, just close
+      onClose()
+      return
+    }
+
     setSubmitting(true)
 
     try {
-      let data = {}
-
-      if (submitAction === 'delete') {
-        data = {
-          type: 'delete',
-          selectedText: selectedText?.text,
-          blockIndex: blockIndex
-        }
-      } else {
-        const textChanged = newText !== selectedText?.text
-        const formatChanged = hasFormatChanged()
-
-        if (textChanged && formatChanged) {
-          // Send both text and format changes
-          data = {
-            type: 'both',
-            selectedText: selectedText?.text,
-            newText: newText,
-            format: format,
-            blockIndex: blockIndex
-          }
-        } else if (textChanged) {
-          // Only text changed
-          data = {
-            type: 'text',
-            selectedText: selectedText?.text,
-            newText: newText,
-            blockIndex: blockIndex
-          }
-        } else if (formatChanged) {
-          // Only format changed
-          data = {
-            type: 'format',
-            selectedText: selectedText?.text,
-            format: format,
-            blockIndex: blockIndex
-          }
-        } else {
-          // Nothing changed - close without submitting
-          onClose()
-          return
-        }
-      }
-
-      await onSubmit(data)
+      await onFormatApplied({
+        selectedText: selectedText?.text,
+        format: format,
+        type: 'format',
+        blockIndex: selectedText?.blockIndex
+      })
       onClose()
     } catch (error) {
-      console.error('Edit failed:', error)
-      alert('Cập nhật thất bại: ' + error.message)
+      console.error('Format application failed:', error)
+      alert('Áp dụng định dạng thất bại: ' + error.message)
     } finally {
       setSubmitting(false)
     }
   }
 
   return (
-    <div className="fixed bottom-4 right-4 bg-white shadow-lg rounded-lg p-4 w-[500px] z-50 max-h-[80vh] overflow-y-auto">
+    <div className="fixed bottom-4 right-4 bg-white shadow-lg rounded-lg p-4 w-[450px] z-50 max-h-[80vh] overflow-y-auto">
       <div className="flex justify-between items-center mb-3">
-        <h3 className="font-bold text-lg">Chỉnh sửa</h3>
+        <h3 className="font-bold text-lg">Định dạng văn bản</h3>
         <button
           onClick={onClose}
           className="text-gray-500 hover:text-gray-700 text-xl"
@@ -111,30 +76,18 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
           Văn bản đã chọn:
         </label>
         <div className="bg-gray-100 p-2 rounded text-sm text-gray-600">
-          {selectedText?.text}
+          {selectedText?.text || 'Không có văn bản nào được chọn'}
         </div>
       </div>
 
-      {/* Text editor */}
+      {/* Format options */}
       <div className="mb-3">
-        <label className="block text-sm font-medium mb-1 text-gray-700">
-          Sửa nội dung:
-        </label>
-        <textarea
-          value={newText}
-          onChange={(e) => setNewText(e.target.value)}
-          className="w-full border rounded p-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          rows={3}
-          placeholder="Nhập nội dung mới..."
-        />
-      </div>
-
-      {/* Format options - compact */}
-      <div className="mb-3">
-        <label className="block text-sm font-medium mb-1 text-gray-700">
+        <label className="block text-sm font-medium mb-2 text-gray-700">
           Định dạng:
         </label>
-        <div className="grid grid-cols-2 gap-2">
+
+        {/* Text style toggles */}
+        <div className="grid grid-cols-3 gap-2 mb-2">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
@@ -142,7 +95,7 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
               onChange={(e) => setFormat({ ...format, bold: e.target.checked })}
               className="w-4 h-4"
             />
-            <span className="text-sm">Đậm</span>
+            <span className="text-sm">Đậm (B)</span>
           </label>
 
           <label className="flex items-center gap-2 cursor-pointer">
@@ -152,7 +105,7 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
               onChange={(e) => setFormat({ ...format, italic: e.target.checked })}
               className="w-4 h-4"
             />
-            <span className="text-sm">Nghiêng</span>
+            <span className="text-sm">Nghiêng (I)</span>
           </label>
 
           <label className="flex items-center gap-2 cursor-pointer">
@@ -162,39 +115,50 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
               onChange={(e) => setFormat({ ...format, underline: e.target.checked })}
               className="w-4 h-4"
             />
-            <span className="text-sm">Gạch chân</span>
+            <span className="text-sm">Gạch chân (U)</span>
           </label>
+        </div>
 
+        {/* Color and font size */}
+        <div className="grid grid-cols-2 gap-2 mb-2">
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-600">Màu:</span>
+            <span className="text-xs text-gray-600">Màu sắc:</span>
             <input
               type="color"
               value={format.color}
               onChange={(e) => setFormat({ ...format, color: e.target.value })}
-              className="w-8 h-6 rounded cursor-pointer"
+              className="w-10 h-8 rounded cursor-pointer border"
             />
+            <span className="text-xs text-gray-500">{format.color}</span>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-600">Cỡ:</span>
+            <span className="text-xs text-gray-600">Cỡ chữ:</span>
             <input
               type="number"
               value={format.fontSize}
-              onChange={(e) => setFormat({ ...format, fontSize: parseInt(e.target.value) })}
+              onChange={(e) => setFormat({ ...format, fontSize: parseInt(e.target.value) || 12 })}
               className="w-16 border rounded px-2 py-1 text-sm"
               min={8}
               max={72}
             />
+            <span className="text-xs text-gray-500">pt</span>
           </div>
+        </div>
 
+        {/* Font family */}
+        <div className="mb-2">
+          <span className="text-xs text-gray-600">Font chữ:</span>
           <select
             value={format.fontName}
             onChange={(e) => setFormat({ ...format, fontName: e.target.value })}
-            className="border rounded px-2 py-1 text-sm"
+            className="ml-2 border rounded px-2 py-1 text-sm"
           >
             <option value="Times New Roman">Times New Roman</option>
             <option value="Arial">Arial</option>
             <option value="Calibri">Calibri</option>
+            <option value="Verdana">Verdana</option>
+            <option value="Georgia">Georgia</option>
           </select>
         </div>
       </div>
@@ -202,18 +166,11 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
       {/* Actions */}
       <div className="flex gap-2">
         <button
-          onClick={() => handleSubmit('edit')}
-          disabled={submitting}
+          onClick={handleApplyFormat}
+          disabled={submitting || !hasFormatChanged()}
           className="flex-1 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-medium text-sm"
         >
-          {submitting ? 'Đang xử lý...' : 'Lưu thay đổi'}
-        </button>
-        <button
-          onClick={() => handleSubmit('delete')}
-          disabled={submitting}
-          className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-medium text-sm"
-        >
-          Xóa
+          {submitting ? 'Đang áp dụng...' : 'Áp dụng định dạng'}
         </button>
         <button
           onClick={onClose}
@@ -222,6 +179,10 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
           Hủy
         </button>
       </div>
+
+      <p className="text-xs text-gray-500 mt-2 text-center">
+        💡 Text editing có thể thực hiện trực tiếp trên tài liệu
+      </p>
     </div>
   )
 }

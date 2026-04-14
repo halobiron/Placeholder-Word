@@ -207,6 +207,7 @@ class DocxFullEditor:
     ):
         """
         Apply formatting to text at a specific paragraph position
+        Splits runs if needed to format only the target text, not the entire run
 
         Args:
             text: Text to format
@@ -224,28 +225,181 @@ class DocxFullEditor:
             if p_idx != paragraph_index:
                 continue
 
-            for run in paragraph.runs:
-                run_normalized = re.sub(r'\s+', ' ', run.text.strip())
-                if search_text_normalized not in run_normalized and search_text_normalized[0:30] not in run_normalized:
-                    continue
+            # Tìm vị trí chính xác của text trong paragraph
+            full_text = "".join(run.text for run in paragraph.runs)
+            full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
 
-                if bold is not None:
-                    run.font.bold = bold
-                if italic is not None:
-                    run.font.italic = italic
-                if underline is not None:
-                    run.font.underline = underline
-                if color:
-                    run.font.color.rgb = self._parse_color(color)
-                if highlight:
-                    run.font.highlight_color = self._parse_highlight_color(highlight)
-                if font_name:
-                    run.font.name = font_name
-                if font_size:
-                    run.font.size = Pt(font_size)
-                return True
+            if search_text_normalized not in full_text_normalized:
+                continue
+
+            start_idx = full_text_normalized.find(search_text_normalized)
+            if start_idx == -1:
+                continue
+
+            end_idx = start_idx + len(search_text_normalized)
+
+            # Tìm runs chứa text cần format
+            char_count = 0
+            runs_to_format = []
+
+            for r_idx, run in enumerate(paragraph.runs):
+                run_start = char_count
+                run_end = char_count + len(run.text)
+
+                # Check if this run overlaps with target text
+                if run_end > start_idx and run_start < end_idx:
+                    overlap_start = max(start_idx, run_start)
+                    overlap_end = min(end_idx, run_end)
+
+                    runs_to_format.append({
+                        'run': run,
+                        'r_idx': r_idx,
+                        'run_start': run_start,
+                        'run_end': run_end,
+                        'overlap_start': overlap_start,
+                        'overlap_end': overlap_end,
+                        'text_to_format': run.text[overlap_start - run_start:overlap_end - run_start]
+                    })
+
+                char_count += len(run.text)
+
+            if not runs_to_format:
+                continue
+
+            # Xử lý split runs và apply format
+            self._format_text_in_runs(
+                paragraph,
+                runs_to_format,
+                bold, italic, underline, color, highlight, font_name, font_size
+            )
+            return True
 
         return False
+
+    def _format_text_in_runs(
+        self,
+        paragraph,
+        runs_to_format: List[Dict],
+        bold: bool = None,
+        italic: bool = None,
+        underline: bool = None,
+        color: str = None,
+        highlight: str = None,
+        font_name: str = None,
+        font_size: int = None
+    ):
+        """
+        Split runs và apply formatting chỉ cho text cần format
+
+        Args:
+            paragraph: Paragraph object
+            runs_to_format: List of run info dicts from apply_format_at_position
+            bold, italic, underline, color, highlight, font_name, font_size: Format options
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        # Process runs in reverse order to maintain indices
+        for run_info in reversed(runs_to_format):
+            run = run_info['run']
+            r_idx = run_info['r_idx']
+            overlap_start = run_info['overlap_start']
+            overlap_end = run_info['overlap_end']
+            run_start = run_info['run_start']
+            run_end = run_info['run_end']
+
+            text_before = run.text[:overlap_start - run_start]
+            text_to_format = run.text[overlap_start - run_start:overlap_end - run_start]
+            text_after = run.text[overlap_end - run_start:]
+
+            # Case 1: Toàn bộ run cần format → chỉ apply format
+            if not text_before and not text_after:
+                self._apply_format_to_run(run, bold, italic, underline, color, highlight, font_name, font_size)
+                continue
+
+            # Case 2: Cần split run
+            # Get original format properties
+            original_rpr = run._r.get_or_add_rPr()
+
+            # Xóa text gốc
+            run.text = ""
+
+            # Tạo runs mới và chèn vào đúng vị trí
+            insert_index = r_idx
+
+            # Chèn text_before (nếu có)
+            if text_before:
+                new_run = self._create_run_with_format(paragraph, original_rpr, text_before)
+                paragraph._element.insert(insert_index, new_run._element)
+                insert_index += 1
+
+            # Chèn text_to_format với format mới
+            if text_to_format:
+                formatted_run = self._create_run_with_format(paragraph, original_rpr, text_to_format)
+                self._apply_format_to_run(formatted_run, bold, italic, underline, color, highlight, font_name, font_size)
+                paragraph._element.insert(insert_index, formatted_run._element)
+                insert_index += 1
+
+            # Chèn text_after (nếu có)
+            if text_after:
+                new_run = self._create_run_with_format(paragraph, original_rpr, text_after)
+                paragraph._element.insert(insert_index, new_run._element)
+
+            # Xóa run gốc
+            paragraph._element.remove(run._element)
+
+    def _create_run_with_format(self, paragraph, rpr_element, text: str):
+        """
+        Tạo run mới với format từ rpr_element
+
+        Args:
+            paragraph: Paragraph object
+            rpr_element: RunProperties element để copy format
+            text: Text cho run mới
+
+        Returns:
+            New Run object
+        """
+        from docx.oxml import OxmlElement
+
+        new_run = paragraph.add_run(text)
+
+        # Copy format properties
+        if rpr_element is not None:
+            new_rpr = new_run._r.get_or_add_rPr()
+
+            # Copy tất cả children của rpr_element
+            for child in rpr_element:
+                new_rpr.append(child)
+
+        return new_run
+
+    def _apply_format_to_run(
+        self,
+        run,
+        bold: bool = None,
+        italic: bool = None,
+        underline: bool = None,
+        color: str = None,
+        highlight: str = None,
+        font_name: str = None,
+        font_size: int = None
+    ):
+        """Apply formatting to a run"""
+        if bold is not None:
+            run.font.bold = bold
+        if italic is not None:
+            run.font.italic = italic
+        if underline is not None:
+            run.font.underline = underline
+        if color:
+            run.font.color.rgb = self._parse_color(color)
+        if highlight:
+            run.font.highlight_color = self._parse_highlight_color(highlight)
+        if font_name:
+            run.font.name = font_name
+        if font_size:
+            run.font.size = Pt(font_size)
 
     # ===== TEXT EDITING (Giữ format) =====
 
@@ -659,6 +813,16 @@ class DocxFullEditor:
             hex_color = color.lstrip("#")
             rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
             return RGBColor(*rgb)
+        elif color.startswith("rgb"):
+            # RGB color format: rgb(r, g, b) or rgba(r, g, b, a)
+            import re
+            rgb_match = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', color)
+            if rgb_match:
+                r, g, b = int(rgb_match.group(1)), int(rgb_match.group(2)), int(rgb_match.group(3))
+                return RGBColor(r, g, b)
+            else:
+                # If RGB parsing fails, default to black
+                return RGBColor(0, 0, 0)
         else:
             # Named color
             color_map = {

@@ -21,7 +21,11 @@
       "Bash(python3:*)",
       "Bash(tail -50 backend/logs/*.log)",
       "Bash(find E:/Work/PhenikaaX/Placeholder-Word/backend -name *.py -not -path */.venv/* -not -path */__pycache__/*)",
-      "Bash(grep -n \"class DocxFullEditor\" *.py)"
+      "Bash(grep -n \"class DocxFullEditor\" *.py)",
+      "Bash(grep -n \"^class\\\\|^    def\\\\|^$\" /Users/aiot/workspace/placeholder/backend/template_manager.py)",
+      "Bash(npx eslint:*)",
+      "Bash(node -c /Users/aiot/workspace/placeholder/frontend/src/components/EditPopup.jsx)",
+      "Bash(grep:*)"
     ]
   },
   "enabledPlugins": {

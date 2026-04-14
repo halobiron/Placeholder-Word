@@ -854,12 +854,22 @@ async def edit_selection(
 
         editor = DocxFullEditor(str(template_path))
 
+        # Debug logging
+        print(f"=== /edit-selection DEBUG ===")
+        print(f"template_id: {template_id}")
+        print(f"edit_type: {edit_type}")
+        print(f"selected_text: {selected_text[:50]}...")
+        print(f"paragraph_index (block_index): {paragraph_index}")
+        print(f"format_config: {format_config[:200] if format_config else None}...")
+        print(f"=== END DEBUG ===")
+
         # Map block_index to paragraph_index if provided
         actual_para_index = None
         use_position = False
 
         if paragraph_index is not None:
             actual_para_index = editor.get_paragraph_index_from_block(paragraph_index)
+            print(f"actual_para_index: {actual_para_index}")
             if actual_para_index is not None:
                 use_position = True
 
@@ -877,7 +887,13 @@ async def edit_selection(
 
         # Helper function for position-based formatting
         def apply_format(text, format_data):
-            format_kwargs = map_camel_to_snake(format_data)
+            try:
+                format_kwargs = map_camel_to_snake(format_data)
+                print(f"apply_format kwargs: {format_kwargs}")
+            except Exception as e:
+                print(f"Error mapping format data: {e}")
+                raise HTTPException(status_code=400, detail=f"Invalid format data: {str(e)}")
+
             if use_position:
                 success = editor.apply_format_at_position(
                     text=text, paragraph_index=actual_para_index, **format_kwargs
@@ -896,7 +912,11 @@ async def edit_selection(
         elif edit_type == "format":
             if not format_config:
                 raise HTTPException(status_code=400, detail="format_config required")
-            apply_format(selected_text, json.loads(format_config))
+            try:
+                format_data = json.loads(format_config)
+            except json.JSONDecodeError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid JSON in format_config: {str(e)}")
+            apply_format(selected_text, format_data)
 
         elif edit_type == "both":
             if not new_text:
@@ -904,8 +924,13 @@ async def edit_selection(
             if not format_config:
                 raise HTTPException(status_code=400, detail="format_config required")
 
+            try:
+                format_data = json.loads(format_config)
+            except json.JSONDecodeError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid JSON in format_config: {str(e)}")
+
             replace_text(selected_text, new_text)
-            apply_format(new_text, json.loads(format_config))
+            apply_format(new_text, format_data)
 
         elif edit_type == "delete":
             replace_text(selected_text, "")
@@ -929,8 +954,15 @@ async def edit_selection(
             "edit_type": edit_type
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Edit failed: {str(e)}")
+        import traceback
+        error_detail = f"Edit failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /edit-selection ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 @app.post("/add-content")
@@ -1080,3 +1112,96 @@ async def add_content(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+
+@app.post("/update-text")
+async def update_text_in_template(
+    template_id: str = Form(...),
+    block_index: int = Form(...),
+    old_text: str = Form(...),
+    new_text: str = Form(""),
+    edit_type: str = Form("text")
+):
+    """Update text in template while preserving formatting
+
+    Optimized for direct text editing on HTML preview with contenteditable.
+
+    Args:
+        template_id: Template identifier
+        block_index: Block index in HTML preview
+        old_text: Original text (for fuzzy matching)
+        new_text: New text to replace with (empty string for deletion)
+        edit_type: Type of edit (text-only in this case)
+
+    Returns:
+        Updated template with new HTML preview
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        from docx_editor import DocxFullEditor
+
+        editor = DocxFullEditor(str(template_path))
+
+        # Map block_index to paragraph_index
+        para_index = editor.get_paragraph_index_from_block(block_index)
+
+        if para_index is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid block_index: {block_index}"
+            )
+
+        # Handle deletion (empty new_text) or replacement
+        if new_text == "":
+            # Deletion: replace old text with empty string
+            success = editor.replace_text_at_position(
+                old_text=old_text,
+                new_text="",
+                paragraph_index=para_index
+            )
+        else:
+            # Replacement: replace with new text
+            success = editor.replace_text_at_position(
+                old_text=old_text,
+                new_text=new_text,
+                paragraph_index=para_index
+            )
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to replace text: '{old_text[:50]}...' not found at block {block_index}"
+            )
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "updated": True,
+            "fields": fields,
+            "html_preview": html_preview,
+            "edit_type": "text",
+            "block_index": block_index,
+            "action": "delete" if new_text == "" else "update"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Text update failed: {str(e)}\n{traceback.format_exc()}"
+        )
+

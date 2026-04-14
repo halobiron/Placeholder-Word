@@ -130,6 +130,9 @@ export const suggestFieldName = async (templateId, blockIndex, paraInCell = null
 
 // New API functions for enhanced editing
 export const editSelection = async (templateId, editData) => {
+  console.log('=== editSelection called ===')
+  console.log('editData:', editData)
+
   const formData = new FormData()
   formData.append('template_id', templateId)
   formData.append('edit_type', editData.type)
@@ -144,14 +147,19 @@ export const editSelection = async (templateId, editData) => {
   if (editData.type === 'text' && editData.newText) {
     formData.append('new_text', editData.newText)
   } else if (editData.type === 'format' && editData.format) {
-    formData.append('format_config', JSON.stringify(editData.format))
+    // Filter out unsupported fields (alignment is paragraph-level, not text-level)
+    const { alignment, ...supportedFormat } = editData.format
+    console.log('format_config (filtered):', supportedFormat)
+    formData.append('format_config', JSON.stringify(supportedFormat))
   } else if (editData.type === 'both') {
     // Send both new_text and format_config
     if (editData.newText) {
       formData.append('new_text', editData.newText)
     }
     if (editData.format) {
-      formData.append('format_config', JSON.stringify(editData.format))
+      // Filter out unsupported fields
+      const { alignment, ...supportedFormat } = editData.format
+      formData.append('format_config', JSON.stringify(supportedFormat))
     }
   }
 
@@ -187,6 +195,27 @@ export const addContent = async (templateId, addData) => {
   }
 
   const response = await axios.post(`${API_BASE}/add-content`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const updateTextInTemplate = async (templateId, { blockIndex, oldText, newText, editType = 'text' }) => {
+  // Validate blockIndex before making the request
+  if (isNaN(blockIndex) || blockIndex === null || blockIndex === undefined) {
+    throw new Error(`Invalid blockIndex: ${blockIndex}`)
+  }
+
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('block_index', blockIndex)
+  formData.append('old_text', oldText)
+  formData.append('new_text', newText)
+  formData.append('edit_type', editType)
+
+  const response = await axios.post(`${API_BASE}/update-text`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
