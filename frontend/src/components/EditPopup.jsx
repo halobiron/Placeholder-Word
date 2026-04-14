@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 function EditPopup({ selectedText, onSubmit, onClose }) {
   const [newText, setNewText] = useState(selectedText?.text || '')
+  const [originalFormat, setOriginalFormat] = useState(null)
   const [format, setFormat] = useState({
     bold: false,
     italic: false,
@@ -11,7 +12,28 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
     fontName: 'Times New Roman'
   })
   const [submitting, setSubmitting] = useState(false)
-  const [action, setAction] = useState('edit') // edit, delete
+
+  // Initialize format from selectedText when component mounts or selectedText changes
+  useEffect(() => {
+    if (selectedText?.format) {
+      setFormat(selectedText.format)
+      setOriginalFormat(selectedText.format)
+    }
+  }, [selectedText])
+
+  const blockIndex = selectedText?.blockIndex
+
+  const hasFormatChanged = () => {
+    if (!originalFormat) return false
+    return (
+      format.bold !== originalFormat.bold ||
+      format.italic !== originalFormat.italic ||
+      format.underline !== originalFormat.underline ||
+      format.color !== originalFormat.color ||
+      format.fontSize !== originalFormat.fontSize ||
+      format.fontName !== originalFormat.fontName
+    )
+  }
 
   const handleSubmit = async (submitAction) => {
     setSubmitting(true)
@@ -22,19 +44,42 @@ function EditPopup({ selectedText, onSubmit, onClose }) {
       if (submitAction === 'delete') {
         data = {
           type: 'delete',
-          selectedText: selectedText?.text
-        }
-      } else if (newText !== selectedText?.text) {
-        data = {
-          type: 'text',
           selectedText: selectedText?.text,
-          newText: newText
+          blockIndex: blockIndex
         }
       } else {
-        data = {
-          type: 'format',
-          selectedText: selectedText?.text,
-          format: format
+        const textChanged = newText !== selectedText?.text
+        const formatChanged = hasFormatChanged()
+
+        if (textChanged && formatChanged) {
+          // Send both text and format changes
+          data = {
+            type: 'both',
+            selectedText: selectedText?.text,
+            newText: newText,
+            format: format,
+            blockIndex: blockIndex
+          }
+        } else if (textChanged) {
+          // Only text changed
+          data = {
+            type: 'text',
+            selectedText: selectedText?.text,
+            newText: newText,
+            blockIndex: blockIndex
+          }
+        } else if (formatChanged) {
+          // Only format changed
+          data = {
+            type: 'format',
+            selectedText: selectedText?.text,
+            format: format,
+            blockIndex: blockIndex
+          }
+        } else {
+          // Nothing changed - close without submitting
+          onClose()
+          return
         }
       }
 

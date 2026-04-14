@@ -20,6 +20,83 @@ class DocxFullEditor:
         self.doc_path = docx_path
         self.doc = Document(docx_path)
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        self._block_to_para_index_map = None
+
+    def _build_block_index_map(self):
+        """
+        Build mapping from block_index (HTML preview) to paragraph_index (DOCX)
+
+        This matches the logic in template_manager.py _generate_html_preview
+        """
+        if self._block_to_para_index_map is not None:
+            return
+
+        from docx.oxml.text.paragraph import CT_P
+        from docx.oxml.table import CT_Tbl
+        from docx.table import Table
+
+        self._block_to_para_index_map = {}
+        block_index = 0
+        para_index = 0
+
+        # First pass: map all paragraphs
+        para_element_to_index = {}
+        for child in self.doc.element.body.iterchildren():
+            if isinstance(child, CT_P):
+                para_element_to_index[child] = para_index
+                para_index += 1
+
+        # Second pass: build block_index map
+        for child in self.doc.element.body.iterchildren():
+            if isinstance(child, CT_P):
+                # Regular paragraph
+                self._block_to_para_index_map[block_index] = {
+                    'type': 'paragraph',
+                    'para_index': para_element_to_index[child],
+                    'table_context': None
+                }
+                block_index += 1
+
+            elif isinstance(child, CT_Tbl):
+                table = Table(child)
+                # Process each cell as a separate block
+                for row_idx, row in enumerate(table.rows):
+                    for cell_idx, cell in enumerate(row.cells):
+                        # Check if cell has content
+                        cell_text = "".join(
+                            t.text for para in cell.paragraphs
+                            for t in para._p.findall(f".//{self.w_ns}t")
+                            if t.text
+                        ).strip()
+
+                        if cell_text:
+                            # Find the first paragraph in this cell
+                            for para in cell.paragraphs:
+                                if para._element in para_element_to_index:
+                                    self._block_to_para_index_map[block_index] = {
+                                        'type': 'table_cell',
+                                        'para_index': para_element_to_index[para._element],
+                                        'table_context': f"Row {row_idx}, Col {cell_idx}"
+                                    }
+                                    block_index += 1
+                                    break
+
+    def get_paragraph_index_from_block(self, block_index: int) -> int:
+        """
+        Get paragraph_index from block_index (HTML preview)
+
+        Args:
+            block_index: Block index from HTML preview
+
+        Returns:
+            Paragraph index in DOCX, or None if not found
+        """
+        self._build_block_index_map()
+
+        if block_index in self._block_to_para_index_map:
+            return self._block_to_para_index_map[block_index]['para_index']
+
+        return None
 
     # ===== HELPER METHODS =====
 
@@ -38,6 +115,137 @@ class DocxFullEditor:
         for paragraph in self._iterate_paragraphs():
             for run in paragraph.runs:
                 yield run, paragraph
+
+    # ===== POSITION-BASED EDITING =====
+
+    def replace_text_at_position(
+        self,
+        old_text: str,
+        new_text: str,
+        paragraph_index: int = None,
+        run_index: int = None
+    ):
+        """
+        Replace text at a specific position only
+
+        Args:
+            old_text: Text to find
+            new_text: Replacement text
+            paragraph_index: Index of paragraph (from all paragraphs iterator)
+            run_index: Index of run within paragraph (optional, for more precision)
+
+        Returns:
+            True if found and replaced, False otherwise
+        """
+        search_text_normalized = re.sub(r'\s+', ' ', old_text.strip())
+
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs()):
+            # If paragraph_index is specified, only process that paragraph
+            if paragraph_index is not None and p_idx != paragraph_index:
+                continue
+
+            full_text = "".join(run.text for run in paragraph.runs)
+            full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
+
+            if search_text_normalized not in full_text_normalized:
+                continue
+
+            start_idx = full_text_normalized.find(search_text_normalized)
+            if start_idx == -1:
+                continue
+
+            # Find which runs contain the text
+            char_count = 0
+            target_runs = []
+            end_idx = start_idx + len(search_text_normalized)
+
+            for r_idx, run in enumerate(paragraph.runs):
+                run_start = char_count
+                run_end = char_count + len(run.text)
+
+                if run_end > start_idx and run_start < end_idx:
+                    # If run_index is specified, only use that run
+                    if run_index is None or r_idx == run_index:
+                        target_runs.append((run, r_idx))
+
+                char_count += len(run.text)
+
+            # Replace text in target runs
+            if not target_runs:
+                continue
+
+            first_run, first_r_idx = target_runs[0]
+
+            if search_text_normalized in first_run.text:
+                first_run.text = first_run.text.replace(search_text_normalized, new_text, 1)
+                return True
+            else:
+                # Partial match - find and replace
+                for i in range(len(first_run.text)):
+                    segment = first_run.text[i:i+len(search_text_normalized)]
+                    segment_normalized = re.sub(r'\s+', ' ', segment.strip())
+                    if (segment_normalized == search_text_normalized or
+                        re.sub(r'\s+', ' ', search_text_normalized[0:len(segment_normalized)]) in segment_normalized):
+                        first_run.text = first_run.text[:i] + new_text + first_run.text[i+len(segment):]
+                        for run, _ in target_runs[1:]:
+                            run.text = ""
+                        return True
+
+        return False
+
+    def apply_format_at_position(
+        self,
+        text: str,
+        paragraph_index: int,
+        bold: bool = None,
+        italic: bool = None,
+        underline: bool = None,
+        color: str = None,
+        highlight: str = None,
+        font_name: str = None,
+        font_size: int = None
+    ):
+        """
+        Apply formatting to text at a specific paragraph position
+
+        Args:
+            text: Text to format
+            paragraph_index: Index of paragraph containing the text
+            bold, italic, underline, color, highlight, font_name, font_size: Format options
+
+        Returns:
+            True if found and formatted, False otherwise
+        """
+        import re
+
+        search_text_normalized = re.sub(r'\s+', ' ', text.strip())
+
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs()):
+            if p_idx != paragraph_index:
+                continue
+
+            for run in paragraph.runs:
+                run_normalized = re.sub(r'\s+', ' ', run.text.strip())
+                if search_text_normalized not in run_normalized and search_text_normalized[0:30] not in run_normalized:
+                    continue
+
+                if bold is not None:
+                    run.font.bold = bold
+                if italic is not None:
+                    run.font.italic = italic
+                if underline is not None:
+                    run.font.underline = underline
+                if color:
+                    run.font.color.rgb = self._parse_color(color)
+                if highlight:
+                    run.font.highlight_color = self._parse_highlight_color(highlight)
+                if font_name:
+                    run.font.name = font_name
+                if font_size:
+                    run.font.size = Pt(font_size)
+                return True
+
+        return False
 
     # ===== TEXT EDITING (Giữ format) =====
 

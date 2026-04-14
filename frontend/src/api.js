@@ -135,12 +135,24 @@ export const editSelection = async (templateId, editData) => {
   formData.append('edit_type', editData.type)
   formData.append('selected_text', editData.selectedText)
 
-  if (editData.type === 'text' && editData.newText) {
-    formData.append('new_text', editData.newText)
+  // Send blockIndex if available for precise editing
+  if (editData.blockIndex !== undefined && editData.blockIndex !== null) {
+    formData.append('paragraph_index', editData.blockIndex)
   }
 
-  if (editData.type === 'format' && editData.format) {
+  // Handle different edit types
+  if (editData.type === 'text' && editData.newText) {
+    formData.append('new_text', editData.newText)
+  } else if (editData.type === 'format' && editData.format) {
     formData.append('format_config', JSON.stringify(editData.format))
+  } else if (editData.type === 'both') {
+    // Send both new_text and format_config
+    if (editData.newText) {
+      formData.append('new_text', editData.newText)
+    }
+    if (editData.format) {
+      formData.append('format_config', JSON.stringify(editData.format))
+    }
   }
 
   const response = await axios.post(`${API_BASE}/edit-selection`, formData, {

@@ -551,9 +551,35 @@ function App() {
     const selectedText = selection.toString().trim()
 
     if (selectedText && !isAddMode) {
+      const element = selection.anchorNode.parentElement
+
+      // Find block_index from parent elements
+      let blockIndex = null
+      let currentElement = element
+      while (currentElement && currentElement.id !== 'document-editor') {
+        if (currentElement.hasAttribute && currentElement.hasAttribute('data-block-index')) {
+          blockIndex = parseInt(currentElement.getAttribute('data-block-index'))
+          break
+        }
+        currentElement = currentElement.parentElement
+      }
+
+      // Extract format from the selected element
+      const computedStyle = window.getComputedStyle(element)
+      const format = {
+        bold: computedStyle.fontWeight === '700' || computedStyle.fontWeight === 'bold',
+        italic: computedStyle.fontStyle === 'italic',
+        underline: computedStyle.textDecorationLine.includes('underline'),
+        color: computedStyle.color, // Convert to hex if needed
+        fontSize: parseInt(computedStyle.fontSize) || 12,
+        fontName: computedStyle.fontFamily.split(',')[0].replace(/['"]/g, '').trim()
+      }
+
       setSelectedTextForEdit({
         text: selectedText,
-        element: selection.anchorNode.parentElement
+        element: element,
+        format: format,
+        blockIndex: blockIndex  // Include block index for precise editing
       })
       setShowEditPopup(true)
     }

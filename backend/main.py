@@ -837,24 +837,14 @@ def map_camel_to_snake(format_data: dict) -> dict:
 @app.post("/edit-selection")
 async def edit_selection(
     template_id: str = Form(...),
-    edit_type: str = Form(...),  # "text", "format", "delete"
+    edit_type: str = Form(...),
     selected_text: str = Form(...),
     new_text: str = Form(None),
-    format_config: str = Form(None)  # JSON string
+    format_config: str = Form(None),
+    paragraph_index: int = Form(None),
+    run_index: int = Form(None)
 ):
-    """
-    Edit DOCX based on user selection from HTML preview
-
-    Args:
-        template_id: Template ID
-        edit_type: Type of edit ("text", "format", "delete")
-        selected_text: Text that user selected in HTML
-        new_text: New text to replace with (for text edit)
-        format_config: Format configuration (for format edit)
-
-    Returns:
-        Updated template and preview
-    """
+    """Edit DOCX based on user selection from HTML preview"""
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
         raise HTTPException(status_code=404, detail="Template not found")
@@ -864,41 +854,70 @@ async def edit_selection(
 
         editor = DocxFullEditor(str(template_path))
 
-        if edit_type == "text":
-            # Replace text
-            if not new_text:
-                raise HTTPException(status_code=400, detail="new_text required for text edit")
+        # Map block_index to paragraph_index if provided
+        actual_para_index = None
+        use_position = False
 
-            editor.replace_text_keep_format(
-                old_text=selected_text,
-                new_text=new_text
-            )
+        if paragraph_index is not None:
+            actual_para_index = editor.get_paragraph_index_from_block(paragraph_index)
+            if actual_para_index is not None:
+                use_position = True
+
+        # Helper function for position-based text replacement
+        def replace_text(old, new):
+            if use_position:
+                success = editor.replace_text_at_position(
+                    old_text=old, new_text=new,
+                    paragraph_index=actual_para_index, run_index=run_index
+                )
+                if not success:
+                    raise HTTPException(status_code=404, detail="Text not found at specified position")
+            else:
+                editor.replace_text_keep_format(old_text=old, new_text=new)
+
+        # Helper function for position-based formatting
+        def apply_format(text, format_data):
+            format_kwargs = map_camel_to_snake(format_data)
+            if use_position:
+                success = editor.apply_format_at_position(
+                    text=text, paragraph_index=actual_para_index, **format_kwargs
+                )
+                if not success:
+                    raise HTTPException(status_code=404, detail="Text not found at specified position")
+            else:
+                editor.apply_format_to_text(text=text, **format_kwargs)
+
+        # Process edit type
+        if edit_type == "text":
+            if not new_text:
+                raise HTTPException(status_code=400, detail="new_text required")
+            replace_text(selected_text, new_text)
 
         elif edit_type == "format":
-            # Apply formatting
             if not format_config:
-                raise HTTPException(status_code=400, detail="format_config required for format edit")
+                raise HTTPException(status_code=400, detail="format_config required")
+            apply_format(selected_text, json.loads(format_config))
 
-            format_data = json.loads(format_config)
-            editor.apply_format_to_text(
-                text=selected_text,
-                **map_camel_to_snake(format_data)
-            )
+        elif edit_type == "both":
+            if not new_text:
+                raise HTTPException(status_code=400, detail="new_text required")
+            if not format_config:
+                raise HTTPException(status_code=400, detail="format_config required")
+
+            replace_text(selected_text, new_text)
+            apply_format(new_text, json.loads(format_config))
 
         elif edit_type == "delete":
-            # Delete text
-            editor.delete_text(selected_text)
+            replace_text(selected_text, "")
 
         else:
             raise HTTPException(status_code=400, detail=f"Invalid edit_type: {edit_type}")
 
-        # Save updated template
+        # Save and return updated preview
         editor.save(str(template_path))
 
-        # Get updated fields and preview
         executor = MergeExecutor()
         fields = executor.get_template_fields(str(template_path))
-
         processor = MailMergeProcessor()
         html_preview = processor._generate_html_preview(str(template_path), fields)
 
