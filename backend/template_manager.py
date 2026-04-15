@@ -1402,37 +1402,28 @@ JSON:"""
         jc = para._p.find(f"{self.w_ns}pPr/{self.w_ns}jc")
         align = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val") if jc is not None else "left"
 
-        # Extract text content to check for leading spaces BEFORE mapping alignment
-        # This is critical because Word uses "both" + leading spaces for partial right alignment
-        text_from_xml = ""
-        for t in para._p.findall(f".//{self.w_ns}t"):
-            if t.text:
-                text_from_xml += t.text
+        # Extract text content to check for leading/trailing spaces BEFORE mapping alignment
+        # This is critical because Word uses "both" + leading/trailing spaces for partial right alignment
+        text_from_xml = "".join(
+            t.text for t in para._p.findall(f".//{self.w_ns}t") if t.text
+        )
+
         has_leading_spaces = len(text_from_xml) > 0 and text_from_xml[0] in ' \t'
+        has_trailing_spaces = len(text_from_xml) > 0 and text_from_xml[-1] in ' \t'
 
-        # Calculate margin-right percentage based on leading spaces
-        # Word uses leading spaces to create partial right alignment
-        # Check BOTH "both" and "right" alignment because:
-        # - Original label lines: align="both" + leading spaces (converted from original doc)
-        # - New placeholder lines: align="right" + leading spaces (added by our code)
+        # Remove the hardcoded margin-right percentage calculation.
+        # Since we're using `white-space: pre-wrap` + `justify/left`, the spaces themselves 
+        # naturally push the text accurately just like in standard document flow.
         margin_right = ""
-        if (align == "both" or align == "right") and has_leading_spaces:
-            leading_space_count = len(text_from_xml) - len(text_from_xml.lstrip(' \t'))
-            # Approximate: each leading space ≈ 0.4-0.5% of line width for standard fonts
-            # Calibrated: 84 spaces ≈ 20% margin-right for signature lines
-            margin_right_pct = leading_space_count * 0.20
-            margin_right = f"margin-right: {margin_right_pct:.1f}%;"
 
-        # Map alignment: "both" + leading spaces → "right" (Word's partial right alignment trick)
-        # This fixes HTML preview where "justify" doesn't work like Word's "both" with leading spaces
+        # Map alignment: "both" + leading/trailing spaces → "right" (Word's partial right alignment trick)
+        # This fixes HTML preview where "justify" doesn't work like Word's "both" with spaces
+        # NOTE: We keep "justify" as "justify" but handle leading spaces properly with white-space: pre-wrap
         align_map = {"center": "center", "right": "right", "both": "justify"}
         alignment = align_map.get(align, "left")
 
-        # Override: if "both" alignment with leading spaces, use "right" for HTML preview
-        # NOTE: After conversion, placeholder lines will have align="right" already, so this
-        # only affects original label lines that still have align="both"
-        if align == "both" and has_leading_spaces:
-            alignment = "right"
+        # Removed override that forced alignment to "right" when spaces were present.
+        # This was causing "leaking" to the left because spaces were added AFTER right-aligning.
 
         style_name = para.style.name if para.style else "Normal"
         tag = "h1" if "Heading 1" in style_name else "h2" if "Heading 2" in style_name else "h3" if "Heading 3" in style_name else "p"

@@ -358,6 +358,7 @@ class DocxFullEditor:
     ):
         """
         Split runs và apply formatting chỉ cho text cần format
+        PRESERVES paragraph-level formatting (alignment, indents, tabs)
 
         Args:
             paragraph: Paragraph object
@@ -366,6 +367,11 @@ class DocxFullEditor:
         """
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
+
+        # CRITICAL: Preserve paragraph-level formatting before splitting runs
+        # This prevents loss of alignment, indents, tabs used for right-alignment tricks
+        paragraph_alignment = paragraph.alignment
+        paragraph_format = paragraph.paragraph_format
 
         # Process runs in reverse order to maintain indices
         for run_info in reversed(runs_to_format):
@@ -425,6 +431,12 @@ class DocxFullEditor:
 
             # Xóa run gốc
             paragraph._element.remove(run._element)
+
+        # CRITICAL: Restore paragraph-level formatting after splitting runs
+        self._restore_paragraph_formatting(paragraph, paragraph_alignment, paragraph_format)
+
+        # CRITICAL: Handle trailing spaces for right alignment (Word's special formatting)
+        self._handle_trailing_spaces_alignment(paragraph, paragraph_alignment)
 
     def _create_run_with_format(self, paragraph, rpr_element, text: str, skip_props: list = None):
         """
@@ -568,6 +580,62 @@ class DocxFullEditor:
                 sz_elem = rpr.makeelement(f'{self.w_ns}sz')
                 rpr.append(sz_elem)
             sz_elem.set(f'{self.w_ns}val', str(font_size * 2))  # Stored in half-points
+
+    def _restore_paragraph_formatting(self, paragraph, alignment, paragraph_format):
+        """Restore paragraph-level formatting after splitting runs"""
+        if alignment is not None:
+            paragraph.alignment = alignment
+
+        # Restore all paragraph properties if not None
+        props_to_restore = [
+            ('space_before', paragraph_format.space_before),
+            ('space_after', paragraph_format.space_after),
+            ('line_spacing', paragraph_format.line_spacing),
+            ('first_line_indent', paragraph_format.first_line_indent),
+            ('left_indent', paragraph_format.left_indent),
+            ('right_indent', paragraph_format.right_indent)
+        ]
+
+        for prop_name, value in props_to_restore:
+            if value is not None:
+                setattr(paragraph.paragraph_format, prop_name, value)
+
+    def _handle_trailing_spaces_alignment(self, paragraph, original_alignment):
+        """
+        Handle trailing spaces for right alignment (Word's special formatting)
+        Word uses "justify" + trailing spaces to create right-aligned text
+        Convert to "right" alignment + right indent for proper display
+        """
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+        from docx.shared import Twips
+
+        # Get paragraph text after formatting
+        paragraph_text = "".join(run.text for run in paragraph.runs)
+
+        # Check for trailing spaces
+        has_trailing_spaces = len(paragraph_text) > 0 and paragraph_text[-1] in ' \t'
+
+        if has_trailing_spaces and original_alignment == WD_PARAGRAPH_ALIGNMENT.JUSTIFY:
+            # Count trailing spaces
+            trailing_space_count = len(paragraph_text) - len(paragraph_text.rstrip(' \t'))
+
+            # Convert to right alignment
+            paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+
+            # Add right indent based on trailing space count
+            # Calibration: each space ≈ 15 twips (0.75pt) for standard fonts
+            # 84 spaces ≈ 1260 twips (0.88 inch) ≈ right margin effect
+            right_indent_twips = trailing_space_count * 15
+
+            # Set right indent
+            current_right_indent = paragraph.paragraph_format.right_indent
+            new_right_indent = Twips(right_indent_twips)
+
+            paragraph.paragraph_format.right_indent = (
+                current_right_indent + new_right_indent
+                if current_right_indent is not None
+                else new_right_indent
+            )
 
     # ===== TEXT EDITING (Giữ format) =====
 
