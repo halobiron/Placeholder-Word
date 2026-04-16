@@ -68,6 +68,8 @@ class DocxFullEditor:
                 table = Table(child, self.doc)
 
                 # Process each cell as a separate block (matching _generate_html_preview logic)
+                # CRITICAL FIX: Map ALL cells (including empty ones) to match HTML preview behavior
+                # HTML preview increments block_index for ALL cells, so we must do the same
                 for row_idx, row in enumerate(table.rows):
                     for cell_idx, cell in enumerate(row.cells):
                         # Extract cell text to check if it has content
@@ -79,16 +81,32 @@ class DocxFullEditor:
 
                         cell_text = cell_text.strip()
 
-                        if cell_text:
-                            # Find the first paragraph in this cell
-                            for para in cell.paragraphs:
-                                self._block_to_para_index_map[block_index] = {
-                                    'type': 'table_cell',
-                                    'paragraph': para,  # Store paragraph object directly
-                                    'table_context': f"Row {row_idx}, Col {cell_idx}"
-                                }
-                                block_index += 1
-                                break
+                        # Map ALL cells (including empty ones) to match HTML preview
+                        # HTML preview increments block_index for every cell, regardless of content
+                        if cell.paragraphs:
+                            # Use first paragraph in cell (even if empty)
+                            para = cell.paragraphs[0]
+                            self._block_to_para_index_map[block_index] = {
+                                'type': 'table_cell',
+                                'paragraph': para,  # Store paragraph object directly
+                                'table_context': f"Row {row_idx}, Col {cell_idx}",
+                                'row': row_idx,
+                                'col': cell_idx,
+                                'is_empty': not cell_text  # Track if cell is empty
+                            }
+                            block_index += 1
+                        else:
+                            # Cell has no paragraphs - create placeholder entry
+                            # This shouldn't happen with properly formatted cells, but handle it
+                            self._block_to_para_index_map[block_index] = {
+                                'type': 'table_cell',
+                                'paragraph': None,  # No paragraph exists
+                                'table_context': f"Row {row_idx}, Col {cell_idx}",
+                                'row': row_idx,
+                                'col': cell_idx,
+                                'is_empty': True
+                            }
+                            block_index += 1
 
     def get_paragraph_index_from_block(self, block_index: int) -> int:
         """
@@ -123,6 +141,8 @@ class DocxFullEditor:
         Yield paragraphs in document order (matching _generate_html_preview logic)
 
         Uses doc.element.body.iterchildren() to preserve exact document structure.
+        CRITICAL FIX: Yield ALL paragraphs including those in empty cells
+        to match _build_block_index_map behavior
         """
         from docx.oxml.text.paragraph import CT_P
         from docx.oxml.table import CT_Tbl
@@ -136,20 +156,16 @@ class DocxFullEditor:
             elif isinstance(child, CT_Tbl):
                 table = Table(child, self.doc)
                 # Process each cell as a separate block
+                # CRITICAL FIX: Yield ALL cells (including empty ones) to match block map
                 for row_idx, row in enumerate(table.rows):
                     for cell_idx, cell in enumerate(row.cells):
-                        cell_text = ""
-                        for para in cell.paragraphs:
-                            for t in para._p.findall(f".//{self.w_ns}t"):
-                                if t.text:
-                                    cell_text += t.text
-
-                        cell_text = cell_text.strip()
-
-                        if cell_text:
+                        # Yield first paragraph from each cell (even if empty)
+                        # This matches the behavior in _build_block_index_map
+                        if cell.paragraphs:
                             for para in cell.paragraphs:
                                 yield para
-                                break
+                                break  # Only yield first paragraph from each cell
+                        # else: cell has no paragraphs (shouldn't happen with properly formatted cells)
 
     def _iterate_runs(self):
         """Yield all runs with context from all paragraphs"""
@@ -178,36 +194,113 @@ class DocxFullEditor:
         Returns:
             True if found and replaced, False otherwise
         """
-        search_text_normalized = re.sub(r'\s+', ' ', old_text.strip())
+        # Helper function to normalize text for comparison (handles special whitespace)
+        def normalize_text(text: str) -> str:
+            """Normalize text by replacing all whitespace (including special chars) with regular spaces"""
+            # Replace various whitespace characters with regular space
+            # \u00a0 = non-breaking space, \u2003 = em-space, \u2009 = thin-space, etc.
+            normalized = re.sub(r'[\s\u00a0\u2002\u2003\u2009\u200a\u200b]+', ' ', text)
+            return normalized.strip()
+
+        search_text_normalized = normalize_text(old_text)
 
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             # If paragraph_index is specified, only process that paragraph
             if paragraph_index is not None and p_idx != paragraph_index:
                 continue
 
+            # Build normalized full text for search
             full_text = "".join(run.text for run in paragraph.runs)
-            full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
+            full_text_normalized = normalize_text(full_text)
 
             if search_text_normalized not in full_text_normalized:
                 continue
 
+            # Find which runs contain the text
+            # Use character-by-character comparison for accuracy
+            char_count = 0
+            target_runs = []
             start_idx = full_text_normalized.find(search_text_normalized)
+
             if start_idx == -1:
+                continue
+
+            end_idx = start_idx + len(search_text_normalized)
+
+            # Map normalized position to original text position
+            # Build a mapping from normalized position to original position
+            norm_to_orig = []
+            norm_pos = 0  # ← CRITICAL FIX: Khai báo norm_pos
+            for orig_idx, char in enumerate(full_text):
+                # Check if this character contributes to normalized text
+                if not char.isspace():
+                    # Non-whitespace character - contributes to normalized text
+                    norm_to_orig.append((norm_pos, orig_idx))
+                    norm_pos += 1
+
+            # Validate indices before accessing norm_to_orig
+            if not norm_to_orig:
+                # No non-whitespace characters found
+                continue
+
+            # Find start position in original text
+            if start_idx >= len(norm_to_orig):
+                # start_idx is beyond the mapping - can't map
+                continue
+
+            orig_start_idx = norm_to_orig[start_idx][1]
+
+            # Find end position in original text
+            # end_idx in normalized text is exclusive, so we need end_idx - 1
+            if end_idx - 1 >= len(norm_to_orig):
+                # end_idx is beyond the mapping - use end of text
+                orig_end_idx = len(full_text)
+            else:
+                # Get the position AFTER the last character
+                last_char_idx = norm_to_orig[end_idx - 1][1]
+                orig_end_idx = last_char_idx + 1
+
+            print(f"[DEBUG] orig_start_idx={orig_start_idx}, orig_end_idx={orig_end_idx}")
+
+            # Fallback: if mapping failed, use simple search
+            if orig_start_idx is None:
+                orig_start_idx = full_text.find(old_text)
+                if orig_start_idx != -1:
+                    orig_end_idx = orig_start_idx + len(old_text)
+                else:
+                    # Try finding first word as fallback
+                    first_word = old_text.split()[0] if old_text.split() else ""
+                    if first_word:
+                        orig_start_idx = full_text.find(first_word)
+                        if orig_start_idx != -1:
+                            # Find end by counting characters in original text
+                            orig_end_idx = orig_start_idx
+                            chars_found = 0
+                            target_chars = len([c for c in old_text if not c.isspace()])
+                            while orig_end_idx < len(full_text) and chars_found < target_chars:
+                                if not full_text[orig_end_idx].isspace():
+                                    chars_found += 1
+                                orig_end_idx += 1
+                        else:
+                            continue
+                    else:
+                        continue
+
+            if orig_start_idx is None or orig_end_idx is None:
                 continue
 
             # Find which runs contain the text
             char_count = 0
             target_runs = []
-            end_idx = start_idx + len(search_text_normalized)
 
             for r_idx, run in enumerate(paragraph.runs):
                 run_start = char_count
                 run_end = char_count + len(run.text)
 
-                if run_end > start_idx and run_start < end_idx:
+                if run_end > orig_start_idx and run_start < orig_end_idx:
                     # If run_index is specified, only use that run
                     if run_index is None or r_idx == run_index:
-                        target_runs.append((run, r_idx))
+                        target_runs.append((run, r_idx, run_start, run_end))
 
                 char_count += len(run.text)
 
@@ -215,22 +308,34 @@ class DocxFullEditor:
             if not target_runs:
                 continue
 
-            first_run, first_r_idx = target_runs[0]
+            # Check if entire text is in one run
+            first_run, first_r_idx, run_start, run_end = target_runs[0]
 
-            if search_text_normalized in first_run.text:
-                first_run.text = first_run.text.replace(search_text_normalized, new_text, 1)
-                return True
-            else:
-                # Partial match - find and replace
-                for i in range(len(first_run.text)):
-                    segment = first_run.text[i:i+len(search_text_normalized)]
-                    segment_normalized = re.sub(r'\s+', ' ', segment.strip())
-                    if (segment_normalized == search_text_normalized or
-                        re.sub(r'\s+', ' ', search_text_normalized[0:len(segment_normalized)]) in segment_normalized):
-                        first_run.text = first_run.text[:i] + new_text + first_run.text[i+len(segment):]
-                        for run, _ in target_runs[1:]:
-                            run.text = ""
+            # Calculate position within the run
+            if orig_start_idx >= run_start:
+                pos_in_run = orig_start_idx - run_start
+
+                # Check if the entire match fits in this run
+                if orig_end_idx <= run_end:
+                    # Extract the segment and verify
+                    original_segment = first_run.text[pos_in_run:orig_end_idx - run_start]
+
+                    # Verify with normalized comparison
+                    if normalize_text(original_segment) == search_text_normalized:
+                        # Exact match - replace
+                        first_run.text = first_run.text[:pos_in_run] + new_text + first_run.text[orig_end_idx - run_start:]
                         return True
+
+            # Multi-run replacement - concatenate and replace using normalized comparison
+            full_run_text = "".join(r.text for r, _, _, _ in target_runs)
+
+            # Find the segment in the concatenated text
+            if search_text_normalized in normalize_text(full_run_text):
+                # Replace by clearing all target runs and putting new text in first run
+                target_runs[0][0].text = new_text
+                for run, _, _, _ in target_runs[1:]:
+                    run.text = ""
+                return True
 
         return False
 
@@ -1162,11 +1267,28 @@ class DocxFullEditor:
             return False
 
         cell = row.cells[col_index]
+
+        # Tìm paragraph đầu tiên có run
         for paragraph in cell.paragraphs:
-            for run in paragraph.runs:
-                run.text = new_text
+            if len(paragraph.runs) > 0:
+                # Found a run, update its text
+                paragraph.runs[0].text = new_text
+                return True
+            else:
+                # Paragraph exists but has no runs (edge case)
+                # Add a new run with the text
+                from docx.oxml import OxmlElement
+                from docx.oxml.ns import qn
+
+                r = OxmlElement('w:r')
+                t = OxmlElement('w:t')
+                t.set(qn('xml:space'), 'preserve')
+                t.text = new_text
+                r.append(t)
+                paragraph._element.append(r)
                 return True
 
+        # No paragraphs found (shouldn't happen with properly formatted cells)
         return False
 
     def add_table_row(self, table_index: int):
@@ -1177,6 +1299,281 @@ class DocxFullEditor:
         table = self.doc.tables[table_index]
         table.add_row()
         return True
+
+    def delete_table_row(self, table_index: int, row_index: int):
+        """Xóa row khỏi table"""
+        if table_index >= len(self.doc.tables):
+            return False
+
+        table = self.doc.tables[table_index]
+        if row_index >= len(table.rows) or row_index < 0:
+            return False
+
+        # Không cho xóa row cuối cùng (table phải có ít nhất 1 row)
+        if len(table.rows) <= 1:
+            return False
+
+        # Xóa row bằng cách lấy element và remove
+        table_element = table._element
+        row_element = table.rows[row_index]._element
+        table_element.remove(row_element)
+        return True
+
+    def insert_table_row(self, table_index: int, row_index: int):
+        """Chèn row mới vào vị trí cụ thể trong table"""
+        if table_index >= len(self.doc.tables):
+            return False
+
+        table = self.doc.tables[table_index]
+        if row_index < 0 or row_index > len(table.rows):
+            return False
+
+        # Thêm row ở cuối trước
+        new_row = table.add_row()
+
+        # Nếu row_index không phải là cuối cùng, di chuyển row đến vị trí đúng
+        if row_index < len(table.rows) - 1:
+            row_element = new_row._element
+            target_row_element = table.rows[row_index]._element
+            target_row_element.addprevious(row_element)
+
+        return True
+
+    def delete_table_column(self, table_index: int, col_index: int):
+        """Xóa column khỏi table"""
+        if table_index >= len(self.doc.tables):
+            return False
+
+        table = self.doc.tables[table_index]
+        if col_index < 0:
+            return False
+
+        # Kiểm tra column có tồn tại
+        if len(table.rows) > 0 and col_index >= len(table.rows[0].cells):
+            return False
+
+        # Không cho xóa column cuối cùng (table phải có ít nhất 1 column)
+        if len(table.rows) > 0 and len(table.rows[0].cells) <= 1:
+            return False
+
+        from docx.oxml.ns import qn
+
+        # Xóa từng cell trong column VÀ update table grid
+        for row in table.rows:
+            if col_index < len(row.cells):
+                cell_element = row.cells[col_index]._element
+                cell_element.getparent().remove(cell_element)
+
+        # Update table grid để remove gridCol tương ứng
+        tbl = table._element
+        tblGrid = tbl.find(qn('w:tblGrid'))
+
+        if tblGrid is not None:
+            gridCols = tblGrid.findall(qn('w:gridCol'))
+            if col_index < len(gridCols):
+                gridCol_to_remove = gridCols[col_index]
+                tblGrid.remove(gridCol_to_remove)
+
+        return True
+
+    def insert_table_column(self, table_index: int, col_index: int):
+        """Chèn column mới vào vị trí cụ thể trong table"""
+        if table_index >= len(self.doc.tables):
+            return False
+
+        table = self.doc.tables[table_index]
+        if col_index < 0:
+            return False
+
+        # Kiểm tra column có tồn tại
+        if len(table.rows) > 0 and col_index > len(table.rows[0].cells):
+            return False
+
+        # Python-docx không hỗ trợ trực tiếp add column
+        # Cách giải quyết: tạo table mới với cấu trúc cập nhật
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        import copy
+
+        # Lưu số columns cũ
+        old_col_count = len(table.columns)
+        new_col_count = old_col_count + 1
+
+        # Thêm cell vào mỗi row
+        for row in table.rows:
+            # Tạo tc element (table cell)
+            tc = OxmlElement('w:tc')
+
+            # Tạo tcPr (table cell properties)
+            tcPr = OxmlElement('w:tcPr')
+
+            # Tạo tcW (table cell width) - auto width
+            tcW = OxmlElement('w:tcW')
+            tcW.set(qn('w:type'), 'auto')
+            tcPr.append(tcW)
+
+            tc.append(tcPr)
+
+            # Tạo p element (paragraph)
+            p = OxmlElement('w:p')
+            p.set(qn('w:rsidR'), '00D9489C')
+            p.set(qn('w:rsidRDefault'), '00D9489C')
+
+            # Tạo pPr (paragraph properties)
+            pPr = OxmlElement('w:pPr')
+            p.append(pPr)
+
+            # CRITICAL FIX: Tạo Run và Text node để ô có thể nhận nội dung
+            # Không có Run/Text → ô trống và không thể edit
+            r = OxmlElement('w:r')
+            t = OxmlElement('w:t')
+            t.set(qn('xml:space'), 'preserve')
+            t.text = ""  # Empty text initially, but can be filled later
+            r.append(t)
+            p.append(r)
+
+            tc.append(p)
+
+            # Chèn cell vào vị trí cụ thể
+            if col_index >= len(row.cells):
+                # Thêm vào cuối row
+                row._element.append(tc)
+            else:
+                # Chèn trước cell tại col_index
+                target_cell = row.cells[col_index]._element
+                target_cell.addprevious(tc)
+
+        # Update table grid để include column mới
+        tbl = table._element
+        tblGrid = tbl.find(qn('w:tblGrid'))
+
+        if tblGrid is not None:
+            # Tạo gridCol mới với auto width
+            gridCol = OxmlElement('w:gridCol')
+            gridCol.set(qn('w:w'), '2310')  # Default width
+
+            # Chèn gridCol vào vị trí col_index
+            if col_index >= len(tblGrid):
+                tblGrid.append(gridCol)
+            else:
+                gridCols = tblGrid.findall(qn('w:gridCol'))
+                if col_index < len(gridCols):
+                    gridCols[col_index].addprevious(gridCol)
+                else:
+                    tblGrid.append(gridCol)
+
+        return True
+
+    def format_table_cell(
+        self,
+        table_index: int,
+        row_index: int,
+        col_index: int,
+        format_options: dict
+    ):
+        """Format table cell (background color, vertical alignment, borders)"""
+        if table_index >= len(self.doc.tables):
+            return False
+
+        table = self.doc.tables[table_index]
+        if row_index >= len(table.rows):
+            return False
+
+        row = table.rows[row_index]
+        if col_index >= len(row.cells):
+            return False
+
+        cell = row.cells[col_index]
+
+        try:
+            # Lấy hoặc tạo tcPr (table cell properties)
+            tc_pr = cell._element.get_or_add_tcPr()
+
+            # Background color
+            if 'background_color' in format_options:
+                bg_color = format_options['background_color']
+                if bg_color and bg_color != 'auto':
+                    from docx.oxml import OxmlElement
+                    from docx.oxml.ns import qn
+
+                    # Tạo hoặc cập nhật shd element (shading)
+                    shd = tc_pr.find(qn('w:shd'))
+                    if shd is None:
+                        shd = OxmlElement('w:shd')
+                        tc_pr.append(shd)
+
+                    # Parse màu hex
+                    if bg_color.startswith('#'):
+                        hex_color = bg_color.lstrip('#')
+                        shd.set(qn('w:fill'), hex_color)
+                    else:
+                        shd.set(qn('w:fill'), bg_color)
+
+            # Vertical alignment
+            if 'vertical_align' in format_options:
+                v_align = format_options['vertical_align']
+                if v_align in ['top', 'center', 'bottom']:
+                    from docx.oxml import OxmlElement
+                    from docx.oxml.ns import qn
+
+                    # Tạo hoặc cập nhật vAlign element
+                    v_align_element = tc_pr.find(qn('w:vAlign'))
+                    if v_align_element is None:
+                        v_align_element = OxmlElement('w:vAlign')
+                        tc_pr.append(v_align_element)
+
+                    v_align_element.set(qn('w:val'), v_align)
+
+            # Borders (optional)
+            if 'borders' in format_options:
+                borders = format_options['borders']
+                self._apply_cell_borders(tc_pr, borders)
+
+            return True
+
+        except Exception as e:
+            print(f"Error formatting cell: {str(e)}")
+            return False
+
+    def _apply_cell_borders(self, tc_pr, borders: dict):
+        """Apply borders to table cell"""
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        # Tạo hoặc lấy tcBorders element
+        tc_borders = tc_pr.find(qn('w:tcBorders'))
+        if tc_borders is None:
+            tc_borders = OxmlElement('w:tcBorders')
+            tc_pr.append(tc_borders)
+
+        # Áp dụng border cho từng phía
+        for side in ['top', 'bottom', 'left', 'right']:
+            if side in borders:
+                border_config = borders[side]
+
+                # Tạo border element
+                border = OxmlElement(f'w:{side}')
+
+                # Border style
+                border_style = border_config.get('style', 'single')
+                border.set(qn('w:val'), border_style)
+
+                # Border size (in eighth points)
+                border_size = border_config.get('size', 4)
+                border.set(qn('w:sz'), str(border_size))
+
+                # Border color
+                border_color = border_config.get('color', 'auto')
+                if border_color.startswith('#'):
+                    border_color = border_color.lstrip('#')
+                border.set(qn('w:color'), border_color)
+
+                # Thêm hoặc replace border
+                existing_border = tc_borders.find(qn(f'w:{side}'))
+                if existing_border is not None:
+                    tc_borders.replace(existing_border, border)
+                else:
+                    tc_borders.append(border)
 
     # ===== UTILITY FUNCTIONS =====
 

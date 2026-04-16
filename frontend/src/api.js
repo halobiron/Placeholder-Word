@@ -267,3 +267,81 @@ export const getSelectionFormat = async (templateId, selectedText, blockIndex) =
   })
   return response.data
 }
+
+export const addTableRow = async (templateId, tableIndex, rowIndex, position = 'below') => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('table_index', tableIndex)
+  if (rowIndex !== null && rowIndex !== undefined) {
+    formData.append('row_index', rowIndex)
+  }
+  formData.append('position', position)
+
+  const response = await axios.post(`${API_BASE}/add-table-row`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const deleteTableRow = async (templateId, tableIndex, rowIndex) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('table_index', tableIndex)
+  formData.append('row_index', rowIndex)
+
+  const response = await axios.post(`${API_BASE}/delete-table-row`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const addTableColumn = async (templateId, tableIndex, colIndex, position = 'right') => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('table_index', tableIndex)
+  if (colIndex !== null && colIndex !== undefined) {
+    formData.append('col_index', colIndex)
+  }
+  formData.append('position', position)
+
+  const response = await axios.post(`${API_BASE}/add-table-column`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const deleteTableColumn = async (templateId, tableIndex, colIndex) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('table_index', tableIndex)
+  formData.append('col_index', colIndex)
+
+  const response = await axios.post(`${API_BASE}/delete-table-column`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const formatTableCell = async (templateId, tableIndex, rowIndex, colIndex, formatOptions) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('table_index', tableIndex)
+  formData.append('row_index', rowIndex)
+  formData.append('col_index', colIndex)
+  formData.append('format_options', JSON.stringify(formatOptions))
+
+  const response = await axios.post(`${API_BASE}/format-table-cell`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}

@@ -134,6 +134,7 @@ class MailMergeProcessor:
             doc = Document(docx_path)
             html_parts = []
             block_index = 0  # Track block index for click-to-add functionality
+            table_index = 0  # Track table index for table operations
 
             print("=== GENERATING HTML PREVIEW ===")
 
@@ -167,12 +168,16 @@ class MailMergeProcessor:
 
                 elif isinstance(child, CT_Tbl):
                     table = Table(child, doc)
+                    current_table_index = table_index  # Store current table index
+                    table_index += 1  # Increment for next table
                     table_has_content = False
 
                     # Track starting block index for this table (for first cell)
                     table_start_block_index = block_index
 
                     # Process each cell as a separate block (matching extract_structured_content logic)
+                    # CRITICAL FIX: Increment block_index for ALL cells (including empty ones)
+                    # This matches _process_table_to_html and _build_block_index_map behavior
                     cell_index = 0
                     for row_idx, row in enumerate(table.rows):
                         for cell_idx, cell in enumerate(row.cells):
@@ -188,13 +193,16 @@ class MailMergeProcessor:
                             if cell_text:
                                 table_has_content = True
                                 print(f"[HTML Preview] Block {block_index}: TABLE_CELL[{row_idx},{cell_idx}] - {cell_text[:60]}...")
-                                block_index += 1
-                                cell_index += 1
+
+                            # CRITICAL FIX: Increment block_index for ALL cells, not just non-empty ones
+                            # This ensures consistency with _process_table_to_html and _build_block_index_map
+                            block_index += 1
+                            cell_index += 1
 
                     # Only render table HTML if it has content
                     if table_has_content:
                         # Use the starting block index for the table (first cell's block_index)
-                        html = self._process_table_to_html(table, table_start_block_index)
+                        html = self._process_table_to_html(table, table_start_block_index, current_table_index)
                         html_parts.append(html)
 
             print(f"=== TOTAL BLOCKS IN HTML PREVIEW: {block_index} ===")
@@ -253,7 +261,7 @@ class MailMergeProcessor:
                         "type": "paragraph",
                         "text": text if text else "[EMPTY LINE]",
                         "style": para.style.name if para.style else "Normal",
-                        "docx_index": idx,  # Track actual position in DOCX
+                        "docx_index": len(content_blocks),  # CRITICAL FIX: Use block index, not table index
                         "is_empty": not text
                     })
                     print(f"[{len(content_blocks)-1}] {text[:80] if text else '[EMPTY]'}...")
@@ -262,7 +270,8 @@ class MailMergeProcessor:
                     table_has_content = False
 
                     # Process each cell as a separate content block to enable precise targeting
-                    # This fixes the issue where similar cells in a table would get confused
+                    # CRITICAL FIX: Process ALL cells (including empty ones) for consistency
+                    # This matches _generate_html_preview and _build_block_index_map behavior
                     for row_idx, row in enumerate(table.rows):
                         for cell_idx, cell in enumerate(row.cells):
                             # Extract text from XML (same logic as paragraphs)
@@ -274,19 +283,33 @@ class MailMergeProcessor:
 
                             cell_text = cell_text.strip()
 
-                            if cell_text:
-                                table_has_content = True
+                            # CRITICAL: Add ALL cells (including empty ones) for consistency
+                            # This ensures block index is consistent across all components
+                            if cell_text or not cell_text:  # Always add, regardless of content
+                                if cell_text:
+                                    table_has_content = True
+
+                                # Find the first paragraph in this cell
+                                para_to_use = None
+                                if cell.paragraphs:
+                                    para_to_use = cell.paragraphs[0]
+
                                 # Add cell as a separate block with precise location metadata
                                 content_blocks.append({
                                     "type": "table_cell",
-                                    "text": cell_text,
+                                    "text": cell_text if cell_text else "",  # Empty string for empty cells
                                     "table_row": row_idx,
                                     "table_col": cell_idx,
-                                    "docx_index": idx,
+                                    "docx_index": len(content_blocks),  # CRITICAL FIX: Use block index, not table index
                                     # Store table structure context to disambiguate similar cells
-                                    "table_context": f"Row {row_idx}, Col {cell_idx}"
+                                    "table_context": f"Row {row_idx}, Col {cell_idx}",
+                                    "is_empty": not cell_text  # Track if cell is empty
                                 })
-                                print(f"[{len(content_blocks)-1}] TABLE_CELL[{row_idx},{cell_idx}]: {cell_text[:60]}...")
+
+                                if cell_text:
+                                    print(f"[{len(content_blocks)-1}] TABLE_CELL[{row_idx},{cell_idx}]: {cell_text[:60]}...")
+                                else:
+                                    print(f"[{len(content_blocks)-1}] TABLE_CELL[{row_idx},{cell_idx}]: [EMPTY]")
 
                     # Only add table as a block if it has content (for backward compatibility)
                     if table_has_content:
@@ -1514,20 +1537,23 @@ JSON:"""
             tag, block_index, align_style, content
         )
 
-    def _process_table_to_html(self, table, block_index: int) -> str:
+    def _process_table_to_html(self, table, block_index: int, table_index: int) -> str:
         """Xử lý Table thành thẻ table html với block_index metadata cho từng ô
 
         Args:
             table: docx Table object
             block_index: Starting block index for first cell in table
+            table_index: Index of this table in the document
 
         Returns:
             HTML string for the entire table
         """
+        print(f"[_process_table_to_html] Processing table {table_index} with {len(table.rows)} rows")
         table_html = ['<table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; margin: 10px 0;">']
 
         # Track block index for each cell (matching extract_structured_content logic)
         current_cell_block_index = block_index
+        cells_processed = 0
 
         for row_idx, row in enumerate(table.rows):
             table_html.append('<tr style="border: 1px solid #ccc;">')
@@ -1540,53 +1566,59 @@ JSON:"""
                             cell_text += t.text
 
                 cell_text = cell_text.strip()
+                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}]: text=\"{cell_text[:30] if cell_text else '(empty)'}\", has_content={bool(cell_text)}")
 
-                # Only add cells with content (matching extract_structured_content)
-                if cell_text:
-                    # Process each paragraph in the cell separately to preserve empty lines
-                    cell_paragraphs_html = []
-                    para_index = 0  # Track paragraph index within cell for targeting
+                # ALWAYS render cells (even empty ones) to maintain table structure
+                # This ensures HTML preview matches DOCX structure exactly
+                cell_paragraphs_html = []
+                para_index = 0  # Track paragraph index within cell for targeting
 
-                    for para in cell.paragraphs:
-                        # Extract text content to check if paragraph is empty
-                        text_from_xml = ""
-                        for t in para._p.findall(f".//{self.w_ns}t"):
-                            if t.text:
-                                text_from_xml += t.text
+                # Process paragraphs in cell
+                for para in cell.paragraphs:
+                    # Extract text content to check if paragraph is empty
+                    text_from_xml = ""
+                    for t in para._p.findall(f".//{self.w_ns}t"):
+                        if t.text:
+                            text_from_xml += t.text
 
-                        # Process paragraph content
-                        para_content = "".join(self._process_xml_element_to_html(child) for child in para._p)
+                    # Process paragraph content
+                    para_content = "".join(self._process_xml_element_to_html(child) for child in para._p)
 
-                        # Add metadata for each paragraph to enable precise targeting
-                        para_metadata = f'data-para-in-cell="{para_index}" data-cell="{cell_idx}" data-cell-block-index="{current_cell_block_index}"'
+                    # Add metadata for each paragraph to enable precise targeting
+                    para_metadata = f'data-para-in-cell="{para_index}" data-cell="{cell_idx}" data-cell-block-index="{current_cell_block_index}"'
 
-                        if not para_content.strip():
-                            # Empty paragraph in cell - preserve it but make it clickable
-                            cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="min-height: 1.2em; margin: 2px 0; cursor: crosshair;" title="Click để thêm placeholder">&nbsp;</p>')
-                        else:
-                            # Non-empty paragraph - wrap in p tag with metadata
-                            para_style = "margin: 2px 0;"
-                            import re
-                            text_content = re.sub(r'<[^>]+>', '', para_content)
-                            if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
-                                para_style += " white-space: pre-wrap;"
-                            cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="{para_style}">{para_content}</p>')
-                        para_index += 1
+                    if not para_content.strip():
+                        # Empty paragraph in cell - preserve it but make it clickable
+                        cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="min-height: 1.2em; margin: 2px 0; cursor: crosshair;" title="Click để thêm placeholder">&nbsp;</p>')
+                    else:
+                        # Non-empty paragraph - wrap in p tag with metadata
+                        para_style = "margin: 2px 0;"
+                        import re
+                        text_content = re.sub(r'<[^>]+>', '', para_content)
+                        if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
+                            para_style += " white-space: pre-wrap;"
+                        cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="{para_style}">{para_content}</p>')
+                    para_index += 1
 
-                    cell_content = "".join(cell_paragraphs_html)
-                    tag = "th" if row_idx == 0 else "td"
+                # Create cell content (empty string if no paragraphs)
+                cell_content = "".join(cell_paragraphs_html) if cell_paragraphs_html else "&nbsp;"
 
-                    # Add data-block-index for this cell (matching extract_structured_content)
-                    table_html.append('<{0} data-block-index="{1}" data-type="table_cell" data-row="{2}" data-col="{3}" style="border: 1px solid #ccc; padding: 5px;">{4}</{0}>'.format(
-                        tag, current_cell_block_index, row_idx, cell_idx, cell_content
-                    ))
+                tag = "th" if row_idx == 0 else "td"
 
-                    # Increment block index for next cell
-                    current_cell_block_index += 1
+                # Add data-block-index for this cell (matching extract_structured_content)
+                table_html.append('<{0} data-block-index="{1}" data-type="table_cell" data-table-index="{4}" data-row="{2}" data-col="{3}" style="border: 1px solid #ccc; padding: 5px;">{5}</{0}>'.format(
+                    tag, current_cell_block_index, row_idx, cell_idx, table_index, cell_content
+                ))
+
+                # Increment block index for next cell
+                current_cell_block_index += 1
+                cells_processed += 1
 
             table_html.append('</tr>')
         table_html.append('</table>')
-        return "\n".join(table_html)
+        html_result = "\n".join(table_html)
+        print(f"[_process_table_to_html] Processed {cells_processed} cells, HTML length: {len(html_result)}")
+        return html_result
 
 
 

@@ -40,7 +40,16 @@
       "Bash(bash scripts/docx_preview.sh /Users/aiot/workspace/placeholder/backend/uploads/templates/6aa2e209-babd-4ae5-81e4-a2beac08e048.docx)",
       "Bash(curl -s -X POST http://localhost:8000/get-selection-format -F template_id=75a39dce-6b73-460d-ab47-2dfcaf403ac9 -F 'selected_text=Người khởi kiện' -F block_index=34)",
       "Bash(curl -s -X POST http://localhost:8000/get-selection-format -F template_id=6aa2e209-babd-4ae5-81e4-a2beac08e048 -F 'selected_text=Người khởi kiện' -F block_index=34)",
-      "Bash(pkill -f \"uvicorn.*main:app\")"
+      "Bash(pkill -f \"uvicorn.*main:app\")",
+      "Bash(rg -U \"block_index|blockIndex|data-type.*table|data-row|data-col\" /Users/aiot/workspace/placeholder/frontend --type js --type ts --type html)",
+      "Bash(find:*)",
+      "Bash(curl -s \"http://localhost:8000/template-info/079eda8c-e12c-473a-8d51-d7b4fde1c135\")",
+      "Bash(pkill:*)",
+      "Bash(curl -s \"http://localhost:8000/\")",
+      "Bash(curl -s http://localhost:8000/)",
+      "Bash(curl -s \"http://localhost:8000/template-info/079eda8c-e12c-473a-8d51-d7b4fde1c135\" grep -o 'data-table-index[^ >]*' /tmp/response.html)",
+      "Bash(timeout 5 uvicorn main:app --port 8000)",
+      "Bash(uvicorn main:app:*)"
     ]
   },
   "enabledPlugins": {

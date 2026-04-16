@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -33,6 +33,19 @@ function App() {
   const [showEditPopup, setShowEditPopup] = useState(false)
   const [selectedTextForEdit, setSelectedTextForEdit] = useState(null)
   const [copiedFormat, setCopiedFormat] = useState(null) // Store copied format for Format Painter
+
+  // Table editing states
+  const [selectedTableInfo, setSelectedTableInfo] = useState({
+    tableIndex: null,
+    rowIndex: null,
+    colIndex: null,
+    isCellSelected: false
+  })
+  const [showCellFormatDialog, setShowCellFormatDialog] = useState(false)
+  const [cellFormatOptions, setCellFormatOptions] = useState({
+    background_color: '#ffffff',
+    vertical_align: 'top'
+  })
 
   // Extract placeholders from HTML
   const extractFields = (html) => {
@@ -141,6 +154,58 @@ function App() {
       }
     })
 
+    // Add click handlers for table cells (ALWAYS ACTIVE, not just in add mode)
+    // This enables table editing toolbar for all table cells
+    // IMPORTANT: Setup AFTER paragraph handlers to override them
+    const tableCells = editor.querySelectorAll('[data-block-index][data-type="table_cell"]')
+    console.log(`[Table Debug] Found ${tableCells.length} table cells`)
+    tableCells.forEach(element => {
+      element.style.cursor = 'crosshair'
+
+      // Use capture phase to override paragraph handlers
+      element.addEventListener('click', (e) => {
+        console.log(`[Table Debug] Cell click event captured`)
+
+        // Check if click is directly on cell or its children
+        const target = e.target
+        const isCellOrChild = target === element || element.contains(target)
+
+        if (isCellOrChild) {
+          e.preventDefault()
+          e.stopPropagation()
+          e.stopImmediatePropagation() // Stop other handlers
+
+          const cellBlockIndex = parseInt(element.getAttribute('data-block-index'))
+          const tableIndex = parseInt(element.getAttribute('data-table-index') || '0')
+          const row = parseInt(element.getAttribute('data-row'))
+          const col = parseInt(element.getAttribute('data-col'))
+
+          console.log(`[Table Debug] Clicked cell [${row},${col}], tableIndex: ${tableIndex}, blockIndex: ${cellBlockIndex}`)
+
+          setSelectedBlockIndex(cellBlockIndex) // Each cell now has its own block_index
+          setSelectedCellIndex(null) // No need for cell_index anymore
+          setSelectedTableBlockIndex(null)
+          setSelectedParaInCell(null) // Reset paragraph index when clicking whole cell
+
+          // Set table editing info
+          setSelectedTableInfo({
+            tableIndex: tableIndex,
+            rowIndex: row,
+            colIndex: col,
+            isCellSelected: true
+          })
+
+          // Highlight selected cell
+          editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
+            el.style.outline = ''
+          })
+          element.style.outline = '2px solid #8b5cf6'
+
+          setError(`Đã chọn ô [${row},${col}]. Nhập tên placeholder và nhấn "Thêm" hoặc dùng công cụ bảng.`)
+        }
+      }, true) // Use capture phase
+    })
+
     // Add click handlers for block selection in add mode
     if (isAddMode) {
       // First, remove existing handlers
@@ -183,33 +248,6 @@ function App() {
           element.style.outline = '2px solid #8b5cf6'
 
           setError(`Đã chọn ${blockType === 'table' ? 'bảng' : 'đoạn'} #${blockIndex}. Nhập tên placeholder và nhấn "Thêm".`)
-        }
-      })
-
-      // Handle cell-level clicks within tables
-      // Also handle paragraph-level clicks within table cells for more precise targeting
-      editor.querySelectorAll('[data-block-index][data-type="table_cell"]').forEach(element => {
-        element.style.cursor = 'crosshair'
-        element.onclick = (e) => {
-          e.preventDefault()
-          e.stopPropagation()
-
-          const cellBlockIndex = parseInt(element.getAttribute('data-block-index'))
-          const row = parseInt(element.getAttribute('data-row'))
-          const col = parseInt(element.getAttribute('data-col'))
-
-          setSelectedBlockIndex(cellBlockIndex) // Each cell now has its own block_index
-          setSelectedCellIndex(null) // No need for cell_index anymore
-          setSelectedTableBlockIndex(null)
-          setSelectedParaInCell(null) // Reset paragraph index when clicking whole cell
-
-          // Highlight selected cell
-          editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
-            el.style.outline = ''
-          })
-          element.style.outline = '2px solid #8b5cf6'
-
-          setError(`Đã chọn ô [${row},${col}]. Nhập tên placeholder và nhấn "Thêm".`)
         }
       })
 
@@ -741,6 +779,119 @@ function App() {
     }
   }
 
+  // Table operation handlers
+  const handleAddTableRow = async (position = 'below') => {
+    if (!selectedTableInfo.isCellSelected) return
+
+    try {
+      const { tableIndex, rowIndex } = selectedTableInfo
+      const result = await addTableRow(templateId, tableIndex, rowIndex, position)
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      setError(`✅ Đã thêm row ${position === 'above' ? 'trên' : 'dưới'} thành công!`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Add table row failed:', err)
+      setError('Thêm row thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
+  const handleDeleteTableRow = async () => {
+    if (!selectedTableInfo.isCellSelected) return
+
+    try {
+      const { tableIndex, rowIndex } = selectedTableInfo
+      const result = await deleteTableRow(templateId, tableIndex, rowIndex)
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      // Reset table selection after deleting
+      setSelectedTableInfo({
+        tableIndex: null,
+        rowIndex: null,
+        colIndex: null,
+        isCellSelected: false
+      })
+
+      setError(`✅ Đã xóa row thành công!`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Delete table row failed:', err)
+      setError('Xóa row thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
+  const handleAddTableColumn = async (position = 'right') => {
+    if (!selectedTableInfo.isCellSelected) return
+
+    try {
+      const { tableIndex, colIndex } = selectedTableInfo
+      const result = await addTableColumn(templateId, tableIndex, colIndex, position)
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      setError(`✅ Đã thêm column ${position === 'left' ? 'trái' : 'phải'} thành công!`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Add table column failed:', err)
+      setError('Thêm column thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
+  const handleDeleteTableColumn = async () => {
+    if (!selectedTableInfo.isCellSelected) return
+
+    try {
+      const { tableIndex, colIndex } = selectedTableInfo
+      const result = await deleteTableColumn(templateId, tableIndex, colIndex)
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      // Reset table selection after deleting
+      setSelectedTableInfo({
+        tableIndex: null,
+        rowIndex: null,
+        colIndex: null,
+        isCellSelected: false
+      })
+
+      setError(`✅ Đã xóa column thành công!`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Delete table column failed:', err)
+      setError('Xóa column thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
+  const handleFormatTableCell = async () => {
+    if (!selectedTableInfo.isCellSelected) return
+
+    try {
+      const { tableIndex, rowIndex, colIndex } = selectedTableInfo
+      const result = await formatTableCell(templateId, tableIndex, rowIndex, colIndex, cellFormatOptions)
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      setShowCellFormatDialog(false)
+      setError(`✅ Đã format cell thành công!`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Format table cell failed:', err)
+      setError('Format cell thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-8 px-4">
       <div className="max-w-4xl mx-auto">
@@ -1166,6 +1317,89 @@ function App() {
                       </button>
                     </div>
                   )}
+
+                  {/* Table editing toolbar */}
+                  {selectedTableInfo.isCellSelected && (
+                    <div className="mt-3 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+                      <div className="text-sm font-semibold text-indigo-800 mb-2">
+                        📊 Công cụ bảng - Ô [{selectedTableInfo.rowIndex}, {selectedTableInfo.colIndex}]
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {/* Row operations */}
+                        <div className="flex gap-1 border-r border-indigo-300 pr-2">
+                          <button
+                            onClick={() => handleAddTableRow('above')}
+                            className="px-2 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 font-medium"
+                            title="Thêm row phía trên"
+                          >
+                            ⬆️ Row Trên
+                          </button>
+                          <button
+                            onClick={() => handleAddTableRow('below')}
+                            className="px-2 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 font-medium"
+                            title="Thêm row phía dưới"
+                          >
+                            ⬇️ Row Dưới
+                          </button>
+                          <button
+                            onClick={handleDeleteTableRow}
+                            className="px-2 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600 font-medium"
+                            title="Xóa row hiện tại"
+                          >
+                            🗑️ Xóa Row
+                          </button>
+                        </div>
+
+                        {/* Column operations */}
+                        <div className="flex gap-1 border-r border-indigo-300 pr-2">
+                          <button
+                            onClick={() => handleAddTableColumn('left')}
+                            className="px-2 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 font-medium"
+                            title="Thêm column bên trái"
+                          >
+                            ⬅️ Col Trái
+                          </button>
+                          <button
+                            onClick={() => handleAddTableColumn('right')}
+                            className="px-2 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 font-medium"
+                            title="Thêm column bên phải"
+                          >
+                            ➡️ Col Phải
+                          </button>
+                          <button
+                            onClick={handleDeleteTableColumn}
+                            className="px-2 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600 font-medium"
+                            title="Xóa column hiện tại"
+                          >
+                            🗑️ Xóa Col
+                          </button>
+                        </div>
+
+                        {/* Cell formatting */}
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => setShowCellFormatDialog(true)}
+                            className="px-2 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600 font-medium"
+                            title="Format ô (màu nền, căn lề)"
+                          >
+                            🎨 Format Cell
+                          </button>
+                          <button
+                            onClick={() => setSelectedTableInfo({
+                              tableIndex: null,
+                              rowIndex: null,
+                              colIndex: null,
+                              isCellSelected: false
+                            })}
+                            className="px-2 py-1 bg-gray-500 text-white rounded text-xs hover:bg-gray-600 font-medium"
+                            title="Bỏ chọn ô"
+                          >
+                            ✖️ Bỏ Chọn
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div
                   id="document-editor"
@@ -1451,6 +1685,76 @@ function App() {
             setSelectedTextForEdit(null)
           }}
         />
+      )}
+
+      {/* Cell format dialog */}
+      {showCellFormatDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900 mb-4">🎨 Format Cell</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Ô đang chọn: [{selectedTableInfo.rowIndex}, {selectedTableInfo.colIndex}]
+            </p>
+
+            <div className="space-y-4">
+              {/* Background color */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Màu nền:</label>
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="color"
+                    value={cellFormatOptions.background_color}
+                    onChange={(e) => setCellFormatOptions({...cellFormatOptions, background_color: e.target.value})}
+                    className="h-10 w-20 border border-gray-300 rounded cursor-pointer"
+                  />
+                  <input
+                    type="text"
+                    value={cellFormatOptions.background_color}
+                    onChange={(e) => setCellFormatOptions({...cellFormatOptions, background_color: e.target.value})}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                    placeholder="#ffffff"
+                  />
+                </div>
+              </div>
+
+              {/* Vertical alignment */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Căn lề dọc:</label>
+                <select
+                  value={cellFormatOptions.vertical_align}
+                  onChange={(e) => setCellFormatOptions({...cellFormatOptions, vertical_align: e.target.value})}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                >
+                  <option value="top">Trên (Top)</option>
+                  <option value="center">Giữa (Center)</option>
+                  <option value="bottom">Dưới (Bottom)</option>
+                </select>
+              </div>
+
+              {/* Buttons */}
+              <div className="flex gap-2 pt-4">
+                <button
+                  onClick={handleFormatTableCell}
+                  className="flex-1 px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 font-medium"
+                >
+                  Áp Dụng
+                </button>
+                <button
+                  onClick={() => {
+                    setShowCellFormatDialog(false)
+                    setCellFormatOptions({
+                      background_color: '#ffffff',
+                      vertical_align: 'top'
+                    })
+                  }}
+                  className="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 font-medium"
+                >
+                  Hủy
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

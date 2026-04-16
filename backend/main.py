@@ -7,7 +7,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import Dict
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -1161,7 +1161,7 @@ if __name__ == "__main__":
 async def update_text_in_template(
     template_id: str = Form(...),
     block_index: int = Form(...),
-    old_text: str = Form(...),
+    old_text: str = Form(""),  # Changed to allow empty string for new cells
     new_text: str = Form(""),
     edit_type: str = Form("text")
 ):
@@ -1207,12 +1207,50 @@ async def update_text_in_template(
                 paragraph_index=para_index
             )
         else:
-            # Replacement: replace with new text
-            success = editor.replace_text_at_position(
-                old_text=old_text,
-                new_text=new_text,
-                paragraph_index=para_index
-            )
+            # CRITICAL FIX: Check if old_text is empty or cell is empty
+            # If old_text is empty or cell is empty, ADD text instead of REPLACE
+            if not old_text or old_text.strip() == "":
+                # Adding text to empty cell - get target paragraph first
+                target_paragraph = None
+                for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
+                    if idx == para_index:
+                        target_paragraph = para
+                        break
+
+                if target_paragraph and not target_paragraph.text.strip():
+                    # Empty paragraph - add text directly
+                    from docx.oxml import OxmlElement
+                    from docx.oxml.ns import qn
+
+                    # Check if paragraph has runs
+                    if target_paragraph.runs:
+                        # Add to existing run
+                        target_paragraph.runs[0].text = new_text
+                    else:
+                        # Create new run with text
+                        r = target_paragraph._element.add(OxmlElement('w:r'))
+                        t = OxmlElement('w:t')
+                        t.set(qn('xml:space'), 'preserve')
+                        t.text = new_text
+                        r.append(t)
+
+                    success = True
+                    print(f"[DEBUG] Added text '{new_text}' to empty paragraph at index {para_index}")
+                else:
+                    # Paragraph has content or couldn't find - try normal replace
+                    print(f"[DEBUG] Paragraph has content or not found, trying normal replace")
+                    success = editor.replace_text_at_position(
+                        old_text=old_text if old_text else "",
+                        new_text=new_text,
+                        paragraph_index=para_index
+                    )
+            else:
+                # Normal replacement: replace with new text
+                success = editor.replace_text_at_position(
+                    old_text=old_text,
+                    new_text=new_text,
+                    paragraph_index=para_index
+                )
 
         if not success:
             raise HTTPException(
@@ -1345,3 +1383,399 @@ async def get_selection_format(
         print(f"=== END ERROR ===")
         raise HTTPException(status_code=500, detail=error_detail)
 
+
+# ===== TABLE OPERATION ENDPOINTS =====
+
+@app.post("/add-table-row")
+async def add_table_row(request: Request):
+    """Thêm row mới vào bảng"""
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        table_index = form.get("table_index")
+        row_index = form.get("row_index")  # Optional: insert at specific position
+        position = form.get("position", "below")  # "above" or "below"
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if not table_index:
+            raise HTTPException(status_code=400, detail="table_index is required")
+
+        # Convert to integers
+        try:
+            table_index = int(table_index)
+            row_index = int(row_index) if row_index else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid table_index or row_index")
+
+        # Validate position
+        if position not in ["above", "below"]:
+            raise HTTPException(status_code=400, detail="position must be 'above' or 'below'")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Calculate insertion index based on position
+        insert_index = row_index if row_index is not None else len(editor.doc.tables[table_index].rows)
+
+        if position == "below" and insert_index is not None:
+            insert_index = insert_index + 1
+
+        # Insert row
+        success = editor.insert_table_row(table_index, insert_index)
+
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to add table row")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "html_preview": html_preview,
+            "operation": "add_row",
+            "table_index": table_index,
+            "position": position
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Add table row failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /add-table-row ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/delete-table-row")
+async def delete_table_row(request: Request):
+    """Xóa row khỏi bảng"""
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        table_index = form.get("table_index")
+        row_index = form.get("row_index")
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if not table_index:
+            raise HTTPException(status_code=400, detail="table_index is required")
+        if not row_index:
+            raise HTTPException(status_code=400, detail="row_index is required")
+
+        # Convert to integers
+        try:
+            table_index = int(table_index)
+            row_index = int(row_index)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid table_index or row_index")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Delete row
+        success = editor.delete_table_row(table_index, row_index)
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to delete table row. Check if row index is valid or if it's the last row."
+            )
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "html_preview": html_preview,
+            "operation": "delete_row",
+            "table_index": table_index,
+            "row_index": row_index
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Delete table row failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /delete-table-row ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/add-table-column")
+async def add_table_column(request: Request):
+    """Thêm column mới vào bảng"""
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        table_index = form.get("table_index")
+        col_index = form.get("col_index")  # Optional: insert at specific position
+        position = form.get("position", "right")  # "left" or "right"
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if not table_index:
+            raise HTTPException(status_code=400, detail="table_index is required")
+
+        # Convert to integers
+        try:
+            table_index = int(table_index)
+            col_index = int(col_index) if col_index else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid table_index or col_index")
+
+        # Validate position
+        if position not in ["left", "right"]:
+            raise HTTPException(status_code=400, detail="position must be 'left' or 'right'")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Calculate insertion index based on position
+        insert_index = col_index if col_index is not None else len(editor.doc.tables[table_index].rows[0].cells)
+
+        if position == "right" and insert_index is not None:
+            insert_index = insert_index + 1
+
+        # Insert column
+        success = editor.insert_table_column(table_index, insert_index)
+
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to add table column")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "html_preview": html_preview,
+            "operation": "add_column",
+            "table_index": table_index,
+            "position": position
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Add table column failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /add-table-column ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/delete-table-column")
+async def delete_table_column(request: Request):
+    """Xóa column khỏi bảng"""
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        table_index = form.get("table_index")
+        col_index = form.get("col_index")
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if not table_index:
+            raise HTTPException(status_code=400, detail="table_index is required")
+        if not col_index:
+            raise HTTPException(status_code=400, detail="col_index is required")
+
+        # Convert to integers
+        try:
+            table_index = int(table_index)
+            col_index = int(col_index)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid table_index or col_index")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Delete column
+        success = editor.delete_table_column(table_index, col_index)
+
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to delete table column. Check if column index is valid or if it's the last column."
+            )
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "html_preview": html_preview,
+            "operation": "delete_column",
+            "table_index": table_index,
+            "col_index": col_index
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Delete table column failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /delete-table-column ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/format-table-cell")
+async def format_table_cell(request: Request):
+    """Format table cell (background color, vertical alignment, borders)"""
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        table_index = form.get("table_index")
+        row_index = form.get("row_index")
+        col_index = form.get("col_index")
+        format_options_str = form.get("format_options")
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if not table_index:
+            raise HTTPException(status_code=400, detail="table_index is required")
+        if not row_index:
+            raise HTTPException(status_code=400, detail="row_index is required")
+        if not col_index:
+            raise HTTPException(status_code=400, detail="col_index is required")
+        if not format_options_str:
+            raise HTTPException(status_code=400, detail="format_options is required")
+
+        # Convert to integers
+        try:
+            table_index = int(table_index)
+            row_index = int(row_index)
+            col_index = int(col_index)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid table_index, row_index, or col_index")
+
+        # Parse format options JSON
+        try:
+            import json
+            format_options = json.loads(format_options_str)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid format_options JSON: {str(e)}")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Format cell
+        success = editor.format_table_cell(table_index, row_index, col_index, format_options)
+
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to format table cell")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "html_preview": html_preview,
+            "operation": "format_cell",
+            "table_index": table_index,
+            "row_index": row_index,
+            "col_index": col_index,
+            "format_options": format_options
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Format table cell failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /format-table-cell ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
