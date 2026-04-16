@@ -1241,6 +1241,17 @@ JSON:"""
         if caps is not None:
             styles.append("text-transform: uppercase")
 
+        # Handle vertical alignment (w:vertAlign) -> subscript/superscript
+        vertAlign = rPr.find(f"{self.w_ns}vertAlign")
+        if vertAlign is not None:
+            val = vertAlign.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "")
+            if val == "superscript":
+                styles.append("vertical-align: super")
+                styles.append("font-size: smaller")
+            elif val == "subscript":
+                styles.append("vertical-align: sub")
+                styles.append("font-size: smaller")
+
         return "; ".join(styles)
 
     def rename_placeholders_in_docx(

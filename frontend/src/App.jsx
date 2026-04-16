@@ -654,6 +654,8 @@ function App() {
         italic: false,
         underline: false,
         strikethrough: false,
+        subscript: false,
+        superscript: false,
         color: '#000000',
         fontSize: 12,
         fontName: 'Times New Roman'

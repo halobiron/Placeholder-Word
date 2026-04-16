@@ -1304,6 +1304,8 @@ async def get_selection_format(
                 'italic': False,
                 'underline': 'none',
                 'strikethrough': False,
+                'subscript': False,
+                'superscript': False,
                 'color': '000000',
                 'highlight': None,
                 'fontSize': 12,
@@ -1316,6 +1318,8 @@ async def get_selection_format(
             'italic': format_info.get('italic', False),
             'underline': format_info.get('underline', 'none') != 'none',
             'strikethrough': format_info.get('strikethrough', False),
+            'subscript': format_info.get('subscript', False),
+            'superscript': format_info.get('superscript', False),
             'color': '#' + format_info.get('color', '000000'),
             'fontSize': format_info.get('font_size', 12),
             'fontName': format_info.get('font_name', 'Times New Roman')

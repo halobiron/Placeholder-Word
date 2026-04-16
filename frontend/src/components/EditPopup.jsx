@@ -7,6 +7,8 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
     italic: false,
     underline: false,
     strikethrough: false,
+    subscript: false,
+    superscript: false,
     color: '#000000',
     highlight: null,
     fontSize: 12,
@@ -38,8 +40,10 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
       format.italic !== originalFormat.italic ||
       format.underline !== originalFormat.underline ||
       format.strikethrough !== (originalFormat.strikethrough || false) ||
+      format.subscript !== (originalFormat.subscript || false) ||
+      format.superscript !== (originalFormat.superscript || false) ||
       format.color !== originalFormat.color ||
-      format.highlight !== (originalFormat.highlight || '#ffffff') ||
+      format.highlight !== (originalFormat.highlight || null) ||
       format.fontSize !== originalFormat.fontSize ||
       format.fontName !== originalFormat.fontName ||
       format.allCaps !== (originalFormat.allCaps || false) ||
@@ -147,6 +151,30 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
               className="w-4 h-4"
             />
             <span className="text-sm">Gạch ngang</span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={format.subscript}
+              onChange={(e) => {
+                setFormat({ ...format, subscript: e.target.checked, superscript: false })
+              }}
+              className="w-4 h-4"
+            />
+            <span className="text-sm">Chỉ số dưới (x₂)</span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={format.superscript}
+              onChange={(e) => {
+                setFormat({ ...format, superscript: e.target.checked, subscript: false })
+              }}
+              className="w-4 h-4"
+            />
+            <span className="text-sm">Chỉ số trên (x²)</span>
           </label>
 
           <label className="flex items-center gap-2 cursor-pointer">

@@ -242,6 +242,8 @@ class DocxFullEditor:
         italic: bool = None,
         underline: bool = None,
         strikethrough: bool = None,
+        subscript: bool = None,
+        superscript: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -255,7 +257,7 @@ class DocxFullEditor:
         Args:
             text: Text to format
             paragraph_index: Index of paragraph containing the text
-            bold, italic, underline, strikethrough, color, highlight, font_name, font_size: Format options
+            bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
             all_caps: All caps formatting
 
         Returns:
@@ -341,7 +343,7 @@ class DocxFullEditor:
             self._format_text_in_runs(
                 paragraph,
                 runs_to_format,
-                bold, italic, underline, strikethrough, color, highlight, font_name, font_size,
+                bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size,
                 all_caps
             )
             return True
@@ -356,6 +358,8 @@ class DocxFullEditor:
         italic: bool = None,
         underline: bool = None,
         strikethrough: bool = None,
+        subscript: bool = None,
+        superscript: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -369,7 +373,7 @@ class DocxFullEditor:
         Args:
             paragraph: Paragraph object
             runs_to_format: List of run info dicts from apply_format_at_position
-            bold, italic, underline, strikethrough, color, highlight, font_name, font_size: Format options
+            bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
             all_caps: All caps formatting
         """
         from docx.oxml import OxmlElement
@@ -395,7 +399,7 @@ class DocxFullEditor:
 
             # Case 1: Toàn bộ run cần format → chỉ apply format
             if not text_before and not text_after:
-                self._apply_format_to_run(run, bold, italic, underline, strikethrough, color, highlight, font_name, font_size)
+                self._apply_format_to_run(run, bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size)
                 continue
 
             # Case 2: Cần split run
@@ -426,7 +430,7 @@ class DocxFullEditor:
             # Chèn text_to_format với format mới - skip properties that will be set
             if text_to_format:
                 formatted_run = self._create_run_with_format(paragraph, original_rpr, text_to_format, skip_props=skip_props)
-                self._apply_format_to_run(formatted_run, bold, italic, underline, strikethrough, color, highlight, font_name, font_size, all_caps)
+                self._apply_format_to_run(formatted_run, bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size, all_caps)
                 paragraph._element.insert(insert_index, formatted_run._element)
                 insert_index += 1
 
@@ -486,6 +490,8 @@ class DocxFullEditor:
         italic: bool = None,
         underline: bool = None,
         strikethrough: bool = None,
+        subscript: bool = None,
+        superscript: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -546,6 +552,30 @@ class DocxFullEditor:
                 # Remove strike element entirely when False
                 if strike_elem is not None:
                     rpr.remove(strike_elem)
+
+        # Handle vertical alignment (subscript/superscript) - mutually exclusive
+        # Remove old element first if setting any vertical alignment
+        if (subscript or superscript) and (subscript is not None or superscript is not None):
+            # Remove existing vertAlign element
+            existing_vertAlign = rpr.find(f'{self.w_ns}vertAlign')
+            if existing_vertAlign is not None:
+                rpr.remove(existing_vertAlign)
+
+            # Create new vertAlign element based on which one is True
+            if subscript and not superscript:
+                vertAlign_elem = rpr.makeelement(f'{self.w_ns}vertAlign')
+                rpr.append(vertAlign_elem)
+                vertAlign_elem.set(f'{self.w_ns}val', 'subscript')
+            elif superscript and not subscript:
+                vertAlign_elem = rpr.makeelement(f'{self.w_ns}vertAlign')
+                rpr.append(vertAlign_elem)
+                vertAlign_elem.set(f'{self.w_ns}val', 'superscript')
+            # If both True or both False, do nothing (no vertical alignment)
+        elif subscript is False or superscript is False:
+            # Explicitly remove vertAlign if explicitly set to False
+            existing_vertAlign = rpr.find(f'{self.w_ns}vertAlign')
+            if existing_vertAlign is not None:
+                rpr.remove(existing_vertAlign)
 
         # Handle color
         if color:
@@ -843,6 +873,8 @@ class DocxFullEditor:
         italic: bool = None,
         underline: bool = None,
         strikethrough: bool = None,
+        subscript: bool = None,
+        superscript: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -859,6 +891,8 @@ class DocxFullEditor:
             italic: True/False/None
             underline: True/False/None
             strikethrough: True/False/None
+            subscript: True/False/None
+            superscript: True/False/None
             color: Màu sắc (hex or named color)
             highlight: Highlight color
             font_name: Tên font
@@ -873,10 +907,10 @@ class DocxFullEditor:
         if len(text_parts) > 1:
             # Multi-paragraph: apply format to each part separately
             for text_part in text_parts:
-                self._apply_format_to_single_text(text_part, bold, italic, underline, strikethrough, color, highlight, font_name, font_size, paragraph_index)
+                self._apply_format_to_single_text(text_part, bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size, paragraph_index)
         else:
             # Single paragraph
-            self._apply_format_to_single_text(text, bold, italic, underline, strikethrough, color, highlight, font_name, font_size, paragraph_index)
+            self._apply_format_to_single_text(text, bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size, paragraph_index)
 
     def _apply_format_to_single_text(
         self,
@@ -885,6 +919,8 @@ class DocxFullEditor:
         italic: bool = None,
         underline: bool = None,
         strikethrough: bool = None,
+        subscript: bool = None,
+        superscript: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -895,7 +931,7 @@ class DocxFullEditor:
 
         Args:
             text: Text cần format
-            bold, italic, underline, strikethrough, color, highlight, font_name, font_size: Format options
+            bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
             paragraph_index: Chỉ format text tại paragraph này (None = format tất cả)
         """
         search_text_normalized = re.sub(r'\s+', ' ', text.strip())
