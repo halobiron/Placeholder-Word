@@ -32,6 +32,7 @@ function App() {
   // New states for enhanced editing
   const [showEditPopup, setShowEditPopup] = useState(false)
   const [selectedTextForEdit, setSelectedTextForEdit] = useState(null)
+  const [copiedFormat, setCopiedFormat] = useState(null) // Store copied format for Format Painter
 
   // Extract placeholders from HTML
   const extractFields = (html) => {
@@ -626,6 +627,7 @@ function App() {
     setEditedSuggestions({}) // Clear suggestion edits
     setShowEditPopup(false)
     setSelectedTextForEdit(null)
+    setCopiedFormat(null) // Clear copied format
   }
 
   // Handle text selection for editing
@@ -1046,6 +1048,23 @@ function App() {
                 <div className="flex justify-between items-center mb-2">
                   <h3 className="text-lg font-semibold">Tài liệu</h3>
 
+                  {/* Format indicator */}
+                  {copiedFormat && (
+                    <div className="bg-indigo-100 border border-indigo-300 rounded-lg px-3 py-1 text-xs text-indigo-700">
+                      🎨 Format sẵn sàng! Chọn văn bản và bấm "Paste Format"
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setCopiedFormat(null)
+                        }}
+                        className="ml-2 text-red-500 hover:text-red-700 font-bold"
+                        title="Xóa format đã copy"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
+
                   {/* Enhanced editing buttons */}
                   {!isAddMode && (
                     <div className="flex gap-2">
@@ -1061,6 +1080,82 @@ function App() {
                         title="Click để chọn text để sửa"
                       >
                         ✏️ Chỉnh sửa
+                      </button>
+                      <button
+                        onClick={() => {
+                          const selection = window.getSelection()
+                          const selectedText = selection.toString().trim()
+
+                          if (selectedText && selectedTextForEdit) {
+                            // Copy format from current selection
+                            setCopiedFormat(selectedTextForEdit.format)
+                            setError('✅ Đã copy định dạng! Chọn văn bản khác và bấm "Paste Format"')
+                            setTimeout(() => setError(null), 3000)
+                          } else {
+                            setError('⚠️ Chọn văn bản để copy định dạng trước')
+                            setTimeout(() => setError(null), 2000)
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-purple-500 text-white rounded-lg text-sm hover:bg-purple-600 font-medium"
+                        title="Copy định dạng từ văn bản đang chọn"
+                      >
+                        📋 Copy Format
+                      </button>
+                      <button
+                        onClick={async () => {
+                          if (!copiedFormat) {
+                            setError('⚠️ Chưa có định dạng nào được copy. Bấm "Copy Format" trước!')
+                            setTimeout(() => setError(null), 2000)
+                            return
+                          }
+
+                          const selection = window.getSelection()
+                          const selectedText = selection.toString().trim()
+
+                          if (!selectedText) {
+                            setError('⚠️ Chọn văn bản để paste định dạng!')
+                            setTimeout(() => setError(null), 2000)
+                            return
+                          }
+
+                          try {
+                            // Get block index
+                          const element = selection.anchorNode.parentElement
+                          let blockIndex = null
+                          let currentElement = element
+                          while (currentElement && currentElement.id !== 'document-editor') {
+                            if (currentElement.hasAttribute && currentElement.hasAttribute('data-block-index')) {
+                              blockIndex = parseInt(currentElement.getAttribute('data-block-index'))
+                              break
+                            }
+                            currentElement = currentElement.parentElement
+                          }
+
+                          const formatData = {
+                            selectedText: selectedText,
+                            format: copiedFormat,
+                            type: 'format',
+                            blockIndex: blockIndex
+                          }
+
+                          await handleFormatApplied(formatData)
+                          setError('✅ Đã paste định dạng!')
+                          setTimeout(() => setError(null), 2000)
+                        } catch (err) {
+                          console.error('Paste format failed:', err)
+                          setError('⚠️ Paste định dạng thất bại: ' + (err.message || err))
+                          setTimeout(() => setError(null), 3000)
+                        }
+                        }}
+                        disabled={!copiedFormat}
+                        className={`px-3 py-1.5 text-white rounded-lg text-sm font-medium transition-colors ${
+                          copiedFormat
+                            ? 'bg-indigo-500 hover:bg-indigo-600'
+                            : 'bg-gray-300 cursor-not-allowed'
+                        }`}
+                        title="Paste định dạng đã copy vào văn bản đang chọn"
+                      >
+                        🎨 Paste Format
                       </button>
                       <button
                         onClick={() => handleAddContent({ type: 'placeholder', position: 'end', fieldName: prompt('Tên placeholder:') })}
