@@ -653,6 +653,7 @@ function App() {
         bold: false,
         italic: false,
         underline: false,
+        strikethrough: false,
         color: '#000000',
         fontSize: 12,
         fontName: 'Times New Roman'
@@ -674,6 +675,7 @@ function App() {
           bold: computedStyle.fontWeight === '700' || computedStyle.fontWeight === 'bold',
           italic: computedStyle.fontStyle === 'italic',
           underline: textDecorationLine.includes('underline'),
+          strikethrough: textDecorationLine.includes('line-through'),
           color: computedStyle.color,
           fontSize: parseInt(computedStyle.fontSize) || 12,
           fontName: computedStyle.fontFamily.split(',')[0].replace(/['"]/g, '').trim()

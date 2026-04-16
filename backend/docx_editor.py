@@ -241,6 +241,7 @@ class DocxFullEditor:
         bold: bool = None,
         italic: bool = None,
         underline: bool = None,
+        strikethrough: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -254,7 +255,7 @@ class DocxFullEditor:
         Args:
             text: Text to format
             paragraph_index: Index of paragraph containing the text
-            bold, italic, underline, color, highlight, font_name, font_size: Format options
+            bold, italic, underline, strikethrough, color, highlight, font_name, font_size: Format options
             all_caps: All caps formatting
 
         Returns:
@@ -340,7 +341,7 @@ class DocxFullEditor:
             self._format_text_in_runs(
                 paragraph,
                 runs_to_format,
-                bold, italic, underline, color, highlight, font_name, font_size,
+                bold, italic, underline, strikethrough, color, highlight, font_name, font_size,
                 all_caps
             )
             return True
@@ -354,6 +355,7 @@ class DocxFullEditor:
         bold: bool = None,
         italic: bool = None,
         underline: bool = None,
+        strikethrough: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -367,7 +369,7 @@ class DocxFullEditor:
         Args:
             paragraph: Paragraph object
             runs_to_format: List of run info dicts from apply_format_at_position
-            bold, italic, underline, color, highlight, font_name, font_size: Format options
+            bold, italic, underline, strikethrough, color, highlight, font_name, font_size: Format options
             all_caps: All caps formatting
         """
         from docx.oxml import OxmlElement
@@ -393,7 +395,7 @@ class DocxFullEditor:
 
             # Case 1: Toàn bộ run cần format → chỉ apply format
             if not text_before and not text_after:
-                self._apply_format_to_run(run, bold, italic, underline, color, highlight, font_name, font_size)
+                self._apply_format_to_run(run, bold, italic, underline, strikethrough, color, highlight, font_name, font_size)
                 continue
 
             # Case 2: Cần split run
@@ -424,7 +426,7 @@ class DocxFullEditor:
             # Chèn text_to_format với format mới - skip properties that will be set
             if text_to_format:
                 formatted_run = self._create_run_with_format(paragraph, original_rpr, text_to_format, skip_props=skip_props)
-                self._apply_format_to_run(formatted_run, bold, italic, underline, color, highlight, font_name, font_size, all_caps)
+                self._apply_format_to_run(formatted_run, bold, italic, underline, strikethrough, color, highlight, font_name, font_size, all_caps)
                 paragraph._element.insert(insert_index, formatted_run._element)
                 insert_index += 1
 
@@ -483,6 +485,7 @@ class DocxFullEditor:
         bold: bool = None,
         italic: bool = None,
         underline: bool = None,
+        strikethrough: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -531,6 +534,19 @@ class DocxFullEditor:
                 if underline_elem is not None:
                     rpr.remove(underline_elem)
 
+        # Handle strikethrough - remove element when False, set when True
+        if strikethrough is not None:
+            strike_elem = rpr.find(f'{self.w_ns}strike')
+            if strikethrough:
+                if strike_elem is None:
+                    strike_elem = rpr.makeelement(f'{self.w_ns}strike')
+                    rpr.append(strike_elem)
+                strike_elem.set(f'{self.w_ns}val', '1')
+            else:
+                # Remove strike element entirely when False
+                if strike_elem is not None:
+                    rpr.remove(strike_elem)
+
         # Handle color
         if color:
             color_elem = rpr.find(f'{self.w_ns}color')
@@ -559,13 +575,18 @@ class DocxFullEditor:
 
             color_elem.set(f'{self.w_ns}val', color_hex)
 
-        # Handle highlight
-        if highlight:
+        # Handle highlight (skip white/transparent as it means "no highlight")
+        if highlight and highlight.lower() != '#ffffff' and highlight.lower() != '#fff':
             shd_elem = rpr.find(f'{self.w_ns}shd')
             if shd_elem is None:
                 shd_elem = rpr.makeelement(f'{self.w_ns}shd')
                 rpr.append(shd_elem)
             shd_elem.set(f'{self.w_ns}fill', self._parse_highlight_color(highlight))
+        elif not highlight or highlight.lower() in ['#ffffff', '#fff']:
+            # Remove highlight if explicitly set to white/none
+            shd_elem = rpr.find(f'{self.w_ns}shd')
+            if shd_elem is not None:
+                rpr.remove(shd_elem)
 
         # Handle font name
         if font_name:
@@ -659,7 +680,8 @@ class DocxFullEditor:
         line_spacing: float = None,
         space_before: int = None,
         space_after: int = None,
-        first_line_indent: int = None
+        first_line_indent: int = None,
+        alignment: str = None
     ):
         """
         Apply paragraph-level formatting to a specific paragraph
@@ -670,15 +692,28 @@ class DocxFullEditor:
             space_before: Space before paragraph in points
             space_after: Space after paragraph in points
             first_line_indent: First line indent in points
+            alignment: "left", "center", "right", "justify"
 
         Returns:
             True if found and formatted, False otherwise
         """
         from docx.shared import Pt
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+
+        alignment_map = {
+            "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
+            "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
+            "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
+            "justify": WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+        }
 
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if p_idx != paragraph_index:
                 continue
+
+            # Apply alignment
+            if alignment and alignment in alignment_map:
+                paragraph.alignment = alignment_map[alignment]
 
             # Apply line spacing
             if line_spacing is not None:
@@ -807,6 +842,7 @@ class DocxFullEditor:
         bold: bool = None,
         italic: bool = None,
         underline: bool = None,
+        strikethrough: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -822,6 +858,7 @@ class DocxFullEditor:
             bold: True/False/None (None = không đổi)
             italic: True/False/None
             underline: True/False/None
+            strikethrough: True/False/None
             color: Màu sắc (hex or named color)
             highlight: Highlight color
             font_name: Tên font
@@ -836,10 +873,10 @@ class DocxFullEditor:
         if len(text_parts) > 1:
             # Multi-paragraph: apply format to each part separately
             for text_part in text_parts:
-                self._apply_format_to_single_text(text_part, bold, italic, underline, color, highlight, font_name, font_size, paragraph_index)
+                self._apply_format_to_single_text(text_part, bold, italic, underline, strikethrough, color, highlight, font_name, font_size, paragraph_index)
         else:
             # Single paragraph
-            self._apply_format_to_single_text(text, bold, italic, underline, color, highlight, font_name, font_size, paragraph_index)
+            self._apply_format_to_single_text(text, bold, italic, underline, strikethrough, color, highlight, font_name, font_size, paragraph_index)
 
     def _apply_format_to_single_text(
         self,
@@ -847,6 +884,7 @@ class DocxFullEditor:
         bold: bool = None,
         italic: bool = None,
         underline: bool = None,
+        strikethrough: bool = None,
         color: str = None,
         highlight: str = None,
         font_name: str = None,
@@ -857,7 +895,7 @@ class DocxFullEditor:
 
         Args:
             text: Text cần format
-            bold, italic, underline, color, highlight, font_name, font_size: Format options
+            bold, italic, underline, strikethrough, color, highlight, font_name, font_size: Format options
             paragraph_index: Chỉ format text tại paragraph này (None = format tất cả)
         """
         search_text_normalized = re.sub(r'\s+', ' ', text.strip())
@@ -880,20 +918,8 @@ class DocxFullEditor:
                     search_text_normalized[0:30] not in run_normalized):
                     continue
 
-                if bold is not None:
-                    run.font.bold = bold
-                if italic is not None:
-                    run.font.italic = italic
-                if underline is not None:
-                    run.font.underline = underline
-                if color:
-                    run.font.color.rgb = self._parse_color(color)
-                if highlight:
-                    run.font.highlight_color = self._parse_highlight_color(highlight)
-                if font_name:
-                    run.font.name = font_name
-                if font_size:
-                    run.font.size = Pt(font_size)
+                # Use _apply_format_to_run for consistent formatting (supports hex highlight colors)
+                self._apply_format_to_run(run, bold, italic, underline, strikethrough, color, highlight, font_name, font_size)
 
     def apply_paragraph_format(
         self,
@@ -1151,7 +1177,15 @@ class DocxFullEditor:
             return color_map.get(color.lower(), RGBColor(0, 0, 0))
 
     def _parse_highlight_color(self, color: str) -> str:
-        """Parse highlight color to WD_COLOR"""
+        """Parse highlight color to WD_COLOR or hex value
+
+        Args:
+            color: Color as hex (e.g., "#ffffff", "#FFFF00") or name (e.g., "yellow")
+
+        Returns:
+            WD_COLOR constant or hex color string
+        """
+        # Handle named colors
         color_map = {
             "yellow": "YELLOW",
             "red": "RED",
@@ -1159,8 +1193,32 @@ class DocxFullEditor:
             "green": "GREEN",
             "orange": "ORANGE",
             "gray": "GRAY",
+            "#ffff00": "YELLOW",
+            "#ff0000": "RED",
+            "#0000ff": "BLUE",
+            "#00ff00": "GREEN",
+            "#ffa500": "ORANGE",
+            "#808080": "GRAY",
         }
-        return color_map.get(color.lower(), "YELLOW")
+
+        # Normalize input
+        color_lower = color.lower().strip()
+
+        # Check if it's a named color or known hex
+        if color_lower in color_map:
+            return color_map[color_lower]
+
+        # Handle hex colors - convert to uppercase and remove #
+        if color_lower.startswith("#"):
+            hex_color = color_lower[1:].upper()
+
+            # Word supports limited highlight colors, but we can try to use shd fill instead
+            # For custom colors, we should use shd element with fill attribute
+            # Return the hex color for use with shd element
+            return hex_color
+
+        # Fallback for unknown colors
+        return color_map.get(color_lower, "YELLOW")
 
     def find_text_occurrences(self, text: str) -> List[Dict]:
         """
@@ -1346,6 +1404,7 @@ class DocxFullEditor:
             'bold': False,
             'italic': False,
             'underline': 'none',
+            'strikethrough': False,
             'color': '000000',  # Default black
             'highlight': None,
             'font_size': 12,  # Default 12pt
@@ -1374,6 +1433,12 @@ class DocxFullEditor:
             underline_elem = rpr.find(f'{self.w_ns}u')
             if underline_elem is not None:
                 format_info['underline'] = underline_elem.get(f'{self.w_ns}val', 'single')
+
+            # Strikethrough
+            strike_elem = rpr.find(f'{self.w_ns}strike')
+            if strike_elem is not None:
+                val = strike_elem.get(f'{self.w_ns}val', '1')
+                format_info['strikethrough'] = val != '0'
 
             # Color
             color_elem = rpr.find(f'{self.w_ns}color')

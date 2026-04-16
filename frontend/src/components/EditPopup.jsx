@@ -6,11 +6,13 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
     bold: false,
     italic: false,
     underline: false,
+    strikethrough: false,
     color: '#000000',
+    highlight: null,
     fontSize: 12,
     fontName: 'Times New Roman',
-    allCaps: false
-    // Note: alignment is not currently supported for text-level formatting
+    allCaps: false,
+    alignment: 'left'
   })
   const [paragraphFormat, setParagraphFormat] = useState({
     lineSpacing: 1.0,
@@ -35,10 +37,13 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
       format.bold !== originalFormat.bold ||
       format.italic !== originalFormat.italic ||
       format.underline !== originalFormat.underline ||
+      format.strikethrough !== (originalFormat.strikethrough || false) ||
       format.color !== originalFormat.color ||
+      format.highlight !== (originalFormat.highlight || '#ffffff') ||
       format.fontSize !== originalFormat.fontSize ||
       format.fontName !== originalFormat.fontName ||
-      format.allCaps !== (originalFormat.allCaps || false)
+      format.allCaps !== (originalFormat.allCaps || false) ||
+      format.alignment !== (originalFormat.alignment || 'left')
     )
   }
 
@@ -137,6 +142,16 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
+              checked={format.strikethrough}
+              onChange={(e) => setFormat({ ...format, strikethrough: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span className="text-sm">Gạch ngang</span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
               checked={format.allCaps}
               onChange={(e) => setFormat({ ...format, allCaps: e.target.checked })}
               className="w-4 h-4"
@@ -148,7 +163,7 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
         {/* Color and font size */}
         <div className="grid grid-cols-2 gap-2 mb-2">
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-600">Màu sắc:</span>
+            <span className="text-xs text-gray-600">Màu chữ:</span>
             <input
               type="color"
               value={format.color}
@@ -156,6 +171,27 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
               className="w-10 h-8 rounded cursor-pointer border"
             />
             <span className="text-xs text-gray-500">{format.color}</span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-600">Tô nền:</span>
+            <input
+              type="color"
+              value={format.highlight || '#ffffff'}
+              onChange={(e) => setFormat({ ...format, highlight: e.target.value })}
+              className="w-10 h-8 rounded cursor-pointer border"
+            />
+            <span className="text-xs text-gray-500">{format.highlight || 'Không'}</span>
+            {format.highlight && (
+              <button
+                type="button"
+                onClick={() => setFormat({ ...format, highlight: null })}
+                className="text-xs text-red-500 hover:text-red-700"
+                title="Xóa tô nền"
+              >
+                ✕
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -186,6 +222,45 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
             <option value="Verdana">Verdana</option>
             <option value="Georgia">Georgia</option>
           </select>
+        </div>
+
+        {/* Text alignment */}
+        <div className="mb-2">
+          <span className="text-xs text-gray-600">Căn lề:</span>
+          <div className="ml-2 inline-flex gap-1">
+            <button
+              type="button"
+              onClick={() => setFormat({ ...format, alignment: 'left' })}
+              className={`px-2 py-1 border rounded text-xs ${format.alignment === 'left' ? 'bg-blue-100 border-blue-500' : 'hover:bg-gray-100'}`}
+              title="Trái"
+            >
+              ⬅️
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormat({ ...format, alignment: 'center' })}
+              className={`px-2 py-1 border rounded text-xs ${format.alignment === 'center' ? 'bg-blue-100 border-blue-500' : 'hover:bg-gray-100'}`}
+              title="Giữa"
+            >
+              ⬌
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormat({ ...format, alignment: 'right' })}
+              className={`px-2 py-1 border rounded text-xs ${format.alignment === 'right' ? 'bg-blue-100 border-blue-500' : 'hover:bg-gray-100'}`}
+              title="Phải"
+            >
+              ➡️
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormat({ ...format, alignment: 'justify' })}
+              className={`px-2 py-1 border rounded text-xs ${format.alignment === 'justify' ? 'bg-blue-100 border-blue-500' : 'hover:bg-gray-100'}`}
+              title="Đều"
+            >
+              ≡
+            </button>
+          </div>
         </div>
       </div>
 

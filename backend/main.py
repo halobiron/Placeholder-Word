@@ -834,7 +834,8 @@ def map_camel_to_snake(format_data: dict) -> dict:
         'lineSpacing': 'line_spacing',
         'spaceBefore': 'space_before',
         'spaceAfter': 'space_after',
-        'firstLineIndent': 'first_line_indent'
+        'firstLineIndent': 'first_line_indent',
+        'alignment': 'alignment'
     }
     return {format_mapping.get(k, k): v for k, v in format_data.items()}
 
@@ -1269,6 +1270,7 @@ async def get_selection_format(
             'bold': bool,
             'italic': bool,
             'underline': str (none/single/double),
+            'strikethrough': bool,
             'color': str (hex, e.g., 'FF0000'),
             'highlight': str (hex or null),
             'fontSize': int (points),
@@ -1301,6 +1303,7 @@ async def get_selection_format(
                 'bold': False,
                 'italic': False,
                 'underline': 'none',
+                'strikethrough': False,
                 'color': '000000',
                 'highlight': None,
                 'fontSize': 12,
@@ -1312,6 +1315,7 @@ async def get_selection_format(
             'bold': format_info.get('bold', False),
             'italic': format_info.get('italic', False),
             'underline': format_info.get('underline', 'none') != 'none',
+            'strikethrough': format_info.get('strikethrough', False),
             'color': '#' + format_info.get('color', '000000'),
             'fontSize': format_info.get('font_size', 12),
             'fontName': format_info.get('font_name', 'Times New Roman')

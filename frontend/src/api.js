@@ -147,14 +147,21 @@ export const editSelection = async (templateId, editData) => {
   if (editData.type === 'text' && editData.newText) {
     formData.append('new_text', editData.newText)
   } else if (editData.type === 'format' && editData.format) {
-    // Filter out unsupported fields (alignment is paragraph-level, not text-level)
-    const { alignment, ...supportedFormat } = editData.format
-    console.log('format_config (filtered):', supportedFormat)
-    formData.append('format_config', JSON.stringify(supportedFormat))
+    // Separate text-level and paragraph-level formatting
+    const { alignment, ...textFormat } = editData.format
+
+    // If alignment is set, include it in paragraph_format
+    let paragraphFormat = editData.paragraphFormat || {}
+    if (alignment !== undefined && alignment !== 'left') {
+      paragraphFormat.alignment = alignment
+    }
+
+    console.log('format_config (text-level):', textFormat)
+    formData.append('format_config', JSON.stringify(textFormat))
 
     // Include paragraph formatting if provided
-    if (editData.paragraphFormat) {
-      formData.append('paragraph_format', JSON.stringify(editData.paragraphFormat))
+    if (Object.keys(paragraphFormat).length > 0) {
+      formData.append('paragraph_format', JSON.stringify(paragraphFormat))
     }
   } else if (editData.type === 'both') {
     // Send both new_text and format_config
@@ -162,13 +169,20 @@ export const editSelection = async (templateId, editData) => {
       formData.append('new_text', editData.newText)
     }
     if (editData.format) {
-      // Filter out unsupported fields
-      const { alignment, ...supportedFormat } = editData.format
-      formData.append('format_config', JSON.stringify(supportedFormat))
+      // Separate text-level and paragraph-level formatting
+      const { alignment, ...textFormat } = editData.format
+
+      // If alignment is set, include it in paragraph_format
+      let paragraphFormat = editData.paragraphFormat || {}
+      if (alignment !== undefined && alignment !== 'left') {
+        paragraphFormat.alignment = alignment
+      }
+
+      formData.append('format_config', JSON.stringify(textFormat))
     }
 
     // Include paragraph formatting if provided
-    if (editData.paragraphFormat) {
+    if (editData.paragraphFormat && Object.keys(editData.paragraphFormat).length > 0) {
       formData.append('paragraph_format', JSON.stringify(editData.paragraphFormat))
     }
   }
