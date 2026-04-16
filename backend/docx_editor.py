@@ -22,6 +22,37 @@ class DocxFullEditor:
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         self._block_to_para_index_map = None
 
+    def _normalize_text(self, text: str) -> str:
+        """
+        Normalize text for comparison by handling special whitespace and punctuation characters.
+
+        This method ensures that text comparison works correctly even when the text contains:
+        - Non-breaking spaces (\u00a0)
+        - Various space characters (em-space, en-space, thin-space, etc.)
+        - Unicode ellipsis and other special punctuation
+        - Manual line breaks and paragraph breaks
+
+        Args:
+            text: Text to normalize
+
+        Returns:
+            Normalized text with special whitespace converted to regular spaces
+            and special punctuation converted to ASCII equivalents
+        """
+        # Replace various whitespace characters with regular space
+        # \u00a0 = non-breaking space, \u2002 = en-space, \u2003 = em-space
+        # \u2009 = thin-space, \u200a = hair-space, \u200b = zero-width space
+        # \u202f = narrow no-break space, \u205f = medium mathematical space
+        # \u2028 = line separator, \u2029 = paragraph separator
+        normalized = re.sub(r'[\s\u00a0\u2002\u2003\u2009\u200a\u200b\u202f\u205f\u2028\u2029]+', ' ', text)
+
+        # Normalize ellipsis and other special punctuation
+        # \u2026 = ellipsis (…), \u2025 = two dot leader (‥)
+        normalized = normalized.replace('\u2026', '...')  # Replace … with ...
+        normalized = normalized.replace('\u2025', '..')   # Replace ‥ with ..
+
+        return normalized.strip()
+
     def _build_block_index_map(self):
         """
         Build mapping from block_index (HTML preview) to paragraph_index (DOCX)
@@ -194,16 +225,47 @@ class DocxFullEditor:
         Returns:
             True if found and replaced, False otherwise
         """
-        # Helper function to normalize text for comparison (handles special whitespace)
-        def normalize_text(text: str) -> str:
-            """Normalize text by replacing all whitespace (including special chars) with regular spaces"""
-            # Replace various whitespace characters with regular space
-            # \u00a0 = non-breaking space, \u2003 = em-space, \u2009 = thin-space, etc.
-            normalized = re.sub(r'[\s\u00a0\u2002\u2003\u2009\u200a\u200b]+', ' ', text)
-            return normalized.strip()
+        search_text_normalized = self._normalize_text(old_text)
 
-        search_text_normalized = normalize_text(old_text)
+        # Debug: Show what we're looking for
+        print(f"[DEBUG] Looking for: '{old_text}'")
+        print(f"[DEBUG] Normalized to: '{search_text_normalized}'")
+        print(f"[DEBUG] Paragraph index: {paragraph_index}")
 
+        # When paragraph_index is specified, concatenate adjacent paragraphs
+        # to handle text that spans multiple paragraphs
+        if paragraph_index is not None:
+            # Collect paragraphs in range [paragraph_index, paragraph_index + 3]
+            paragraphs_to_search = []
+            for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+                if paragraph_index <= p_idx <= paragraph_index + 3:
+                    paragraphs_to_search.append((p_idx, paragraph))
+
+            # Concatenate all paragraphs in range
+            combined_text = ""
+            combined_paragraphs = []
+            for p_idx, paragraph in paragraphs_to_search:
+                para_text = "".join(run.text for run in paragraph.runs)
+                combined_text += para_text
+                combined_paragraphs.append((p_idx, paragraph, para_text))
+                print(f"[DEBUG] Paragraph {p_idx} content: '{para_text}'")
+
+            combined_text_normalized = self._normalize_text(combined_text)
+            print(f"[DEBUG] Combined text: '{combined_text}'")
+            print(f"[DEBUG] Combined normalized: '{combined_text_normalized}'")
+            print(f"[DEBUG] Search text in combined: {search_text_normalized in combined_text_normalized}")
+
+            if search_text_normalized in combined_text_normalized:
+                print(f"[DEBUG] Found in combined paragraphs!")
+                # Find which paragraph contains the start of the text
+                for p_idx, paragraph, para_text in combined_paragraphs:
+                    para_text_normalized = self._normalize_text(para_text)
+                    if search_text_normalized[:50] in para_text_normalized:  # First 50 chars
+                        print(f"[DEBUG] Starting from paragraph {p_idx}")
+                        paragraph_index = p_idx
+                        break
+
+        # Continue with normal search using updated paragraph_index
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             # If paragraph_index is specified, only process that paragraph
             if paragraph_index is not None and p_idx != paragraph_index:
@@ -211,10 +273,22 @@ class DocxFullEditor:
 
             # Build normalized full text for search
             full_text = "".join(run.text for run in paragraph.runs)
-            full_text_normalized = normalize_text(full_text)
+            full_text_normalized = self._normalize_text(full_text)
+
+            print(f"[DEBUG] Checking paragraph {p_idx}: '{full_text_normalized}'")
 
             if search_text_normalized not in full_text_normalized:
-                continue
+                # Try partial match - use first significant words
+                search_words = search_text_normalized.split()
+                if len(search_words) >= 3:
+                    first_part = ' '.join(search_words[:3])  # First 3 words
+                    if first_part in full_text_normalized:
+                        print(f"[DEBUG] Using partial match: '{first_part}'")
+                        search_text_normalized = first_part
+                    else:
+                        continue
+                else:
+                    continue
 
             # Find which runs contain the text
             # Use character-by-character comparison for accuracy
@@ -321,7 +395,7 @@ class DocxFullEditor:
                     original_segment = first_run.text[pos_in_run:orig_end_idx - run_start]
 
                     # Verify with normalized comparison
-                    if normalize_text(original_segment) == search_text_normalized:
+                    if self._normalize_text(original_segment) == search_text_normalized:
                         # Exact match - replace
                         first_run.text = first_run.text[:pos_in_run] + new_text + first_run.text[orig_end_idx - run_start:]
                         return True
@@ -330,7 +404,7 @@ class DocxFullEditor:
             full_run_text = "".join(r.text for r, _, _, _ in target_runs)
 
             # Find the segment in the concatenated text
-            if search_text_normalized in normalize_text(full_run_text):
+            if search_text_normalized in self._normalize_text(full_run_text):
                 # Replace by clearing all target runs and putting new text in first run
                 target_runs[0][0].text = new_text
                 for run, _, _, _ in target_runs[1:]:
@@ -881,11 +955,11 @@ class DocxFullEditor:
             old_text: Text cần tìm (có thể khác biệt nhỏ với DOCX)
             new_text: Text thay thế
         """
-        search_text_normalized = re.sub(r'\s+', ' ', old_text.strip())
+        search_text_normalized = self._normalize_text(old_text)
 
         for paragraph in self._iterate_paragraphs_in_doc_order():
             full_text = "".join(run.text for run in paragraph.runs)
-            full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
+            full_text_normalized = self._normalize_text(full_text)
 
             if search_text_normalized in full_text_normalized:
                 start_idx = full_text_normalized.find(search_text_normalized)
@@ -911,7 +985,8 @@ class DocxFullEditor:
                     continue
 
                 first_run = target_runs[0]
-                run_text_normalized = re.sub(r'\s+', ' ', first_run.text.strip())
+
+                run_text_normalized = self._normalize_text(first_run.text)
 
                 if search_text_normalized in run_text_normalized:
                     first_run.text = first_run.text.replace(search_text_normalized, new_text, 1)
@@ -919,9 +994,9 @@ class DocxFullEditor:
                     # Partial match - find and replace
                     for i in range(len(first_run.text)):
                         segment = first_run.text[i:i+len(search_text_normalized)]
-                        segment_normalized = re.sub(r'\s+', ' ', segment.strip())
+                        segment_normalized = self._normalize_text(segment)
                         if (segment_normalized == search_text_normalized or
-                            re.sub(r'\s+', ' ', search_text_normalized[0:len(segment_normalized)]) in segment_normalized):
+                            self._normalize_text(search_text_normalized[0:len(segment_normalized)]) in segment_normalized):
                             first_run.text = first_run.text[:i] + new_text + first_run.text[i+len(segment):]
                             for run in target_runs[1:]:
                                 run.text = ""
@@ -1039,7 +1114,7 @@ class DocxFullEditor:
             bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
             paragraph_index: Chỉ format text tại paragraph này (None = format tất cả)
         """
-        search_text_normalized = re.sub(r'\s+', ' ', text.strip())
+        search_text_normalized = self._normalize_text(text)
 
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             # Skip if paragraph_index is specified and doesn't match
@@ -1047,14 +1122,14 @@ class DocxFullEditor:
                 continue
 
             para_text = "".join(run.text for run in paragraph.runs)
-            para_text_normalized = re.sub(r'\s+', ' ', para_text.strip())
+            para_text_normalized = self._normalize_text(para_text)
 
             if (search_text_normalized not in para_text_normalized and
                 search_text_normalized[0:50] not in para_text_normalized):
                 continue
 
             for run in paragraph.runs:
-                run_normalized = re.sub(r'\s+', ' ', run.text.strip())
+                run_normalized = self._normalize_text(run.text)
                 if (search_text_normalized not in run_normalized and
                     search_text_normalized[0:30] not in run_normalized):
                     continue
@@ -1733,10 +1808,8 @@ class DocxFullEditor:
                 'subscript': bool
             }
         """
-        import re
-
         # Normalize search text for matching
-        search_text_normalized = re.sub(r'\s+', ' ', text.strip())
+        search_text_normalized = self._normalize_text(text)
 
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if paragraph_index is not None and p_idx != paragraph_index:
@@ -1744,7 +1817,7 @@ class DocxFullEditor:
 
             # Build the full text from runs
             full_text = "".join(run.text for run in paragraph.runs)
-            full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
+            full_text_normalized = self._normalize_text(full_text)
 
             if search_text_normalized not in full_text_normalized:
                 continue
@@ -1789,7 +1862,7 @@ class DocxFullEditor:
                 else:
                     # Try finding the search text in the runs directly
                     for run in paragraph.runs:
-                        if search_text_normalized in re.sub(r'\s+', ' ', run.text.strip()):
+                        if search_text_normalized in self._normalize_text(run.text):
                             return self._extract_run_format(run)
                     continue
 
