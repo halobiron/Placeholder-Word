@@ -8,9 +8,17 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
     underline: false,
     color: '#000000',
     fontSize: 12,
-    fontName: 'Times New Roman'
+    fontName: 'Times New Roman',
+    allCaps: false
     // Note: alignment is not currently supported for text-level formatting
   })
+  const [paragraphFormat, setParagraphFormat] = useState({
+    lineSpacing: 1.0,
+    spaceBefore: 0,
+    spaceAfter: 0,
+    firstLineIndent: 0
+  })
+  const [showParagraphOptions, setShowParagraphOptions] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   // Initialize format from selectedText when component mounts or selectedText changes
@@ -29,12 +37,13 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
       format.underline !== originalFormat.underline ||
       format.color !== originalFormat.color ||
       format.fontSize !== originalFormat.fontSize ||
-      format.fontName !== originalFormat.fontName
+      format.fontName !== originalFormat.fontName ||
+      format.allCaps !== (originalFormat.allCaps || false)
     )
   }
 
   const handleApplyFormat = async () => {
-    if (!hasFormatChanged()) {
+    if (!hasFormatChanged() && !showParagraphOptions) {
       // No format changes, just close
       onClose()
       return
@@ -43,12 +52,19 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
     setSubmitting(true)
 
     try {
-      await onFormatApplied({
+      const formatData = {
         selectedText: selectedText?.text,
         format: format,
         type: 'format',
         blockIndex: selectedText?.blockIndex
-      })
+      }
+
+      // Include paragraph format if options are shown
+      if (showParagraphOptions) {
+        formatData.paragraphFormat = paragraphFormat
+      }
+
+      await onFormatApplied(formatData)
       onClose()
     } catch (error) {
       console.error('Format application failed:', error)
@@ -87,7 +103,7 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
         </label>
 
         {/* Text style toggles */}
-        <div className="grid grid-cols-3 gap-2 mb-2">
+        <div className="grid grid-cols-2 gap-2 mb-2">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
@@ -116,6 +132,16 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
               className="w-4 h-4"
             />
             <span className="text-sm">Gạch chân (U)</span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={format.allCaps}
+              onChange={(e) => setFormat({ ...format, allCaps: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span className="text-sm">HOA</span>
           </label>
         </div>
 
@@ -161,6 +187,73 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
             <option value="Georgia">Georgia</option>
           </select>
         </div>
+      </div>
+
+      {/* Paragraph Formatting - Collapsible */}
+      <div className="mb-3">
+        <button
+          onClick={() => setShowParagraphOptions(!showParagraphOptions)}
+          className="w-full flex items-center justify-between text-sm font-medium text-gray-700 hover:text-gray-900 transition-colors"
+        >
+          <span>📐 Định dạng đoạn văn</span>
+          <span className="text-gray-500">{showParagraphOptions ? '▼' : '▶'}</span>
+        </button>
+
+        {showParagraphOptions && (
+          <div className="mt-2 p-2 bg-gray-50 rounded border">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-600">Giãn dòng:</span>
+                <select
+                  value={paragraphFormat.lineSpacing}
+                  onChange={(e) => setParagraphFormat({ ...paragraphFormat, lineSpacing: parseFloat(e.target.value) })}
+                  className="flex-1 border rounded px-2 py-1 text-sm"
+                >
+                  <option value={1.0}>1.0 (Simple)</option>
+                  <option value={1.15}>1.15</option>
+                  <option value={1.5}>1.5</option>
+                  <option value={2.0}>2.0 (Double)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-600">Trước (pt):</span>
+                <input
+                  type="number"
+                  value={paragraphFormat.spaceBefore}
+                  onChange={(e) => setParagraphFormat({ ...paragraphFormat, spaceBefore: parseInt(e.target.value) || 0 })}
+                  className="flex-1 border rounded px-2 py-1 text-sm"
+                  min={0}
+                  max={72}
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-600">Sau (pt):</span>
+                <input
+                  type="number"
+                  value={paragraphFormat.spaceAfter}
+                  onChange={(e) => setParagraphFormat({ ...paragraphFormat, spaceAfter: parseInt(e.target.value) || 0 })}
+                  className="flex-1 border rounded px-2 py-1 text-sm"
+                  min={0}
+                  max={72}
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-600">Indent đầu (pt):</span>
+                <input
+                  type="number"
+                  value={paragraphFormat.firstLineIndent}
+                  onChange={(e) => setParagraphFormat({ ...paragraphFormat, firstLineIndent: parseInt(e.target.value) || 0 })}
+                  className="flex-1 border rounded px-2 py-1 text-sm"
+                  min={0}
+                  max={144}
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Actions */}

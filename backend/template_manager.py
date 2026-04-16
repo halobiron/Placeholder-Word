@@ -1201,7 +1201,7 @@ JSON:"""
         """Map Word XML styles to CSS properties"""
         if rPr is None:
             return ""
-            
+
         styles = []
         style_map = {
             f"{self.w_ns}b": "font-weight: bold",
@@ -1209,33 +1209,38 @@ JSON:"""
             f"{self.w_ns}u": "text-decoration: underline",
             f"{self.w_ns}strike": "text-decoration: line-through"
         }
-        
+
         for root_tag, css in style_map.items():
             if rPr.find(root_tag) is not None:
                 styles.append(css)
-                
+
         sz = rPr.find(f"{self.w_ns}sz")
         if sz is not None and sz.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val"):
             styles.append(f"font-size: {int(sz.get(f'{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val')) / 2}pt")
-            
+
         color = rPr.find(f"{self.w_ns}color")
         if color is not None:
             val = color.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
             if val and val != "auto" and len(val) == 6:
                 styles.append(f"color: #{val}")
-                
+
         shd = rPr.find(f"{self.w_ns}shd")
         if shd is not None:
             fill = shd.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}fill")
             if fill and fill != "auto":
                 styles.append(f"background-color: #{fill}")
-                
+
         rFonts = rPr.find(f"{self.w_ns}rFonts")
         if rFonts is not None:
             ascii_font = rFonts.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}ascii")
             if ascii_font:
                 styles.append(f"font-family: '{ascii_font}', Calibri, Arial, sans-serif")
-                
+
+        # Handle all caps (w:caps) -> text-transform: uppercase
+        caps = rPr.find(f"{self.w_ns}caps")
+        if caps is not None:
+            styles.append("text-transform: uppercase")
+
         return "; ".join(styles)
 
     def rename_placeholders_in_docx(
@@ -1428,6 +1433,51 @@ JSON:"""
         style_name = para.style.name if para.style else "Normal"
         tag = "h1" if "Heading 1" in style_name else "h2" if "Heading 2" in style_name else "h3" if "Heading 3" in style_name else "p"
 
+        # Extract paragraph formatting
+        pPr = para._p.find(f"{self.w_ns}pPr")
+        para_styles = []
+
+        if pPr is not None:
+            # Line spacing (w:spacing)
+            spacing = pPr.find(f"{self.w_ns}spacing")
+            if spacing is not None:
+                line_rule = spacing.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}lineRule")
+                line_val = spacing.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}line")
+
+                if line_val:
+                    if line_rule == "auto":
+                        # Line spacing in twips (1/20 pt)
+                        line_spacing_pt = int(line_val) / 240  # Convert to line value (1.0 = single, 2.0 = double)
+                        para_styles.append(f"line-height: {line_spacing_pt}")
+                    elif line_rule == "atLeast":
+                        # Minimum line spacing in twips
+                        min_spacing_pt = int(line_val) / 20
+                        para_styles.append(f"min-height: {min_spacing_pt}pt")
+                    else:
+                        # Exact line spacing in twips
+                        exact_spacing_pt = int(line_val) / 20
+                        para_styles.append(f"line-height: {exact_spacing_pt}pt")
+
+                # Space before (in twips)
+                before = spacing.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}before")
+                if before:
+                    space_before_pt = int(before) / 20
+                    para_styles.append(f"margin-top: {space_before_pt}pt")
+
+                # Space after (in twips)
+                after = spacing.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}after")
+                if after:
+                    space_after_pt = int(after) / 20
+                    para_styles.append(f"margin-bottom: {space_after_pt}pt")
+
+            # First line indent (w:ind)
+            ind = pPr.find(f"{self.w_ns}ind")
+            if ind is not None:
+                first_line = ind.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}firstLine")
+                if first_line:
+                    first_line_pt = int(first_line) / 20
+                    para_styles.append(f"text-indent: {first_line_pt}pt")
+
         content = "".join(self._process_xml_element_to_html(child) for child in para._p)
         if is_empty or not content.strip():
             # Empty paragraph - preserve for visual layout, selectable for adding placeholders
@@ -1438,6 +1488,11 @@ JSON:"""
 
         align_style = f"text-align: {alignment};" if alignment != "left" else ""
         align_style += margin_right  # Add margin-right if calculated
+
+        # Add paragraph formatting styles
+        if para_styles:
+            align_style += "; ".join(para_styles) + ";"
+
         # Preserve leading/trailing whitespace by adding white-space: pre-wrap when needed
         # This fixes issue where leading spaces used for right-alignment are collapsed in HTML
         # Check the actual text content (stripping HTML tags) to detect leading/trailing spaces

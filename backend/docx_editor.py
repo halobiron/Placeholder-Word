@@ -244,7 +244,8 @@ class DocxFullEditor:
         color: str = None,
         highlight: str = None,
         font_name: str = None,
-        font_size: int = None
+        font_size: int = None,
+        all_caps: bool = None
     ):
         """
         Apply formatting to text at a specific paragraph position
@@ -254,6 +255,7 @@ class DocxFullEditor:
             text: Text to format
             paragraph_index: Index of paragraph containing the text
             bold, italic, underline, color, highlight, font_name, font_size: Format options
+            all_caps: All caps formatting
 
         Returns:
             True if found and formatted, False otherwise
@@ -338,7 +340,8 @@ class DocxFullEditor:
             self._format_text_in_runs(
                 paragraph,
                 runs_to_format,
-                bold, italic, underline, color, highlight, font_name, font_size
+                bold, italic, underline, color, highlight, font_name, font_size,
+                all_caps
             )
             return True
 
@@ -354,7 +357,8 @@ class DocxFullEditor:
         color: str = None,
         highlight: str = None,
         font_name: str = None,
-        font_size: int = None
+        font_size: int = None,
+        all_caps: bool = None
     ):
         """
         Split runs và apply formatting chỉ cho text cần format
@@ -364,6 +368,7 @@ class DocxFullEditor:
             paragraph: Paragraph object
             runs_to_format: List of run info dicts from apply_format_at_position
             bold, italic, underline, color, highlight, font_name, font_size: Format options
+            all_caps: All caps formatting
         """
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
@@ -419,7 +424,7 @@ class DocxFullEditor:
             # Chèn text_to_format với format mới - skip properties that will be set
             if text_to_format:
                 formatted_run = self._create_run_with_format(paragraph, original_rpr, text_to_format, skip_props=skip_props)
-                self._apply_format_to_run(formatted_run, bold, italic, underline, color, highlight, font_name, font_size)
+                self._apply_format_to_run(formatted_run, bold, italic, underline, color, highlight, font_name, font_size, all_caps)
                 paragraph._element.insert(insert_index, formatted_run._element)
                 insert_index += 1
 
@@ -481,7 +486,8 @@ class DocxFullEditor:
         color: str = None,
         highlight: str = None,
         font_name: str = None,
-        font_size: int = None
+        font_size: int = None,
+        all_caps: bool = None
     ):
         """Apply formatting to a run - handles removing format when set to False"""
         rpr = run._r.get_or_add_rPr()
@@ -578,6 +584,19 @@ class DocxFullEditor:
                 rpr.append(sz_elem)
             sz_elem.set(f'{self.w_ns}val', str(font_size * 2))  # Stored in half-points
 
+        # Handle all caps - remove element when False, set when True
+        if all_caps is not None:
+            caps_elem = rpr.find(f'{self.w_ns}caps')
+            if all_caps:
+                if caps_elem is None:
+                    caps_elem = rpr.makeelement(f'{self.w_ns}caps')
+                    rpr.append(caps_elem)
+                caps_elem.set(f'{self.w_ns}val', '1')
+            else:
+                # Remove caps element entirely when False
+                if caps_elem is not None:
+                    rpr.remove(caps_elem)
+
     def _restore_paragraph_formatting(self, paragraph, alignment, paragraph_format):
         """Restore paragraph-level formatting after splitting runs"""
         if alignment is not None:
@@ -633,6 +652,53 @@ class DocxFullEditor:
                 if current_right_indent is not None
                 else new_right_indent
             )
+
+    def apply_paragraph_formatting(
+        self,
+        paragraph_index: int,
+        line_spacing: float = None,
+        space_before: int = None,
+        space_after: int = None,
+        first_line_indent: int = None
+    ):
+        """
+        Apply paragraph-level formatting to a specific paragraph
+
+        Args:
+            paragraph_index: Index of paragraph to format
+            line_spacing: Line spacing (single=1.0, double=2.0, 1.5=1.5)
+            space_before: Space before paragraph in points
+            space_after: Space after paragraph in points
+            first_line_indent: First line indent in points
+
+        Returns:
+            True if found and formatted, False otherwise
+        """
+        from docx.shared import Pt
+
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if p_idx != paragraph_index:
+                continue
+
+            # Apply line spacing
+            if line_spacing is not None:
+                paragraph.paragraph_format.line_spacing = line_spacing
+
+            # Apply space before
+            if space_before is not None:
+                paragraph.paragraph_format.space_before = Pt(space_before)
+
+            # Apply space after
+            if space_after is not None:
+                paragraph.paragraph_format.space_after = Pt(space_after)
+
+            # Apply first line indent
+            if first_line_indent is not None:
+                paragraph.paragraph_format.first_line_indent = Pt(first_line_indent)
+
+            return True
+
+        return False
 
     # ===== TEXT EDITING (Giữ format) =====
 

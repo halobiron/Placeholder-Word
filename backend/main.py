@@ -829,7 +829,12 @@ def map_camel_to_snake(format_data: dict) -> dict:
     """Map camelCase keys to snake_case for Python functions"""
     format_mapping = {
         'fontSize': 'font_size',
-        'fontName': 'font_name'
+        'fontName': 'font_name',
+        'allCaps': 'all_caps',
+        'lineSpacing': 'line_spacing',
+        'spaceBefore': 'space_before',
+        'spaceAfter': 'space_after',
+        'firstLineIndent': 'first_line_indent'
     }
     return {format_mapping.get(k, k): v for k, v in format_data.items()}
 
@@ -842,7 +847,8 @@ async def edit_selection(
     new_text: str = Form(None),
     format_config: str = Form(None),
     paragraph_index: int = Form(None),
-    run_index: int = Form(None)
+    run_index: int = Form(None),
+    paragraph_format: str = Form(None)
 ):
     """Edit DOCX based on user selection from HTML preview"""
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
@@ -937,6 +943,28 @@ async def edit_selection(
 
         else:
             raise HTTPException(status_code=400, detail=f"Invalid edit_type: {edit_type}")
+
+        # Handle paragraph formatting if provided
+        if paragraph_format:
+            try:
+                paragraph_format_data = json.loads(paragraph_format)
+                paragraph_kwargs = map_camel_to_snake(paragraph_format_data)
+                print(f"paragraph_format kwargs: {paragraph_kwargs}")
+
+                if actual_para_index is not None:
+                    success = editor.apply_paragraph_formatting(
+                        paragraph_index=actual_para_index,
+                        **paragraph_kwargs
+                    )
+                    if not success:
+                        print(f"Warning: Could not apply paragraph formatting at index {actual_para_index}")
+                else:
+                    print(f"Warning: Paragraph formatting requested but no paragraph_index provided")
+            except Exception as e:
+                print(f"Error applying paragraph format: {e}")
+                # Don't fail the entire request if paragraph formatting fails
+                import traceback
+                print(f"Traceback: {traceback.format_exc()}")
 
         # Save and return updated preview
         editor.save(str(template_path))

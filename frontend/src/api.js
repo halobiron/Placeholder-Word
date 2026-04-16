@@ -151,6 +151,11 @@ export const editSelection = async (templateId, editData) => {
     const { alignment, ...supportedFormat } = editData.format
     console.log('format_config (filtered):', supportedFormat)
     formData.append('format_config', JSON.stringify(supportedFormat))
+
+    // Include paragraph formatting if provided
+    if (editData.paragraphFormat) {
+      formData.append('paragraph_format', JSON.stringify(editData.paragraphFormat))
+    }
   } else if (editData.type === 'both') {
     // Send both new_text and format_config
     if (editData.newText) {
@@ -160,6 +165,11 @@ export const editSelection = async (templateId, editData) => {
       // Filter out unsupported fields
       const { alignment, ...supportedFormat } = editData.format
       formData.append('format_config', JSON.stringify(supportedFormat))
+    }
+
+    // Include paragraph formatting if provided
+    if (editData.paragraphFormat) {
+      formData.append('paragraph_format', JSON.stringify(editData.paragraphFormat))
     }
   }
 
