@@ -399,8 +399,7 @@ class DocxFullEditor:
             # Xóa text gốc
             run.text = ""
 
-            # Tạo runs mới và chèn vào đúng vị trí
-            insert_index = r_idx
+            insert_index = list(paragraph._element).index(run._element)
 
             # Determine which properties will be explicitly set
             skip_props = []
@@ -435,8 +434,6 @@ class DocxFullEditor:
         # CRITICAL: Restore paragraph-level formatting after splitting runs
         self._restore_paragraph_formatting(paragraph, paragraph_alignment, paragraph_format)
 
-        # CRITICAL: Handle trailing spaces for right alignment (Word's special formatting)
-        self._handle_trailing_spaces_alignment(paragraph, paragraph_alignment)
 
     def _create_run_with_format(self, paragraph, rpr_element, text: str, skip_props: list = None):
         """
