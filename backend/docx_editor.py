@@ -139,6 +139,54 @@ class DocxFullEditor:
                             }
                             block_index += 1
 
+    def get_table_cell_paragraph_index(self, block_index: int, para_in_cell: int) -> int:
+        """
+        Get paragraph_index for a specific paragraph within a table cell
+
+        Args:
+            block_index: Block index of the table cell (from HTML preview)
+            para_in_cell: Paragraph index within the cell (0-based)
+
+        Returns:
+            Paragraph index in document order, or None if not found
+        """
+        self._build_block_index_map()
+
+        if block_index not in self._block_to_para_index_map:
+            return None
+
+        block_data = self._block_to_para_index_map[block_index]
+
+        if block_data['type'] != 'table_cell':
+            return None
+
+        # Get cell location from block data
+        row_idx = block_data['row']
+        col_idx = block_data['col']
+
+        # Find the specific table and cell
+        target_cell = None
+        for table in self.doc.tables:
+            if row_idx < len(table.rows) and col_idx < len(table.rows[row_idx].cells):
+                target_cell = table.rows[row_idx].cells[col_idx]
+                break
+
+        if not target_cell:
+            return None
+
+        # Check if para_in_cell is valid
+        if para_in_cell >= len(target_cell.paragraphs):
+            return None
+
+        # Find the specific paragraph in document order
+        target_paragraph = target_cell.paragraphs[para_in_cell]
+
+        for idx, para in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if para._element == target_paragraph._element:
+                return idx
+
+        return None
+
     def get_paragraph_index_from_block(self, block_index: int) -> int:
         """
         Get paragraph_index from block_index (HTML preview)
@@ -172,8 +220,8 @@ class DocxFullEditor:
         Yield paragraphs in document order (matching _generate_html_preview logic)
 
         Uses doc.element.body.iterchildren() to preserve exact document structure.
-        CRITICAL FIX: Yield ALL paragraphs including those in empty cells
-        to match _build_block_index_map behavior
+        CRITICAL FIX: Yield ALL paragraphs including those in table cells
+        to properly support text editing in any paragraph.
         """
         from docx.oxml.text.paragraph import CT_P
         from docx.oxml.table import CT_Tbl
@@ -186,16 +234,13 @@ class DocxFullEditor:
                 yield para
             elif isinstance(child, CT_Tbl):
                 table = Table(child, self.doc)
-                # Process each cell as a separate block
-                # CRITICAL FIX: Yield ALL cells (including empty ones) to match block map
+                # Process ALL paragraphs in ALL cells
                 for row_idx, row in enumerate(table.rows):
                     for cell_idx, cell in enumerate(row.cells):
-                        # Yield first paragraph from each cell (even if empty)
-                        # This matches the behavior in _build_block_index_map
+                        # Yield ALL paragraphs from each cell (not just the first one)
                         if cell.paragraphs:
                             for para in cell.paragraphs:
                                 yield para
-                                break  # Only yield first paragraph from each cell
                         # else: cell has no paragraphs (shouldn't happen with properly formatted cells)
 
     def _iterate_runs(self):

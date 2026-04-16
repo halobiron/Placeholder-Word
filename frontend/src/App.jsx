@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
 import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell } from './api'
@@ -86,6 +87,17 @@ function App() {
     return editedBlock ? parseInt(editedBlock.getAttribute('data-block-index')) : null
   }
 
+  // Helper: Get text from a specific paragraph within a table cell
+  const getTextFromCellParagraph = (html, cellBlockIndex, paraInCell) => {
+    if (!html) return ''
+    const temp = document.createElement('div')
+    temp.innerHTML = html
+
+    // Find the specific paragraph in the table cell
+    const paragraph = temp.querySelector(`[data-cell-block-index="${cellBlockIndex}"][data-para-in-cell="${paraInCell}"]`)
+    return paragraph ? paragraph.textContent : ''
+  }
+
   // Debounced text update function
   const debouncedUpdateText = useMemo(
     () => {
@@ -115,6 +127,56 @@ function App() {
             // Only refresh for placeholder operations (add/delete/rename/format)
           } catch (err) {
             console.error('Text update failed:', err)
+            setError('⚠️ Cập nhật thất bại: ' + (err.response?.data?.detail || err.message))
+            setTimeout(() => setError(null), 3000)
+          }
+        }, 1000) // 1 second debounce
+      }
+    },
+    [templateId]
+  )
+
+  // Debounced text update function for table cell paragraphs
+  const debouncedUpdateTextInCell = useMemo(
+    () => {
+      let timeoutId
+      return async (cellBlockIndex, paraInCell, oldText, newText) => {
+        // Clear previous timeout
+        if (timeoutId) clearTimeout(timeoutId)
+
+        // Set new timeout
+        timeoutId = setTimeout(async () => {
+          try {
+            // Validate parameters before making API call
+            if (isNaN(cellBlockIndex) || cellBlockIndex === null || cellBlockIndex === undefined) {
+              console.warn('Invalid cellBlockIndex in debouncedUpdateTextInCell, skipping API call:', cellBlockIndex)
+              return
+            }
+            if (isNaN(paraInCell) || paraInCell === null || paraInCell === undefined) {
+              console.warn('Invalid paraInCell in debouncedUpdateTextInCell, skipping API call:', paraInCell)
+              return
+            }
+
+            // Call the API with para_in_cell parameter
+            const formData = new FormData()
+            formData.append('template_id', templateId)
+            formData.append('block_index', cellBlockIndex)
+            formData.append('old_text', oldText)
+            formData.append('new_text', newText)
+            formData.append('edit_type', 'text')
+            formData.append('para_in_cell', paraInCell)
+
+            const response = await axios.post(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`, formData, {
+              headers: {
+                'Content-Type': 'multipart/form-data',
+              },
+            })
+
+            setError('✅ Đã cập nhật text trong ô bảng')
+            setTimeout(() => setError(null), 2000)
+            // DON'T refresh HTML after text-only edits - user sees changes in real-time
+          } catch (err) {
+            console.error('Table cell text update failed:', err)
             setError('⚠️ Cập nhật thất bại: ' + (err.response?.data?.detail || err.message))
             setTimeout(() => setError(null), 3000)
           }
@@ -1431,9 +1493,82 @@ function App() {
                         ? range.startContainer.parentElement
                         : range.startContainer
 
+                      // Check if editing within a table cell paragraph
+                      const cellParagraph = startElement?.closest('.cell-paragraph')
                       const editedBlock = startElement?.closest('[data-block-index]')
 
-                      if (editedBlock) {
+                      console.log('[DEBUG] ========== Text Edit Detection ==========')
+                      console.log('[DEBUG] startElement:', startElement)
+                      console.log('[DEBUG] cellParagraph:', cellParagraph)
+                      console.log('[DEBUG] editedBlock:', editedBlock)
+
+                      if (cellParagraph) {
+                        // Table cell paragraph editing - get block index from the containing cell
+                        const cellBlock = cellParagraph?.closest('[data-block-index]')
+                        console.log('[DEBUG] cellBlock:', cellBlock)
+
+                        if (cellBlock) {
+                          const cellBlockIndex = parseInt(cellBlock.getAttribute('data-block-index'))
+                          const paraInCell = parseInt(cellParagraph.getAttribute('data-para-in-cell'))
+                          const cellIndex = parseInt(cellParagraph.getAttribute('data-cell'))
+
+                          console.log('[DEBUG] cellBlock attributes:', {
+                            'data-block-index': cellBlock.getAttribute('data-block-index'),
+                            'data-cell-block-index': cellParagraph.getAttribute('data-cell-block-index'),
+                            'data-para-in-cell': cellParagraph.getAttribute('data-para-in-cell'),
+                            'data-cell': cellParagraph.getAttribute('data-cell')
+                          })
+                          console.log('[DEBUG] Parsed values:', {
+                            cellBlockIndex,
+                            paraInCell,
+                            cellIndex
+                          })
+
+                          // Log all paragraphs in this cell for debugging
+                          const tempDiv = document.createElement('div')
+                          tempDiv.innerHTML = editorHtml
+                          const allCellParas = tempDiv.querySelectorAll(`[data-block-index="${cellBlockIndex}"] .cell-paragraph`)
+                          console.log('[DEBUG] All paragraphs in cell', cellBlockIndex, ':')
+                          allCellParas.forEach((p, i) => {
+                            console.log('[DEBUG]   Para', i, ':', {
+                              'data-para-in-cell': p.getAttribute('data-para-in-cell'),
+                              'data-cell-block-index': p.getAttribute('data-cell-block-index'),
+                              'textContent': p.textContent
+                            })
+                          })
+
+                          // Validate indices before proceeding
+                          if (isNaN(cellBlockIndex) || isNaN(paraInCell)) {
+                            console.warn('Invalid table cell indices, skipping text update')
+                            return
+                          }
+
+                          // Get text from specific paragraph in cell
+                          const originalText = getTextFromCellParagraph(editorHtml, cellBlockIndex, paraInCell)
+                          const newText = getTextFromCellParagraph(newHtml, cellBlockIndex, paraInCell)
+
+                          console.log('[DEBUG] Text comparison:', {
+                            originalText,
+                            newText,
+                            changed: originalText !== newText
+                          })
+
+                          // Only trigger update if text actually changed
+                          if (originalText !== newText && deletedFields.length === 0) {
+                            console.log('[DEBUG] Calling debouncedUpdateTextInCell with:', {
+                              cellBlockIndex,
+                              paraInCell,
+                              originalText,
+                              newText
+                            })
+                            // For table cells, we need to use the cell's block index and para_in_cell
+                            debouncedUpdateTextInCell(cellBlockIndex, paraInCell, originalText, newText)
+                          } else {
+                            console.log('[DEBUG] Skipping update - no change or placeholders deleted')
+                          }
+                        }
+                      } else if (editedBlock) {
+                        // Regular block editing (original logic)
                         const blockIndex = parseInt(editedBlock.getAttribute('data-block-index'))
 
                         // Validate blockIndex before proceeding

@@ -1163,7 +1163,8 @@ async def update_text_in_template(
     block_index: int = Form(...),
     old_text: str = Form(""),  # Changed to allow empty string for new cells
     new_text: str = Form(""),
-    edit_type: str = Form("text")
+    edit_type: str = Form("text"),
+    para_in_cell: int = Form(None)  # NEW: Support table cell paragraph editing
 ):
     """Update text in template while preserving formatting
 
@@ -1175,6 +1176,7 @@ async def update_text_in_template(
         old_text: Original text (for fuzzy matching)
         new_text: New text to replace with (empty string for deletion)
         edit_type: Type of edit (text-only in this case)
+        para_in_cell: Optional paragraph index within table cell for precise targeting
 
     Returns:
         Updated template with new HTML preview
@@ -1187,16 +1189,57 @@ async def update_text_in_template(
     try:
         from docx_editor import DocxFullEditor
 
+        print(f"=== /update-text DEBUG ===")
+        print(f"block_index: {block_index}")
+        print(f"para_in_cell: {para_in_cell}")
+        print(f"old_text: '{old_text[:50]}...'")
+        print(f"new_text: '{new_text[:50]}...'")
+        print(f"=== END DEBUG ===")
+
         editor = DocxFullEditor(str(template_path))
 
         # Map block_index to paragraph_index
-        para_index = editor.get_paragraph_index_from_block(block_index)
+        # If para_in_cell is provided, we need to find the specific paragraph in table cell
+        if para_in_cell is not None:
+            print(f"[DEBUG] Finding paragraph in table cell: block_index={block_index}, para_in_cell={para_in_cell}")
 
-        if para_index is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid block_index: {block_index}"
-            )
+            # block_index refers to the table cell's block index
+            # Find the cell in the block index map
+            editor._build_block_index_map()
+
+            if block_index not in editor._block_to_para_index_map:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid block_index: {block_index}"
+                )
+
+            block_data = editor._block_to_para_index_map[block_index]
+
+            if block_data['type'] != 'table_cell':
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Block {block_index} is not a table cell, but para_in_cell was provided"
+                )
+
+            # Use the new method to find table cell paragraph
+            para_index = editor.get_table_cell_paragraph_index(block_index, para_in_cell)
+
+            if para_index is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not find paragraph {para_in_cell} in table cell at block_index {block_index}"
+                )
+
+            print(f"[DEBUG] Found paragraph at document index: {para_index}")
+        else:
+            # Original logic for non-table-cell paragraphs
+            para_index = editor.get_paragraph_index_from_block(block_index)
+
+            if para_index is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid block_index: {block_index}"
+                )
 
         # Handle deletion (empty new_text) or replacement
         if new_text == "":
@@ -1227,12 +1270,8 @@ async def update_text_in_template(
                         # Add to existing run
                         target_paragraph.runs[0].text = new_text
                     else:
-                        # Create new run with text
-                        r = target_paragraph._element.add(OxmlElement('w:r'))
-                        t = OxmlElement('w:t')
-                        t.set(qn('xml:space'), 'preserve')
-                        t.text = new_text
-                        r.append(t)
+                        # Create new run with text using docx API
+                        new_run = target_paragraph.add_run(new_text)
 
                     success = True
                     print(f"[DEBUG] Added text '{new_text}' to empty paragraph at index {para_index}")
@@ -1258,8 +1297,12 @@ async def update_text_in_template(
                 detail=f"Failed to replace text: '{old_text[:50]}...' not found at block {block_index}"
             )
 
+        print(f"[DEBUG] Text update successful, saving document...")
+
         # Save updated template
         editor.save(str(template_path))
+
+        print(f"[DEBUG] Document saved, regenerating HTML preview...")
 
         # Regenerate HTML preview
         executor = MergeExecutor()
@@ -1267,6 +1310,8 @@ async def update_text_in_template(
 
         processor = MailMergeProcessor()
         html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        print(f"[DEBUG] HTML preview regenerated, length: {len(html_preview)}")
 
         return {
             "template_id": template_id,
