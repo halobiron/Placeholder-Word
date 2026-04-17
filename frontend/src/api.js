@@ -112,6 +112,22 @@ export const addPlaceholder = async (templateId, blockIndex, fieldName, position
   return response.data
 }
 
+export const addPlaceholderAtOffset = async (templateId, blockIndex, offset, fieldName, inheritFormat = true) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('block_index', blockIndex)
+  formData.append('offset', offset)
+  formData.append('field_name', fieldName)
+  formData.append('inherit_format', inheritFormat)
+
+  const response = await axios.post(`${API_BASE}/add-placeholder-at-offset`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
 export const suggestFieldName = async (templateId, blockIndex, paraInCell = null) => {
   const formData = new FormData()
   formData.append('template_id', templateId)

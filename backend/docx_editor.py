@@ -1531,6 +1531,143 @@ class DocxFullEditor:
             target_text = position.split("before:")[1].strip()
             self.add_text_before(target_text, placeholder_text, inherit_format=True)
 
+    def insert_placeholder_at_offset(
+        self,
+        paragraph_index: int,
+        offset: int,
+        field_name: str,
+        inherit_format: bool = True
+    ):
+        """
+        Insert placeholder at specific character offset within paragraph
+        Splits runs at offset and inserts placeholder using MERGEFIELD structure
+
+        Args:
+            paragraph_index: Index of paragraph (from all paragraphs iterator)
+            offset: Character offset within paragraph text
+            field_name: Name for the merge field
+            inherit_format: Whether to inherit format from surrounding text
+
+        Returns:
+            True if successful, False otherwise
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        import copy
+
+        # Find target paragraph
+        target_para = None
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if p_idx == paragraph_index:
+                target_para = paragraph
+                break
+
+        if not target_para:
+            print(f"[ERROR] Paragraph {paragraph_index} not found")
+            return False
+
+        # Build text with run mapping
+        run_text_map = []  # [(run, start_offset, end_offset, text)]
+        current_offset = 0
+
+        for run in target_para.runs:
+            if run.text:
+                text_len = len(run.text)
+                run_text_map.append({
+                    'run': run,
+                    'start': current_offset,
+                    'end': current_offset + text_len,
+                    'text': run.text
+                })
+                current_offset += text_len
+
+        # Find which run contains the offset
+        target_run_info = None
+        for run_info in run_text_map:
+            if run_info['start'] <= offset <= run_info['end']:
+                target_run_info = run_info
+                break
+
+        if not target_run_info:
+            print(f"[ERROR] Offset {offset} not found in paragraph {paragraph_index}")
+            return False
+
+        # Get original format from target run
+        target_run = target_run_info['run']
+        original_rpr = target_run._r.get_or_add_rPr()
+
+        # Calculate split position within the run
+        split_pos = offset - target_run_info['start']
+        text_before = target_run.text[:split_pos]
+        text_after = target_run.text[split_pos:]
+
+        # Create placeholder text
+        placeholder_text = f"«{field_name}»"
+
+        # Get paragraph element
+        p_element = target_para._p
+        run_element = target_run._element
+        insert_index = list(p_element).index(run_element)
+
+        # Find nearest format source (prefer text_before, then look for previous non-placeholder run)
+        original_rpr = target_run._r.get_or_add_rPr()
+
+        # If text_before is empty or is just whitespace, try to find format from previous run
+        # Skip placeholder runs (runs with «...» format)
+        if (not text_before or not text_before.strip()) and inherit_format:
+            print(f"[DEBUG] text_before is empty/whitespace, looking for previous run format...")
+            for i in range(len(run_text_map) - 1, -1, -1):
+                prev_run_info = run_text_map[i]
+                if prev_run_info['run'] == target_run:
+                    continue
+
+                # Check if this run contains placeholder markers
+                run_text = prev_run_info['text'] or ''
+                is_placeholder = '«' in run_text and '»' in run_text
+
+                # Prefer non-placeholder runs with actual text content
+                if not is_placeholder and run_text.strip():
+                    prev_rpr = prev_run_info['run']._r.get_or_add_rPr()
+                    if prev_rpr is not None and len(list(prev_rpr)) > 0:
+                        original_rpr = prev_rpr
+                        print(f"[DEBUG] Using format from previous non-placeholder run: {run_text[:30]}...")
+                        break
+                elif is_placeholder:
+                    print(f"[DEBUG] Skipping placeholder run: {run_text[:30]}...")
+
+        # Remove original run
+        target_run.text = ""
+        p_element.remove(run_element)
+
+        # Insert text_before (keep original format)
+        if text_before:
+            new_run = self._create_run_with_format(target_para, original_rpr, text_before)
+            p_element.insert(insert_index, new_run._element)
+            insert_index += 1
+
+        # Insert placeholder with MERGEFIELD structure
+        # Use _create_run_with_format to properly inherit format from nearest text
+        placeholder_run = self._create_run_with_format(target_para, original_rpr, placeholder_text)
+
+        # Convert to MERGEFIELD structure
+        fld = OxmlElement('w:fldSimple')
+        fld.set(qn('w:instr'), f' MERGEFIELD {field_name} \\* MERGEFORMAT \\z "" ')
+
+        # Move the run element into fldSimple
+        fld.append(placeholder_run._element)
+
+        # Insert placeholder
+        p_element.insert(insert_index, fld)
+        insert_index += 1
+
+        # Insert text_after (keep original format)
+        if text_after:
+            new_run = self._create_run_with_format(target_para, original_rpr, text_after)
+            p_element.insert(insert_index, new_run._element)
+
+        print(f"[SUCCESS] Inserted placeholder «{field_name}» at offset {offset} in paragraph {paragraph_index}")
+        return True
+
     def add_page_break(self, position: str = "end", after_text: str = None):
         """
         Thêm ngắt trang

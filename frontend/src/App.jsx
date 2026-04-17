@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, addPlaceholderAtOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -28,6 +28,7 @@ function App() {
   const [selectedParaInCell, setSelectedParaInCell] = useState(null) // Selected paragraph index within cell (for table cell paragraphs)
   const [newFieldName, setNewFieldName] = useState('') // New placeholder name
   const [newFieldPosition, setNewFieldPosition] = useState('right') // Position for new placeholder (left/right/new_line)
+  const [caretOffset, setCaretOffset] = useState(null) // Character offset within block for precise placeholder insertion
   const [editedSuggestions, setEditedSuggestions] = useState({}) // Track user edits for suggestions: {block_index-suggested_name-position: {suggested_name: string, position: string}}
 
   // New states for enhanced editing
@@ -345,10 +346,32 @@ function App() {
           const blockIndex = parseInt(element.getAttribute('data-block-index'))
           const blockType = element.getAttribute('data-type')
 
+          // Get caret offset for precise insertion
+          const selection = window.getSelection()
+          let offset = null
+
+          if (selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0)
+
+            // Calculate offset within the block
+            const textContent = element.textContent || ''
+            const preCaretRange = range.cloneRange()
+            preCaretRange.selectNodeContents(element)
+            preCaretRange.setEnd(range.startContainer, range.startOffset)
+            offset = preCaretRange.toString().length
+
+            console.log('[DEBUG] Click offset:', {
+              blockIndex,
+              offset,
+              textContent: textContent.substring(0, 50) + '...'
+            })
+          }
+
           setSelectedBlockIndex(blockIndex)
           setSelectedCellIndex(null) // Reset cell index when selecting block
           setSelectedTableBlockIndex(null)
           setSelectedParaInCell(null) // Reset paragraph index
+          setCaretOffset(offset) // Store caret offset for precise insertion
 
           // Highlight selected block
           editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
@@ -356,7 +379,8 @@ function App() {
           })
           element.style.outline = '2px solid #8b5cf6'
 
-          setError(`Đã chọn ${blockType === 'table' ? 'bảng' : 'đoạn'} #${blockIndex}. Nhập tên placeholder và nhấn "Thêm".`)
+          const offsetMsg = offset !== null ? ` (vị trí ký tự #${offset})` : ''
+          setError(`Đã chọn ${blockType === 'table' ? 'bảng' : 'đoạn'} #${blockIndex}${offsetMsg}. Nhập tên placeholder và nhấn "Thêm".`)
         }
       })
 
@@ -473,10 +497,19 @@ function App() {
   }, [templateNeedsUpdate, templateId])
 
   // Rename placeholder
-  const renameField = (oldName, newName) => {
+  const renameField = async (oldName, newName) => {
     const editor = document.getElementById('document-editor')
     if (!editor) return
 
+    // Update renameMap first
+    const newMap = { ...renameMap }
+    for (const original in newMap) {
+      if (newMap[original] === oldName) {
+        newMap[original] = newName
+      }
+    }
+
+    // Update UI immediately
     editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
       if (span.getAttribute('data-field') === oldName) {
         span.setAttribute('data-field', newName)
@@ -484,18 +517,32 @@ function App() {
       }
     })
 
-    const newMap = { ...renameMap }
-    for (const original in newMap) {
-      if (newMap[original] === oldName) {
-        newMap[original] = newName
-      }
-    }
-    setRenameMap(newMap)
-
     const newHtml = editor.innerHTML
     setEditorHtml(newHtml)
     setFields(extractFields(newHtml))
-    setTemplateNeedsUpdate(true) // Mark template as modified
+    setRenameMap(newMap)
+
+    try {
+      // Save to backend IMMEDIATELY to persist rename
+      await updateTemplate(templateId, newMap, newHtml)
+      setTemplateNeedsUpdate(false) // Reset flag since we just updated
+      setError(`✅ Đã đổi tên «${oldName}» → «${newName}»`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Failed to rename placeholder:', err)
+      setError('⚠️ Đổi tên thất bại: ' + (err.response?.data?.detail || err.message))
+      // Rollback UI on failure
+      editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
+        if (span.getAttribute('data-field') === newName) {
+          span.setAttribute('data-field', oldName)
+          span.textContent = `«${oldName}»`
+        }
+      })
+      setRenameMap(renameMap)
+      setEditorHtml(editorHtml)
+      setFields(extractFields(editorHtml))
+      setTimeout(() => setError(null), 3000)
+    }
   }
 
   // Delete placeholder
@@ -724,14 +771,29 @@ function App() {
     setError(null)
 
     try {
-      const result = await addPlaceholder(
-        templateId,
-        selectedBlockIndex,
-        newFieldName.trim(),
-        newFieldPosition,
-        null, // No need for cell_index anymore (each cell has its own block_index)
-        selectedParaInCell // Pass paragraph index within cell for precise targeting
-      )
+      let result
+
+      // Use caret offset if available (precise insertion at click position)
+      if (caretOffset !== null) {
+        console.log('[DEBUG] Using caret offset for insertion:', caretOffset)
+        result = await addPlaceholderAtOffset(
+          templateId,
+          selectedBlockIndex,
+          caretOffset,
+          newFieldName.trim(),
+          true // inherit format
+        )
+      } else {
+        // Fallback to old method (left/right/new_line)
+        result = await addPlaceholder(
+          templateId,
+          selectedBlockIndex,
+          newFieldName.trim(),
+          newFieldPosition,
+          null, // No need for cell_index anymore (each cell has its own block_index)
+          selectedParaInCell // Pass paragraph index within cell for precise targeting
+        )
+      }
 
       // Update UI with new data
       setEditorHtml(result.html_preview)
@@ -744,6 +806,7 @@ function App() {
       setSelectedCellIndex(null)
       setSelectedTableBlockIndex(null)
       setSelectedParaInCell(null)
+      setCaretOffset(null) // Reset caret offset
       setNewFieldName('')
       setNewFieldPosition('right')
 
@@ -764,6 +827,7 @@ function App() {
     setSelectedCellIndex(null)
     setSelectedTableBlockIndex(null)
     setSelectedParaInCell(null)
+    setCaretOffset(null) // Reset caret offset
     setNewFieldName('')
     setNewFieldPosition('inline')
     setError(null)
@@ -1097,7 +1161,7 @@ function App() {
                         ✏️ Thêm Placeholder Thủ Công
                       </p>
                       <p className="text-xs text-purple-700">
-                        Click vào vị trí trong tài liệu để thêm placeholder mới
+                        Click vào vị trí bất kỳ trong tài liệu để thêm placeholder mới (chèn đúng tại vị trí click)
                       </p>
                     </div>
                     {!isAddMode ? (
@@ -1121,7 +1185,7 @@ function App() {
                     <div className="mt-3 p-3 bg-white border border-purple-300 rounded-lg">
                       {selectedBlockIndex === null ? (
                         <p className="text-sm text-gray-600">
-                          👆 Click vào vị trí trong tài liệu bên dưới để chọn nơi thêm placeholder
+                          👆 Click vào vị trí bất kỳ trong tài liệu bên dưới để chèn placeholder tại chính vị trí đó
                         </p>
                       ) : (
                         <div className="space-y-3">
@@ -1130,7 +1194,9 @@ function App() {
                               ? `✓ Đã chọn dòng #${selectedParaInCell} trong ô #${selectedCellIndex} của bảng #${selectedTableBlockIndex}`
                               : selectedCellIndex !== null
                                 ? `✓ Đã chọn ô #${selectedCellIndex} trong bảng #${selectedTableBlockIndex}`
-                                : `✓ Đã chọn vị trí #${selectedBlockIndex}`
+                                : caretOffset !== null
+                                  ? `✓ Đã chọn vị trí chính xác tại ký tự #${caretOffset} trong đoạn #${selectedBlockIndex}`
+                                  : `✓ Đã chọn vị trí #${selectedBlockIndex}`
                             }
                           </p>
 
@@ -1147,20 +1213,22 @@ function App() {
                             />
                           </div>
 
-                          <div>
-                            <label className="text-xs font-semibold text-gray-700 block mb-1">
-                              Vị trí chèn:
-                            </label>
-                            <select
-                              value={newFieldPosition}
-                              onChange={(e) => setNewFieldPosition(e.target.value)}
-                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                            >
+                          {caretOffset === null && (
+                            <div>
+                              <label className="text-xs font-semibold text-gray-700 block mb-1">
+                                Vị trí chèn:
+                              </label>
+                              <select
+                                value={newFieldPosition}
+                                onChange={(e) => setNewFieldPosition(e.target.value)}
+                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                              >
                               <option value="left">⬅️ Trước text</option>
                               <option value="right">➡️ Sau text</option>
                               <option value="new_line">⬇️ Xuống dòng</option>
                             </select>
-                          </div>
+                            </div>
+                          )}
 
                           <button
                             onClick={handleAddPlaceholder}

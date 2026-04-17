@@ -492,7 +492,8 @@ JSON:"""
         after_context: list = None,
         position: str = "right",
         cell_index: int = None,
-        para_in_cell: int = None
+        para_in_cell: int = None,
+        insert_after: str = None
     ) -> bool:
         """Inject a placeholder at a specific location in DOCX
 
@@ -503,9 +504,10 @@ JSON:"""
             context_hint: Text hint to find exact location
             before_context: List of text before the target block
             after_context: List of text after the target block
-            position: Where to insert (left=before text, right=after text, new_line)
+            position: Where to insert (left=before, right=after, new_line, inline)
             cell_index: Optional cell index within a table for precise cell targeting
             para_in_cell: Optional paragraph index within cell for specific paragraph targeting
+            insert_after: Text to insert after (required for position='inline')
 
         Returns:
             True if successful, False otherwise
@@ -664,7 +666,7 @@ JSON:"""
                 print(f"→ INJECTING at index {best_match['index']}: {best_match['text'][:50]}...")
                 print(f"  Position: {position}")
                 if best_match['type'] == 'paragraph':
-                    if self._inject_placeholder_in_paragraph(best_match['para'], placeholder_name, context_hint, position):
+                    if self._inject_placeholder_in_paragraph(best_match['para'], placeholder_name, context_hint, position, insert_after):
                         doc.save(docx_path)
                         print(f"✓ INJECTION SUCCESSFUL")
                         return True
@@ -683,7 +685,7 @@ JSON:"""
                         print(f"  Targeting first paragraph in cell")
 
                     if target_para:
-                        if self._inject_placeholder_in_paragraph(target_para, placeholder_name, context_hint, position):
+                        if self._inject_placeholder_in_paragraph(target_para, placeholder_name, context_hint, position, insert_after):
                             # Set vertical alignment to center for table cell
                             from docx.oxml import OxmlElement
                             from docx.oxml.ns import qn
@@ -702,7 +704,7 @@ JSON:"""
                         return False
                 else:
                     # For table_summary or legacy table type, use existing logic
-                    if self._inject_placeholder_in_table(best_match['table'], placeholder_name, context_hint, position, cell_index, para_in_cell):
+                    if self._inject_placeholder_in_table(best_match['table'], placeholder_name, context_hint, position, cell_index, para_in_cell, insert_after):
                         doc.save(docx_path)
                         print(f"✓ INJECTION SUCCESSFUL")
                         return True
@@ -874,15 +876,28 @@ JSON:"""
         paragraph,
         placeholder_name: str,
         context_hint: str,
-        position: str = "right"
+        position: str = "right",
+        insert_after: str = None
     ) -> bool:
-        """Inject placeholder into paragraph at best location using MERGEFIELD XML"""
+        """Inject placeholder into paragraph at best location using MERGEFIELD XML
+
+        Args:
+            paragraph: docx paragraph object
+            placeholder_name: Name for the placeholder
+            context_hint: Text hint for finding location
+            position: Where to insert (left=before, right=after, new_line, inline)
+            insert_after: Text to insert after (required for position='inline')
+        """
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
         import re
         import copy
 
         try:
+            # Handle inline position - find exact location
+            if position == "inline" and insert_after:
+                return self._inject_inline_placeholder(paragraph, placeholder_name, insert_after)
+
             text_runs = []
             for run in paragraph.runs:
                 if run.text:
@@ -916,6 +931,127 @@ JSON:"""
 
         except Exception as e:
             print(f"Error in paragraph injection: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _inject_inline_placeholder(
+        self,
+        paragraph,
+        placeholder_name: str,
+        insert_after: str
+    ) -> bool:
+        """Inject placeholder inline after specific text
+
+        Args:
+            paragraph: docx paragraph object
+            placeholder_name: Name for the placeholder
+            insert_after: Text to find and insert after
+
+        Returns:
+            True if successful, False otherwise
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        import copy
+
+        try:
+            # Build full text from all runs
+            full_text = ""
+            run_ranges = []  # (start_idx, end_idx, run_object)
+
+            for run in paragraph.runs:
+                if run.text:
+                    start = len(full_text)
+                    full_text += run.text
+                    end = len(full_text)
+                    run_ranges.append((start, end, run))
+
+            # Find insert_after text
+            search_idx = full_text.find(insert_after)
+            if search_idx == -1:
+                print(f"  Could not find '{insert_after}' in paragraph")
+                return False
+
+            # Find which run contains the insertion point
+            insert_point = search_idx + len(insert_after)
+            target_run = None
+            insert_offset = 0  # 0 = at beginning of run
+
+            for start, end, run in run_ranges:
+                if start <= insert_point <= end:
+                    target_run = run
+                    insert_offset = insert_point - start
+                    break
+
+            if not target_run:
+                print(f"  Could not find target run for insertion")
+                return False
+
+            # Get the run's style
+            p_element = paragraph._p
+            rPr = None
+            for r in p_element.findall(f"{self.w_ns}r"):
+                rPrCandidate = r.find(f"{self.w_ns}rPr")
+                if rPrCandidate is not None:
+                    rPr = rPrCandidate
+                    break
+
+            # Create MERGEFIELD element
+            fld = OxmlElement('w:fldSimple')
+            fld.set(qn('w:instr'), f' MERGEFIELD {placeholder_name} \\* MERGEFORMAT ')
+
+            # Create run element with style
+            run = OxmlElement('w:r')
+            if rPr is not None:
+                run.append(copy.deepcopy(rPr))
+
+            # Create text element
+            t = OxmlElement('w:t')
+            if ' ' in (placeholder_name[0], placeholder_name[-1]):
+                t.set(qn('xml:space'), 'preserve')
+            t.text = f"«{placeholder_name}»"
+            run.append(t)
+            fld.append(run)
+
+            # Split the run and insert placeholder
+            original_text = target_run.text
+            before_text = original_text[:insert_offset]
+            after_text = original_text[insert_offset:]
+
+            # Set the run's text to the part before insertion
+            target_run.text = before_text
+
+            # Find the run's XML element
+            run_element = target_run._element
+
+            # Get parent (the paragraph)
+            parent = run_element.getparent()
+
+            # Find the index of current run
+            run_index = list(parent).index(run_element)
+
+            # Insert the field after current run
+            parent.insert(run_index + 1, fld)
+
+            # If there's text after insertion, create a new run for it
+            if after_text:
+                new_run = OxmlElement('w:r')
+                if rPr is not None:
+                    new_run.append(copy.deepcopy(rPr))
+
+                new_t = OxmlElement('w:t')
+                new_t.text = after_text
+                new_run.append(new_t)
+
+                # Insert after the field
+                parent.insert(run_index + 2, new_run)
+
+            print(f"  ✓ Injected inline after '{insert_after}'")
+            return True
+
+        except Exception as e:
+            print(f"Error in inline injection: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -1102,7 +1238,8 @@ JSON:"""
         context_hint: str,
         position: str = "right",
         cell_index: int = None,
-        para_in_cell: int = None
+        para_in_cell: int = None,
+        insert_after: str = None
     ) -> bool:
         """Inject placeholder into table cell at best location or specific cell
 
@@ -1110,9 +1247,10 @@ JSON:"""
             table: docx Table object
             placeholder_name: Name for the placeholder
             context_hint: Text hint for finding best match (used if cell_index is None)
-            position: Where to insert (left=before text, right=after text, new_line)
+            position: Where to insert (left=before, right=after, new_line, inline)
             cell_index: Optional specific cell index to target directly
             para_in_cell: Optional specific paragraph index within cell to target directly
+            insert_after: Text to insert after (required for position='inline')
 
         Returns:
             True if successful, False otherwise
@@ -1136,7 +1274,7 @@ JSON:"""
                         if para_in_cell is not None and para_in_cell < len(cell.paragraphs):
                             print(f"✓ Targeting paragraph {para_in_cell} in cell (total: {len(cell.paragraphs)} paras)")
                             return self._inject_placeholder_in_paragraph(
-                                cell.paragraphs[para_in_cell], placeholder_name, context_hint, position
+                                cell.paragraphs[para_in_cell], placeholder_name, context_hint, position, insert_after
                             )
                         else:
                             # Inject into first paragraph (default behavior)
@@ -1144,7 +1282,7 @@ JSON:"""
                                 print(f"⚠️ Warning: para_in_cell {para_in_cell} >= cell paragraph count {len(cell.paragraphs)}, using first paragraph")
                             if cell.paragraphs:
                                 return self._inject_placeholder_in_paragraph(
-                                    cell.paragraphs[0], placeholder_name, context_hint, position
+                                    cell.paragraphs[0], placeholder_name, context_hint, position, insert_after
                                 )
                             else:
                                 print(f"✗ Target cell has no paragraphs")
@@ -1225,7 +1363,7 @@ JSON:"""
         # Inject into best matching cell
         if best_match:
             print(f"✓ Injecting into best match cell (score: {best_score:.2f})")
-            return self._inject_placeholder_in_paragraph(best_match, placeholder_name, context_hint, position)
+            return self._inject_placeholder_in_paragraph(best_match, placeholder_name, context_hint, position, insert_after)
 
         print(f"✗ No matching cell found")
         return False

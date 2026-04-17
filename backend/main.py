@@ -45,7 +45,7 @@ ensure_directories()
 
 # Configuration
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-GEMINI_API_KEY = None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 # Initialize FastAPI
@@ -131,7 +131,7 @@ async def convert_to_template(file: UploadFile = File(...)):
 
         # Process document with SmartMailMergeConverter
         # Temporarily disable Gemini renaming for preview by not passing the API key
-        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+        processor = MailMergeProcessor(gemini_api_key=None)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path))
@@ -543,6 +543,7 @@ async def apply_ai_suggestions(
             before_context = suggestion.get("before_context", [])
             after_context = suggestion.get("after_context", [])
             position = suggestion.get("position", "right")
+            insert_after = suggestion.get("insert_after", None)
 
             if block_index is None or not field_name:
                 results["failed"] += 1
@@ -556,7 +557,10 @@ async def apply_ai_suggestions(
                 context,
                 before_context,
                 after_context,
-                position
+                position,
+                None,  # cell_index
+                None,  # para_in_cell
+                insert_after
             )
 
             if success:
@@ -785,6 +789,81 @@ async def add_placeholder_manual(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to add placeholder: {str(e)}"
+        )
+
+
+@app.post("/add-placeholder-at-offset")
+async def add_placeholder_at_offset(
+    template_id: str = Form(...),
+    block_index: int = Form(...),
+    offset: int = Form(...),
+    field_name: str = Form(...),
+    inherit_format: bool = Form(True)
+):
+    """Add placeholder at specific character offset within paragraph
+
+    Args:
+        template_id: ID of template to update
+        block_index: Index of paragraph to insert placeholder into
+        offset: Character offset within paragraph text
+        field_name: Name for the new placeholder
+        inherit_format: Whether to inherit format from surrounding text
+
+    Returns:
+        JSON with update results
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        # Clean field name
+        field_name = field_name.strip().lower().replace(" ", "_")
+
+        # Initialize editor
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Insert placeholder at offset
+        success = editor.insert_placeholder_at_offset(
+            paragraph_index=block_index,
+            offset=offset,
+            field_name=field_name,
+            inherit_format=inherit_format
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to insert placeholder at offset"
+            )
+
+        # Save document
+        editor.save(str(template_path))
+
+        # Get updated field list and HTML preview
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+        executor = MergeExecutor()
+        updated_fields = executor.get_template_fields(str(template_path))
+        html_preview = processor._generate_html_preview(str(template_path), updated_fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "field_name": field_name,
+            "block_index": block_index,
+            "offset": offset,
+            "updated_fields": updated_fields,
+            "field_count": len(updated_fields),
+            "html_preview": html_preview
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to add placeholder at offset: {str(e)}"
         )
 
 

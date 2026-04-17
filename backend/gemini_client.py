@@ -153,24 +153,20 @@ QUAN TRỌNG - BỎ QUA VỊ TRÍ ĐÃ CÓ PLACEHOLDER:
 - Mỗi ô chỉ nên có MỘT placeholder
 
 CÁC VÙNG CẦN TÌM:
-1. Vùng chứa tên người điền (tôi tên, họ và tên, signatory, etc.)
-2. Vùng chứa ngày tháng (ngày... tháng... năm, date, etc.) - QUAN TRỌNG: Pattern "ngày... tháng... năm..." cần 3 placeholder riêng biệt
+1. Vùng ngày tháng (ngày ... tháng ... năm ...)
+2. Vùng chứa tên người điền (tôi tên, họ và tên, signatory, etc.)
 3. Vùng chứa số liệu/CMND/mã số (số, mã, ID, etc.)
 4. Vùng chứa địa chỉ/đơn vị (address, company, etc.)
 5. Vùng checkbox/trắc nghiệm (□, [ ], etc.)
 6. Các vùng trống rõ ràng khác (dấu __, nhiều chấm, khoảng trắng lớn)
 
-QUAN TRỌNG - PATTERN NGÀY THÁNG:
-- Nếu thấy pattern "ngày... tháng... năm..." hoặc "ngày... tháng... năm 20..." → TẠO 3 PLACEHOLDER RIÊNG BIỆT
-- 3 placeholder này NÊN ở cùng một block hoặc liên tiếp nhau
-- Đặt tên gợi ý theo dạng: ngay_<context>, thang_<context>, nam_<context>
-- VD: "Từ ngày: ... tháng ... năm ..." → suggested_name: "ngay_bat_dau", "thang_bat_dau", "nam_bat_dau"
-- ĐỪNG tạo 3 placeholder ngày như: ngay_1, ngay_2, ngay_3
-
 VỊ TRÍ PLACEHOLDER:
 - "left": Chèn TRƯỚC text (VD: "«ho_ten» Nguyễn Văn A")
 - "right": Chèn SAU text (VD: "Họ tên: «ho_ten»")
 - "new_line": Chèn xuống dòng mới trong cùng block (VD: "Người khởi kiện:\n«nguoi_khoi_kien»")
+- "inline": Chèn GIỮA text - PHẢI cung cấp "insert_after" (VD: "Ngày 20 tháng <<thang>> năm 2024" → position: "inline", insert_after: "Ngày 20 tháng ")
+  * Khi dùng "inline", PHẢI thêm "insert_after": "<text cần chèn sau đó>"
+  * VD: "Họ và tên: Nguyễn Văn A" → position: "inline", insert_after: "Họ và tên: "
 
 YÊU CẦU ĐẦU RA:
 Trả về JSON với format sau:
@@ -182,7 +178,8 @@ Trả về JSON với format sau:
       "after_context": [<nội dung 2 blocks sau đó để phân biệt>],
       "suggested_name": "<tên trường gợi ý>",
       "field_type": "<text|date|checkbox|number>",
-      "position": "<left|right|new_line>",
+      "position": "<left|right|new_line|inline>",
+      "insert_after": "<text cần chèn sau đó - BẮT BUỘC khi position='inline'>",
       "reason": "<lý do tại sao cần thêm>",
       "confidence": "<high|medium|low>"
     }}

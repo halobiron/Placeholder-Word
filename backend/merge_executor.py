@@ -91,9 +91,15 @@ class MergeExecutor:
                 if rPr is not None:
                     new_run.append(copy.deepcopy(rPr))
 
-            # Add text
+            # Add text with space preservation
             t = OxmlElement('w:t')
-            t.text = str(replacement)
+            replacement_str = str(replacement)
+
+            # Preserve leading/trailing whitespace by setting xml:space
+            if replacement_str != replacement_str.strip():
+                t.set(qn('xml:space'), 'preserve')
+
+            t.text = replacement_str
             new_run.append(t)
 
             # Surgical replacement

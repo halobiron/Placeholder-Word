@@ -54,7 +54,10 @@
       "Bash(curl -X POST http://localhost:8000/delete-line -F template_id=1c36b319-2937-4e2a-b7ff-68becc8789d9 -F 'line_text=Test delete' -F location=document -v)",
       "Bash(lsof -ti:5173)",
       "Bash(curl -s http://localhost:5173)",
-      "Bash(echo \"Frontend started with PID: $!\")"
+      "Bash(echo \"Frontend started with PID: $!\")",
+      "Read(//Users/aiot/.claude/plugins/cache/minimax-skills/minimax-skills/1.0.0/skills/minimax-docx/**)",
+      "Bash(scripts/docx_preview.sh /Users/aiot/workspace/placeholder/backend/uploads/templates/40e17d9f-70f0-4b7e-b24d-ab4517721b41.docx)",
+      "Bash(dotnet run:*)"
     ]
   },
   "enabledPlugins": {
