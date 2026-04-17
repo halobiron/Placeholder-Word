@@ -1605,9 +1605,23 @@ JSON:"""
 
                 tag = "th" if row_idx == 0 else "td"
 
+                # Extract cell background color from tcPr/shd element
+                cell_style = "border: 1px solid #ccc; padding: 5px;"
+                try:
+                    tcPr = cell._element.find(f"{self.w_ns}tcPr")
+                    if tcPr is not None:
+                        shd = tcPr.find(f"{self.w_ns}shd")
+                        if shd is not None:
+                            fill = shd.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}fill")
+                            if fill and fill != "auto":
+                                cell_style += f" background-color: #{fill};"
+                                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] background: #{fill}")
+                except Exception as e:
+                    print(f"[_process_table_to_html] Error extracting cell color: {e}")
+
                 # Add data-block-index for this cell (matching extract_structured_content)
-                table_html.append('<{0} data-block-index="{1}" data-type="table_cell" data-table-index="{4}" data-row="{2}" data-col="{3}" style="border: 1px solid #ccc; padding: 5px;">{5}</{0}>'.format(
-                    tag, current_cell_block_index, row_idx, cell_idx, table_index, cell_content
+                table_html.append('<{0} data-block-index="{1}" data-type="table_cell" data-table-index="{4}" data-row="{2}" data-col="{3}" style="{5}">{6}</{0}>'.format(
+                    tag, current_cell_block_index, row_idx, cell_idx, table_index, cell_style, cell_content
                 ))
 
                 # Increment block index for next cell

@@ -1265,6 +1265,18 @@ async def update_text_in_template(
                     from docx.oxml import OxmlElement
                     from docx.oxml.ns import qn
 
+                    # CRITICAL: Copy alignment from first paragraph in same cell for table cells
+                    # This preserves center/right alignment when adding text to empty paragraphs
+                    if para_in_cell is not None and block_index is not None:
+                        # Get all paragraphs in this cell
+                        cell_paragraphs = editor.get_table_cell_paragraphs(block_index)
+                        if cell_paragraphs and len(cell_paragraphs) > 0:
+                            # Copy alignment from first paragraph in cell
+                            first_para = cell_paragraphs[0]
+                            if first_para.alignment is not None:
+                                target_paragraph.alignment = first_para.alignment
+                                print(f"[DEBUG] Copied alignment from first paragraph: {first_para.alignment}")
+
                     # Check if paragraph has runs
                     if target_paragraph.runs:
                         # Add to existing run

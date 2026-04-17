@@ -187,6 +187,43 @@ class DocxFullEditor:
 
         return None
 
+    def get_table_cell_paragraphs(self, block_index: int) -> list:
+        """
+        Get all paragraphs in a table cell
+
+        Args:
+            block_index: Block index of the table cell (from HTML preview)
+
+        Returns:
+            List of paragraph objects in the cell, or None if not found
+        """
+        self._build_block_index_map()
+
+        if block_index not in self._block_to_para_index_map:
+            return None
+
+        block_data = self._block_to_para_index_map[block_index]
+
+        if block_data['type'] != 'table_cell':
+            return None
+
+        # Get cell location from block data
+        row_idx = block_data['row']
+        col_idx = block_data['col']
+
+        # Find the specific table and cell
+        target_cell = None
+        for table in self.doc.tables:
+            if row_idx < len(table.rows) and col_idx < len(table.rows[row_idx].cells):
+                target_cell = table.rows[row_idx].cells[col_idx]
+                break
+
+        if not target_cell:
+            return None
+
+        # Return all paragraphs in the cell
+        return list(target_cell.paragraphs)
+
     def get_paragraph_index_from_block(self, block_index: int) -> int:
         """
         Get paragraph_index from block_index (HTML preview)
