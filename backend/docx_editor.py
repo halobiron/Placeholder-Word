@@ -1549,22 +1549,35 @@ class DocxFullEditor:
             inherit_format: Whether to inherit format from surrounding text
 
         Returns:
-            True if successful, False otherwise
+            True if successful
+
+        Raises:
+            ValueError: If parameters are invalid
+            RuntimeError: If operation fails
         """
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
         import copy
 
+        # Validate inputs
+        if paragraph_index < 0:
+            raise ValueError(f"Invalid paragraph_index: {paragraph_index} (must be >= 0)")
+        if offset < 0:
+            raise ValueError(f"Invalid offset: {offset} (must be >= 0)")
+        if not field_name or not field_name.strip():
+            raise ValueError("Field name cannot be empty")
+
         # Find target paragraph
         target_para = None
+        total_paragraphs = 0
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            total_paragraphs += 1
             if p_idx == paragraph_index:
                 target_para = paragraph
                 break
 
         if not target_para:
-            print(f"[ERROR] Paragraph {paragraph_index} not found")
-            return False
+            raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
 
         # Build text with run mapping
         run_text_map = []  # [(run, start_offset, end_offset, text)]
@@ -1583,14 +1596,23 @@ class DocxFullEditor:
 
         # Find which run contains the offset
         target_run_info = None
+        total_text_length = sum(run_info['end'] - run_info['start'] for run_info in run_text_map)
+
         for run_info in run_text_map:
             if run_info['start'] <= offset <= run_info['end']:
                 target_run_info = run_info
                 break
 
         if not target_run_info:
-            print(f"[ERROR] Offset {offset} not found in paragraph {paragraph_index}")
-            return False
+            # Build detailed error message
+            para_text = target_para.text
+            para_preview = para_text[:50] + "..." if len(para_text) > 50 else para_text
+            raise RuntimeError(
+                f"Offset {offset} not found in paragraph {paragraph_index}. "
+                f"Paragraph text length: {total_text_length}, "
+                f"Valid range: 0-{total_text_length}, "
+                f"Text preview: '{para_preview}'"
+            )
 
         # Get original format from target run
         target_run = target_run_info['run']
@@ -1639,31 +1661,37 @@ class DocxFullEditor:
         target_run.text = ""
         p_element.remove(run_element)
 
-        # Insert text_before (keep original format)
-        if text_before:
-            new_run = self._create_run_with_format(target_para, original_rpr, text_before)
-            p_element.insert(insert_index, new_run._element)
+        try:
+            # Insert text_before (keep original format)
+            if text_before:
+                new_run = self._create_run_with_format(target_para, original_rpr, text_before)
+                p_element.insert(insert_index, new_run._element)
+                insert_index += 1
+
+            # Insert placeholder with MERGEFIELD structure
+            # Use _create_run_with_format to properly inherit format from nearest text
+            placeholder_run = self._create_run_with_format(target_para, original_rpr, placeholder_text)
+
+            # Convert to MERGEFIELD structure
+            fld = OxmlElement('w:fldSimple')
+            fld.set(qn('w:instr'), f' MERGEFIELD {field_name} \\* MERGEFORMAT \\z "" ')
+
+            # Move the run element into fldSimple
+            fld.append(placeholder_run._element)
+
+            # Insert placeholder
+            p_element.insert(insert_index, fld)
             insert_index += 1
 
-        # Insert placeholder with MERGEFIELD structure
-        # Use _create_run_with_format to properly inherit format from nearest text
-        placeholder_run = self._create_run_with_format(target_para, original_rpr, placeholder_text)
+            # Insert text_after (keep original format)
+            if text_after:
+                new_run = self._create_run_with_format(target_para, original_rpr, text_after)
+                p_element.insert(insert_index, new_run._element)
 
-        # Convert to MERGEFIELD structure
-        fld = OxmlElement('w:fldSimple')
-        fld.set(qn('w:instr'), f' MERGEFIELD {field_name} \\* MERGEFORMAT \\z "" ')
-
-        # Move the run element into fldSimple
-        fld.append(placeholder_run._element)
-
-        # Insert placeholder
-        p_element.insert(insert_index, fld)
-        insert_index += 1
-
-        # Insert text_after (keep original format)
-        if text_after:
-            new_run = self._create_run_with_format(target_para, original_rpr, text_after)
-            p_element.insert(insert_index, new_run._element)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to insert placeholder structure at offset {offset}: {type(e).__name__}: {str(e)}"
+            )
 
         print(f"[SUCCESS] Inserted placeholder «{field_name}» at offset {offset} in paragraph {paragraph_index}")
         return True

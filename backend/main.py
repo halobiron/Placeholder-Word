@@ -45,7 +45,7 @@ ensure_directories()
 
 # Configuration
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = "AIzaSyA8vLsYB356Fb8KRx9s0UrrAjmIZF3SmRY"  # Direct API key
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 # Initialize FastAPI
@@ -318,60 +318,80 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
         flds = [f for f in doc.element.iter(f"{w_ns}fldSimple") if "MERGEFIELD" in f.get(f"{w_ns}instr", "")]
 
         count_updated = 0
-        count_deleted = 0
-        for fld in flds:
+
+        print(f"\n=== UPDATE TEMPLATE DEBUG ===")
+        print(f"Template ID: {template_id}")
+        print(f"Rename mapping: {rename_mapping}")
+        print(f"Total placeholders found: {len(flds)}")
+
+        for idx, fld in enumerate(flds):
             instr = fld.get(f"{w_ns}instr", "")
             match = re.search(r'MERGEFIELD\s+(\S+)', instr)
             if match:
                 current_name = match.group(1)
                 new_name = rename_mapping.get(current_name)
-                
+
+                print(f"\n[FIELD {idx}] Current: '{current_name}'")
+                print(f"  → New name from mapping: {new_name}")
+
                 if new_name is not None and new_name != current_name:
                     # Keep the original \z part
                     z_match = re.search(r'\\z\s*"([^"]*)"', instr)
                     z_part = f' \\z "{z_match.group(1)}"' if z_match else ""
 
-                    fld.set(f"{w_ns}instr", f' MERGEFIELD {new_name} \\* MERGEFORMAT{z_part} ')
+                    print(f"  → UPDATING to '{new_name}'")
+                    print(f"  → Old instr: {instr}")
+                    print(f"  → Z part: {z_part}")
+
+                    new_instr = f' MERGEFIELD {new_name} \\* MERGEFORMAT{z_part} '
+                    print(f"  → New instr: {new_instr}")
+
+                    fld.set(f"{w_ns}instr", new_instr)
+
+                    text_update_count = 0
                     for t in fld.iter(f"{w_ns}t"):
+                        old_text = t.text
                         t.text = f"«{new_name}»"
+                        text_update_count += 1
+                        print(f"  → Updated text element {text_update_count}: '{old_text}' → '«{new_name}»'")
+
                     count_updated += 1
-                elif new_name is None:
-                    count_deleted += 1
-                    # It was deleted by the user. Replace with original text from \z switch
-                    z_match = re.search(r'\\z\s*"([^"]*)"', instr)
-                    original_text = z_match.group(1) if z_match else ""
+                    print(f"  ✓ Field updated successfully (total updated: {count_updated})")
 
-                    # Get parent element to replace fldSimple with text
-                    parent = fld.getparent()
+                # Fields not in rename_map are kept as-is (no deletion)
+                # This prevents placeholders from disappearing when renamed
+                print(f"  → Keeping field '{current_name}' (not in rename_map)")
+            else:
+                print(f"\n[FIELD {idx}] ⚠ Could not parse MERGEFIELD from instr: {instr}")
 
-                    # Create a new run (w:r) element with the original text
-                    from docx.oxml import OxmlElement
-                    from docx.oxml.ns import qn
+        print(f"\n=== UPDATE SUMMARY ===")
+        print(f"Fields updated: {count_updated}")
+        print(f"========================\n")
 
-                    # Try to get style from the fldSimple's run
-                    rPr = None
-                    existing_r = fld.find(f"{w_ns}r")
-                    if existing_r is not None:
-                        rPr = existing_r.find(f"{w_ns}rPr")
-
-                    # Create new run with original text
-                    new_r = OxmlElement('w:r')
-                    if rPr is not None:
-                        import copy
-                        new_r.append(copy.deepcopy(rPr))
-
-                    new_t = OxmlElement('w:t')
-                    if original_text and (original_text[0] in ' \t\n' or original_text[-1] in ' \t\n'):
-                        new_t.set(qn('xml:space'), 'preserve')
-                    new_t.text = original_text
-                    new_r.append(new_t)
-
-                    # Replace fldSimple with the new run
-                    parent.replace(fld, new_r)
-
+        print(f"Saving document to: {template_path}")
         doc.save(str(template_path))
-        return {"template_id": template_id, "updated": True, 
-                "fields_updated": count_updated, "fields_deleted": count_deleted}
+        print(f"✓ Document saved successfully")
+
+        # Verify save by re-reading the file
+        print(f"\n=== VERIFICATION ===")
+        verify_doc = Document(str(template_path))
+        verify_flds = [f for f in verify_doc.element.iter(f"{w_ns}fldSimple") if "MERGEFIELD" in f.get(f"{w_ns}instr", "")]
+        print(f"Placeholders after save: {len(verify_flds)}")
+        for idx, fld in enumerate(verify_flds):
+            instr = fld.get(f"{w_ns}instr", "")
+            match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+            if match:
+                field_name = match.group(1)
+                # Get text content
+                text_content = ""
+                for t in fld.iter(f"{w_ns}t"):
+                    if t.text:
+                        text_content += t.text
+                print(f"  [{idx}] '{field_name}' → Display: '{text_content}'")
+        print(f"==================\n")
+
+        return {"template_id": template_id, "updated": True,
+                "fields_updated": count_updated}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 def _extract_data_from_context(
@@ -812,8 +832,11 @@ async def add_placeholder_at_offset(
     Returns:
         JSON with update results
     """
+    print(f"[INFO] add_placeholder_at_offset called: template_id={template_id}, block_index={block_index}, offset={offset}, field_name={field_name}")
+
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
+        print(f"[ERROR] Template not found: {template_path}")
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
@@ -825,17 +848,30 @@ async def add_placeholder_at_offset(
         editor = DocxFullEditor(str(template_path))
 
         # Insert placeholder at offset
-        success = editor.insert_placeholder_at_offset(
-            paragraph_index=block_index,
-            offset=offset,
-            field_name=field_name,
-            inherit_format=inherit_format
-        )
-
-        if not success:
+        try:
+            editor.insert_placeholder_at_offset(
+                paragraph_index=block_index,
+                offset=offset,
+                field_name=field_name,
+                inherit_format=inherit_format
+            )
+        except ValueError as ve:
+            # Validation errors (bad input)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid input: {str(ve)}"
+            )
+        except RuntimeError as re:
+            # Runtime errors (operation failed)
             raise HTTPException(
                 status_code=500,
-                detail="Failed to insert placeholder at offset"
+                detail=f"Insert operation failed: {str(re)}"
+            )
+        except Exception as e:
+            # Unexpected errors
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected error during insertion: {type(e).__name__}: {str(e)}"
             )
 
         # Save document
@@ -859,11 +895,24 @@ async def add_placeholder_at_offset(
         }
 
     except HTTPException:
+        # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
+        # Log unexpected errors with full context
+        import traceback
+        error_details = {
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "template_id": template_id,
+            "block_index": block_index,
+            "offset": offset,
+            "field_name": field_name,
+            "traceback": traceback.format_exc()
+        }
+        print(f"[ERROR] Unexpected error in add_placeholder_at_offset: {error_details}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to add placeholder at offset: {str(e)}"
+            detail=f"Unexpected error: {type(e).__name__}: {str(e)}"
         )
 
 

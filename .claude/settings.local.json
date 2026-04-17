@@ -57,7 +57,12 @@
       "Bash(echo \"Frontend started with PID: $!\")",
       "Read(//Users/aiot/.claude/plugins/cache/minimax-skills/minimax-skills/1.0.0/skills/minimax-docx/**)",
       "Bash(scripts/docx_preview.sh /Users/aiot/workspace/placeholder/backend/uploads/templates/40e17d9f-70f0-4b7e-b24d-ab4517721b41.docx)",
-      "Bash(dotnet run:*)"
+      "Bash(dotnet run:*)",
+      "Bash(curl:*)",
+      "Read(//c/Users/DELL/.claude/plugins/cache/minimax-skills/minimax-skills/1.0.0/skills/minimax-docx/**)",
+      "Bash(bash scripts/docx_preview.sh \"E:/Work/PhenikaaX/Placeholder-Word/backend/uploads/templates/f804889f-c4fa-4042-a080-80c032af7f45.docx\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill:*)"
     ]
   },
   "enabledPlugins": {

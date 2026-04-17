@@ -894,8 +894,17 @@ JSON:"""
         import copy
 
         try:
+            # Log context ban đầu
+            para_text = paragraph.text if paragraph else ""
+            print(f"\n[INJECT PLACEHOLDER IN PARAGRAPH]")
+            print(f"  Placeholder: '{placeholder_name}'")
+            print(f"  Position: {position}")
+            print(f"  Context hint: '{context_hint}'")
+            print(f"  Current paragraph: '{para_text}'")
+
             # Handle inline position - find exact location
             if position == "inline" and insert_after:
+                print(f"  → Using inline injection after '{insert_after}'")
                 return self._inject_inline_placeholder(paragraph, placeholder_name, insert_after)
 
             text_runs = []
@@ -905,6 +914,7 @@ JSON:"""
 
             if not text_runs:
                 # Add new run with placeholder using MERGEFIELD structure
+                print(f"  → No text runs found, adding placeholder with empty original text")
                 self._add_mergefield_placeholder(paragraph, placeholder_name, "", position)
                 return True
 
@@ -918,19 +928,28 @@ JSON:"""
                 match = re.search(r'([._]{3,})$', original_text)
                 original_pattern = match.group(1) if match else "..."
 
+                print(f"  → Found pattern '{original_pattern}' at end, removing and adding placeholder")
+
                 # Remove pattern from run text
                 last_run.text = re.sub(r'[._]{3,}$', '', original_text)
+                print(f"  → Removed pattern from run text: '{last_run.text}'")
 
                 # Add MERGEFIELD placeholder
                 self._add_mergefield_placeholder(paragraph, placeholder_name, original_pattern, position)
                 return True
             else:
                 # Append placeholder at end with empty original
+                print(f"  → No pattern found at end, adding placeholder with empty original text")
                 self._add_mergefield_placeholder(paragraph, placeholder_name, "", position)
+
+                # Log kết quả cuối cùng
+                final_text = paragraph.text
+                print(f"[INJECT PLACEHOLDER IN PARAGRAPH] Final result: '{final_text}'")
+                print(f"✓ Placeholder injection completed successfully\n")
                 return True
 
         except Exception as e:
-            print(f"Error in paragraph injection: {e}")
+            print(f"[INJECT PLACEHOLDER IN PARAGRAPH] ✗ Error: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -956,6 +975,13 @@ JSON:"""
         import copy
 
         try:
+            # Log context ban đầu
+            para_text = paragraph.text if paragraph else ""
+            print(f"\n[INLINE INJECTION]")
+            print(f"  Placeholder: '{placeholder_name}'")
+            print(f"  Insert after: '{insert_after}'")
+            print(f"  Current paragraph: '{para_text}'")
+
             # Build full text from all runs
             full_text = ""
             run_ranges = []  # (start_idx, end_idx, run_object)
@@ -967,11 +993,15 @@ JSON:"""
                     end = len(full_text)
                     run_ranges.append((start, end, run))
 
+            print(f"  → Full text built: '{full_text}'")
+
             # Find insert_after text
             search_idx = full_text.find(insert_after)
             if search_idx == -1:
-                print(f"  Could not find '{insert_after}' in paragraph")
+                print(f"  ✗ Could not find '{insert_after}' in paragraph")
                 return False
+
+            print(f"  → Found '{insert_after}' at index {search_idx}")
 
             # Find which run contains the insertion point
             insert_point = search_idx + len(insert_after)
@@ -985,8 +1015,10 @@ JSON:"""
                     break
 
             if not target_run:
-                print(f"  Could not find target run for insertion")
+                print(f"  ✗ Could not find target run for insertion")
                 return False
+
+            print(f"  → Target run found at offset {insert_offset}")
 
             # Get the run's style
             p_element = paragraph._p
@@ -1019,6 +1051,8 @@ JSON:"""
             before_text = original_text[:insert_offset]
             after_text = original_text[insert_offset:]
 
+            print(f"  → Splitting run: '{before_text}' + [PLACEHOLDER] + '{after_text}'")
+
             # Set the run's text to the part before insertion
             target_run.text = before_text
 
@@ -1047,11 +1081,14 @@ JSON:"""
                 # Insert after the field
                 parent.insert(run_index + 2, new_run)
 
-            print(f"  ✓ Injected inline after '{insert_after}'")
+            # Log kết quả
+            final_text = paragraph.text
+            print(f"[INLINE INJECTION] Final result: '{final_text}'")
+            print(f"  ✓ Injected inline after '{insert_after}'\n")
             return True
 
         except Exception as e:
-            print(f"Error in inline injection: {e}")
+            print(f"[INLINE INJECTION] ✗ Error: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -1076,6 +1113,13 @@ JSON:"""
 
         # Get paragraph element
         p_element = paragraph._p
+
+        # Log trạng thái trước khi chèn
+        para_text_before = paragraph.text
+        print(f"\n[INSERT PLACEHOLDER] Position: {position}")
+        print(f"  Before insert: '{para_text_before}'")
+        print(f"  Placeholder name: '{placeholder_name}'")
+        print(f"  Original text: '{original_text}'")
 
         # Create fldSimple element (MERGEFIELD)
         fld = OxmlElement('w:fldSimple')
@@ -1117,6 +1161,10 @@ JSON:"""
             # Append fldSimple to end of paragraph
             p_element.append(fld)
 
+        # Log trạng thái sau khi chèn
+        print(f"  After insert: '{paragraph.text}'")
+        print(f"  ✓ Placeholder '{placeholder_name}' inserted successfully")
+
     def _add_new_paragraph_with_placeholder(
         self,
         original_paragraph,
@@ -1137,6 +1185,14 @@ JSON:"""
         import copy
 
         original_p_element = original_paragraph._p
+
+        # Log trạng thái ban đầu
+        original_text_content = ""
+        for t in original_p_element.findall(f".//{self.w_ns}t"):
+            if t.text:
+                original_text_content += t.text
+        print(f"  [NEW LINE] Original paragraph: '{original_text_content}'")
+        print(f"  [NEW LINE] Creating new paragraph with placeholder '{placeholder_name}'")
 
         # Get the parent element (could be body or cell)
         parent = original_p_element.getparent()
@@ -1229,7 +1285,14 @@ JSON:"""
         parent_index = list(parent).index(original_p_element)
         parent.insert(parent_index + 1, new_p)
 
+        # Log kết quả
+        new_paragraph_text = ""
+        for t in new_p.findall(f".//{self.w_ns}t"):
+            if t.text:
+                new_paragraph_text += t.text
         print(f"  [new_line] Created new paragraph with placeholder after original")
+        print(f"  [NEW LINE] New paragraph content: '{new_paragraph_text}'")
+        print(f"  ✓ NEW LINE creation completed successfully")
 
     def _inject_placeholder_in_table(
         self,
@@ -1456,7 +1519,10 @@ JSON:"""
             print(f"Rename map: {rename_map}")
 
             # Xử lý tất cả paragraphs trong body
-            for para in doc.paragraphs:
+            for para_idx, para in enumerate(doc.paragraphs):
+                para_text = para.text
+                print(f"\n[PARAGRAPH {para_idx}] Before rename: '{para_text}'")
+
                 for fldSimple in para._p.findall(f"{self.w_ns}fldSimple"):
                     instr = fldSimple.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", "")
 
@@ -1478,14 +1544,23 @@ JSON:"""
                                 for t in r.findall(f"{self.w_ns}t"):
                                     if t.text and f"«{old_name}»" in t.text:
                                         t.text = f"«{new_name}»"
-                                        print(f"Renamed: {old_name} → {new_name}")
+                                        print(f"  ✓ Renamed: {old_name} → {new_name}")
                                         rename_count += 1
 
+                # Log trạng thái sau khi rename
+                para_text_after = para.text
+                print(f"[PARAGRAPH {para_idx}] After rename: '{para_text_after}'")
+
             # Xử lý tables
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
+            for table_idx, table in enumerate(doc.tables):
+                print(f"\n[TABLE {table_idx}] Processing table with {len(table.rows)} rows")
+                for row_idx, row in enumerate(table.rows):
+                    for cell_idx, cell in enumerate(row.cells):
+                        print(f"[TABLE {table_idx}][ROW {row_idx}][CELL {cell_idx}] Processing cell")
+                        for para_idx, para in enumerate(cell.paragraphs):
+                            para_text = para.text
+                            print(f"  [PARAGRAPH {para_idx}] Before rename: '{para_text}'")
+
                             for fldSimple in para._p.findall(f"{self.w_ns}fldSimple"):
                                 instr = fldSimple.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", "")
 
@@ -1504,8 +1579,12 @@ JSON:"""
                                             for t in r.findall(f"{self.w_ns}t"):
                                                 if t.text and f"«{old_name}»" in t.text:
                                                     t.text = f"«{new_name}»"
-                                                    print(f"Renamed (table): {old_name} → {new_name}")
+                                                    print(f"    ✓ Renamed (table): {old_name} → {new_name}")
                                                     rename_count += 1
+
+                            # Log trạng thái sau khi rename
+                            para_text_after = para.text
+                            print(f"  [PARAGRAPH {para_idx}] After rename: '{para_text_after}'")
 
             print(f"=== TOTAL RENAMED: {rename_count} placeholders ===")
 

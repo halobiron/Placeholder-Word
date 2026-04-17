@@ -353,17 +353,25 @@ function App() {
           if (selection.rangeCount > 0) {
             const range = selection.getRangeAt(0)
 
-            // Calculate offset within the block
-            const textContent = element.textContent || ''
+            // Calculate offset within the block, excluding placeholder characters
+            // This is critical because backend expects offset based on plain DOCX text,
+            // not HTML textContent which includes «field_name» placeholders
             const preCaretRange = range.cloneRange()
             preCaretRange.selectNodeContents(element)
             preCaretRange.setEnd(range.startContainer, range.startOffset)
-            offset = preCaretRange.toString().length
+            const textBeforeCaret = preCaretRange.toString()
+
+            // Remove placeholder characters («field_name») from offset calculation
+            // Placeholders in HTML are rendered as: «field_name» (7+ chars depending on field name)
+            // But in DOCX plain text, they might be counted differently or not at all
+            const textWithoutPlaceholders = textBeforeCaret.replace(/«[^»]+»/g, '')
+            offset = textWithoutPlaceholders.length
 
             console.log('[DEBUG] Click offset:', {
               blockIndex,
               offset,
-              textContent: textContent.substring(0, 50) + '...'
+              textBeforeCaret: textBeforeCaret.substring(0, 50) + '...',
+              textWithoutPlaceholders: textWithoutPlaceholders.substring(0, 50) + '...'
             })
           }
 
@@ -501,11 +509,16 @@ function App() {
     const editor = document.getElementById('document-editor')
     if (!editor) return
 
-    // Update renameMap first
-    const newMap = { ...renameMap }
-    for (const original in newMap) {
-      if (newMap[original] === oldName) {
+    // Get all current fields BEFORE UI update
+    const currentFields = extractFields(editor.innerHTML)
+
+    // Update renameMap: replace oldName with newName in all values
+    const newMap = {}
+    for (const [original, current] of Object.entries(renameMap)) {
+      if (current === oldName) {
         newMap[original] = newName
+      } else {
+        newMap[original] = current
       }
     }
 
@@ -523,8 +536,19 @@ function App() {
     setRenameMap(newMap)
 
     try {
+      // Create mapping from current field names to new field names
+      // This ensures ALL current fields are included, even if unchanged
+      const backendMap = {}
+      currentFields.forEach(field => {
+        if (field === oldName) {
+          backendMap[field] = newName
+        } else {
+          backendMap[field] = field
+        }
+      })
+
       // Save to backend IMMEDIATELY to persist rename
-      await updateTemplate(templateId, newMap, newHtml)
+      await updateTemplate(templateId, backendMap, newHtml)
       setTemplateNeedsUpdate(false) // Reset flag since we just updated
       setError(`✅ Đã đổi tên «${oldName}» → «${newName}»`)
       setTimeout(() => setError(null), 2000)
