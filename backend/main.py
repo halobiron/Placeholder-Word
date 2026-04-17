@@ -1753,7 +1753,19 @@ async def delete_table_column(request: Request):
 
 @app.post("/format-table-cell")
 async def format_table_cell(request: Request):
-    """Format table cell (background color, vertical alignment, borders)"""
+    """Format table cell (background color, vertical/horizontal alignment, borders)
+
+    Supports 9 alignment options (3 horizontal × 3 vertical):
+    - Horizontal: left, center, right
+    - Vertical: top, center, bottom
+
+    Example format_options:
+    {
+        "horizontal_align": "center",
+        "vertical_align": "middle",
+        "background_color": "#FFFF00"
+    }
+    """
     try:
         # Parse form data
         form = await request.form()
@@ -1833,6 +1845,419 @@ async def format_table_cell(request: Request):
         import traceback
         error_detail = f"Format table cell failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /format-table-cell ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/add-paragraph")
+async def add_paragraph(request: Request):
+    """Thêm paragraph mới vào template
+
+    Args:
+        template_id: Template ID
+        block_index: Block index của paragraph phía trên (sẽ thêm paragraph mới sau đó)
+        position: "after" (thêm sau block), "end" (thêm cuối document)
+        text: Nội dung text cho paragraph mới (optional)
+        table_index: Index của table (nếu thêm paragraph trong table cell)
+        row_index: Row index của table cell
+        col_index: Column index của table cell
+        para_in_cell: Paragraph index trong cell (nếu thêm sau một paragraph cụ thể trong cell)
+
+    Returns:
+        Updated template với new paragraph và HTML preview
+    """
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        block_index = form.get("block_index")
+        position = form.get("position", "after")
+        text = form.get("text", "")
+        table_index = form.get("table_index")
+        row_index = form.get("row_index")
+        col_index = form.get("col_index")
+        para_in_cell = form.get("para_in_cell")
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+
+        # Convert parameters to appropriate types
+        try:
+            if block_index:
+                block_index = int(block_index)
+            if table_index:
+                table_index = int(table_index)
+            if row_index:
+                row_index = int(row_index)
+            if col_index:
+                col_index = int(col_index)
+            if para_in_cell:
+                para_in_cell = int(para_in_cell)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid numeric parameters")
+
+        # Validate position
+        if position not in ["after", "end"]:
+            raise HTTPException(status_code=400, detail="position must be 'after' or 'end'")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        success = False
+
+        # Case 1: Add paragraph within a table cell
+        if table_index is not None and row_index is not None and col_index is not None:
+            # Add paragraph in table cell
+            success = editor.add_paragraph_in_table_cell(
+                table_index, row_index, col_index,
+                text, para_in_cell
+            )
+        # Case 2: Add paragraph after a specific block
+        elif block_index is not None and position == "after":
+            # Get paragraph index from block index
+            para_index = editor.get_paragraph_index_from_block(block_index)
+
+            if para_index is not None:
+                # Find target paragraph
+                target_paragraph = None
+                for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
+                    if idx == para_index:
+                        target_paragraph = para
+                        break
+
+                if target_paragraph:
+                    # Insert new paragraph after target
+                    editor.insert_paragraph_after(target_paragraph, text)
+                    success = True
+            else:
+                raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
+        # Case 3: Add paragraph at end of document
+        elif position == "end":
+            editor.add_paragraph_at_end(text)
+            success = True
+
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to add paragraph")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "field_count": len(fields),
+            "html_preview": html_preview,
+            "operation": "add_paragraph",
+            "block_index": block_index,
+            "position": position,
+            "text": text
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Add paragraph failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /add-paragraph ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/delete-paragraph")
+async def delete_paragraph(request: Request):
+    """Xóa paragraph khỏi template
+
+    Args:
+        template_id: Template ID
+        block_index: Block index của paragraph cần xóa
+        table_index: Index của table (nếu xóa paragraph trong table cell)
+        row_index: Row index của table cell
+        col_index: Column index của table cell
+        para_in_cell: Paragraph index trong cell (nếu xóa paragraph cụ thể trong cell)
+
+    Returns:
+        Updated template sau khi xóa và HTML preview
+    """
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        block_index = form.get("block_index")
+        table_index = form.get("table_index")
+        row_index = form.get("row_index")
+        col_index = form.get("col_index")
+        para_in_cell = form.get("para_in_cell")
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if block_index is None:
+            raise HTTPException(status_code=400, detail="block_index is required")
+
+        # Convert parameters to appropriate types
+        try:
+            block_index = int(block_index)
+            if table_index:
+                table_index = int(table_index)
+            if row_index:
+                row_index = int(row_index)
+            if col_index:
+                col_index = int(col_index)
+            if para_in_cell:
+                para_in_cell = int(para_in_cell)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid numeric parameters")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        success = False
+
+        # Case 1: Delete paragraph within a table cell
+        if table_index is not None and row_index is not None and col_index is not None:
+            # Get the cell
+            if table_index < len(editor.doc.tables):
+                table = editor.doc.tables[table_index]
+                if row_index < len(table.rows):
+                    row = table.rows[row_index]
+                    if col_index < len(row.cells):
+                        cell = row.cells[col_index]
+
+                        # Delete paragraph at index
+                        if para_in_cell is not None and para_in_cell < len(cell.paragraphs):
+                            para_to_delete = cell.paragraphs[para_in_cell]
+                            success = editor.delete_paragraph(para_to_delete)
+        # Case 2: Delete regular paragraph
+        else:
+            # Get paragraph index from block index
+            para_index = editor.get_paragraph_index_from_block(block_index)
+
+            if para_index is not None:
+                # Find target paragraph
+                target_paragraph = None
+                for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
+                    if idx == para_index:
+                        target_paragraph = para
+                        break
+
+                if target_paragraph:
+                    # Delete the paragraph
+                    success = editor.delete_paragraph(target_paragraph)
+
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to delete paragraph")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "field_count": len(fields),
+            "html_preview": html_preview,
+            "operation": "delete_paragraph",
+            "block_index": block_index
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Delete paragraph failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /delete-paragraph ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/delete-multiple-paragraphs")
+async def delete_multiple_paragraphs(request: Request):
+    """Xóa nhiều paragraphs cùng lúc khỏi template
+
+    Args:
+        template_id: Template ID
+        blocks: JSON string của danh sách blocks cần xóa
+              Format: [{"block_index": int, "table_index": int|None, "row_index": int|None,
+                       "col_index": int|None, "para_in_cell": int|None}]
+
+    Returns:
+        Updated template sau khi xóa và HTML preview
+    """
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        blocks_str = form.get("blocks")
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if not blocks_str:
+            raise HTTPException(status_code=400, detail="blocks is required")
+
+        # Parse blocks JSON
+        try:
+            import json
+            blocks = json.loads(blocks_str)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid blocks JSON: {str(e)}")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Sort blocks by index in descending order to avoid index shifting issues
+        # When deleting, we should delete from highest index to lowest index
+        blocks_with_indices = []
+
+        for block_data in blocks:
+            block_index = block_data.get("block_index")
+            table_index = block_data.get("table_index")
+            row_index = block_data.get("row_index")
+            col_index = block_data.get("col_index")
+            para_in_cell = block_data.get("para_in_cell")
+
+            # Convert to int
+            try:
+                block_index = int(block_index) if block_index is not None else None
+                table_index = int(table_index) if table_index is not None else None
+                row_index = int(row_index) if row_index is not None else None
+                col_index = int(col_index) if col_index is not None else None
+                para_in_cell = int(para_in_cell) if para_in_cell is not None else None
+            except ValueError:
+                continue  # Skip invalid blocks
+
+            # Determine the document paragraph index for each block
+            if table_index is not None and row_index is not None and col_index is not None:
+                # Table cell paragraph - use para_in_cell directly
+                sort_key = (1000000, table_index, row_index, col_index, para_in_cell or 0)
+                blocks_with_indices.append({
+                    "sort_key": sort_key,
+                    "block_index": block_index,
+                    "table_index": table_index,
+                    "row_index": row_index,
+                    "col_index": col_index,
+                    "para_in_cell": para_in_cell,
+                    "is_table": True
+                })
+            else:
+                # Regular paragraph - get paragraph index from block index
+                para_index = editor.get_paragraph_index_from_block(block_index)
+                if para_index is not None:
+                    sort_key = (0, para_index)
+                    blocks_with_indices.append({
+                        "sort_key": sort_key,
+                        "block_index": block_index,
+                        "para_index": para_index,
+                        "is_table": False
+                    })
+
+        # Sort by sort_key in descending order (delete from highest index first)
+        blocks_with_indices.sort(key=lambda x: x["sort_key"], reverse=True)
+
+        # Delete paragraphs in descending order
+        deleted_count = 0
+        for block_data in blocks_with_indices:
+            try:
+                if block_data["is_table"]:
+                    # Delete table cell paragraph
+                    table_index = block_data["table_index"]
+                    row_index = block_data["row_index"]
+                    col_index = block_data["col_index"]
+                    para_in_cell = block_data["para_in_cell"]
+
+                    if (table_index < len(editor.doc.tables) and
+                        row_index < len(editor.doc.tables[table_index].rows) and
+                        col_index < len(editor.doc.tables[table_index].rows[row_index].cells)):
+
+                        cell = editor.doc.tables[table_index].rows[row_index].cells[col_index]
+
+                        if para_in_cell is not None and para_in_cell < len(cell.paragraphs):
+                            para_to_delete = cell.paragraphs[para_in_cell]
+                            success = editor.delete_paragraph(para_to_delete)
+                            if success:
+                                deleted_count += 1
+                else:
+                    # Delete regular paragraph
+                    para_index = block_data["para_index"]
+
+                    # Find the paragraph at this index
+                    target_paragraph = None
+                    for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
+                        if idx == para_index:
+                            target_paragraph = para
+                            break
+
+                    if target_paragraph:
+                        success = editor.delete_paragraph(target_paragraph)
+                        if success:
+                            deleted_count += 1
+            except Exception as e:
+                print(f"Error deleting block {block_data}: {e}")
+                continue  # Continue with other blocks even if one fails
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "field_count": len(fields),
+            "html_preview": html_preview,
+            "operation": "delete_multiple_paragraphs",
+            "deleted_count": deleted_count
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Delete multiple paragraphs failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /delete-multiple-paragraphs ERROR ===")
         print(error_detail)
         print(f"=== END ERROR ===")
         raise HTTPException(status_code=500, detail=error_detail)

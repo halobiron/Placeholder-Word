@@ -49,7 +49,12 @@
       "Bash(curl -s http://localhost:8000/)",
       "Bash(curl -s \"http://localhost:8000/template-info/079eda8c-e12c-473a-8d51-d7b4fde1c135\" grep -o 'data-table-index[^ >]*' /tmp/response.html)",
       "Bash(timeout 5 uvicorn main:app --port 8000)",
-      "Bash(uvicorn main:app:*)"
+      "Bash(uvicorn main:app:*)",
+      "Bash(cp:*)",
+      "Bash(curl -X POST http://localhost:8000/delete-line -F template_id=1c36b319-2937-4e2a-b7ff-68becc8789d9 -F 'line_text=Test delete' -F location=document -v)",
+      "Bash(lsof -ti:5173)",
+      "Bash(curl -s http://localhost:5173)",
+      "Bash(echo \"Frontend started with PID: $!\")"
     ]
   },
   "enabledPlugins": {

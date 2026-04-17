@@ -307,7 +307,35 @@ class DocxFullEditor:
         Returns:
             True if found and replaced, False otherwise
         """
+        # Special case: Deleting empty paragraph (old_text is empty or whitespace-only)
+        # CRITICAL FIX: Check old_text BEFORE normalization to handle &nbsp; and spaces correctly
+        if old_text is None or (isinstance(old_text, str) and not old_text.strip()):
+            print(f"[DEBUG] Handling empty/whitespace old_text: repr={repr(old_text)}")
+            if paragraph_index is not None:
+                # Find the target paragraph and clear its content
+                for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+                    if p_idx == paragraph_index:
+                        # Clear all runs in this paragraph
+                        for run in paragraph.runs:
+                            run.text = ""
+                        print(f"[DEBUG] Cleared paragraph {paragraph_index}")
+                        return True
+            return False
+
+        # Check if normalized text is empty (happens with &nbsp;, multiple spaces, etc.)
         search_text_normalized = self._normalize_text(old_text)
+        if not search_text_normalized:
+            print(f"[DEBUG] Normalized text is empty, treating as deletion: repr(old_text)={repr(old_text)}")
+            if paragraph_index is not None:
+                # Find the target paragraph and clear its content
+                for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+                    if p_idx == paragraph_index:
+                        # Clear all runs in this paragraph
+                        for run in paragraph.runs:
+                            run.text = ""
+                        print(f"[DEBUG] Cleared paragraph {paragraph_index} (normalized was empty)")
+                        return True
+            return False
 
         # Debug: Show what we're looking for
         print(f"[DEBUG] Looking for: '{old_text}'")
@@ -1332,9 +1360,156 @@ class DocxFullEditor:
 
         return False
 
+    def delete_paragraph(self, paragraph):
+        """
+        Xóa hoàn toàn một paragraph khỏi document
+
+        Args:
+            paragraph: Paragraph object cần xóa
+
+        Returns:
+            True nếu thành công, False nếu thất bại
+        """
+        try:
+            from docx.oxml import OxmlElement
+
+            # Lấy paragraph element
+            p_element = paragraph._element
+            parent = p_element.getparent()
+
+            if parent is not None:
+                # Xóa paragraph element khỏi parent
+                parent.remove(p_element)
+                return True
+
+            return False
+        except Exception as e:
+            print(f"Error deleting paragraph: {e}")
+            return False
+
     def add_paragraph_at_end(self, text: str):
         """Thêm paragraph ở cuối document"""
         self.doc.add_paragraph(text)
+
+    def insert_paragraph_after(self, target_paragraph, text: str = ""):
+        """
+        Thêm paragraph mới sau một paragraph cụ thể
+
+        Args:
+            target_paragraph: Paragraph object để thêm mới sau nó
+            text: Nội dung text cho paragraph mới
+
+        Returns:
+            Paragraph object mới được tạo
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        import copy
+
+        # Lấy paragraph element
+        target_p_element = target_paragraph._p
+        parent = target_p_element.getparent()
+
+        # Tạo new paragraph element
+        new_p = OxmlElement('w:p')
+
+        # Copy paragraph properties từ target paragraph (indentation, alignment, etc.)
+        pPr = target_p_element.find(f"{self.w_ns}pPr")
+        if pPr is not None:
+            new_p.append(copy.deepcopy(pPr))
+
+        # Tạo run với text nếu có
+        if text:
+            new_r = OxmlElement('w:r')
+            new_t = OxmlElement('w:t')
+            new_t.set(qn('xml:space'), 'preserve')
+            new_t.text = text
+            new_r.append(new_t)
+            new_p.append(new_r)
+
+        # Insert new paragraph sau target paragraph
+        parent_index = list(parent).index(target_p_element)
+        parent.insert(parent_index + 1, new_p)
+
+        return new_p
+
+    def add_paragraph_in_table_cell(
+        self,
+        table_index: int,
+        row_index: int,
+        col_index: int,
+        text: str = "",
+        after_para_index: int = None
+    ):
+        """
+        Thêm paragraph mới vào table cell
+
+        Args:
+            table_index: Index của table
+            row_index: Row index trong table
+            col_index: Column index trong table
+            text: Nội dung text cho paragraph mới
+            after_para_index: Thêm sau paragraph index nào trong cell (None = thêm cuối)
+
+        Returns:
+            True nếu thành công, False nếu thất bại
+        """
+        if table_index >= len(self.doc.tables):
+            return False
+
+        table = self.doc.tables[table_index]
+        if row_index >= len(table.rows):
+            return False
+
+        row = table.rows[row_index]
+        if col_index >= len(row.cells):
+            return False
+
+        cell = row.cells[col_index]
+
+        try:
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+            import copy
+
+            if after_para_index is not None and after_para_index < len(cell.paragraphs):
+                # Thêm sau một paragraph cụ thể trong cell
+                target_para = cell.paragraphs[after_para_index]
+                target_p_element = target_para._p
+                parent = target_p_element.getparent()
+
+                # Tạo new paragraph element
+                new_p = OxmlElement('w:p')
+
+                # Copy paragraph properties từ target paragraph
+                pPr = target_p_element.find(f"{self.w_ns}pPr")
+                if pPr is not None:
+                    new_p.append(copy.deepcopy(pPr))
+
+                # Tạo run với text nếu có
+                if text:
+                    new_r = OxmlElement('w:r')
+                    new_t = OxmlElement('w:t')
+                    new_t.set(qn('xml:space'), 'preserve')
+                    new_t.text = text
+                    new_r.append(new_t)
+                    new_p.append(new_r)
+
+                # Insert new paragraph sau target paragraph
+                parent_index = list(parent).index(target_p_element)
+                parent.insert(parent_index + 1, new_p)
+            else:
+                # Thêm vào cuối cell
+                if text:
+                    new_para = cell.add_paragraph(text)
+                else:
+                    new_para = cell.add_paragraph()
+
+            return True
+
+        except Exception as e:
+            print(f"Error adding paragraph in table cell: {e}")
+            return False
 
     def add_placeholder(self, field_name: str, position: str = "end", after_text: str = None):
         """
@@ -1569,27 +1744,38 @@ class DocxFullEditor:
             tcW.set(qn('w:type'), 'auto')
             tcPr.append(tcW)
 
+            # Tạo vAlign (vertical alignment) - center để text nằm giữa ô
+            vAlign = OxmlElement('w:vAlign')
+            vAlign.set(qn('w:val'), 'center')
+            tcPr.append(vAlign)
+
             tc.append(tcPr)
 
-            # Tạo p element (paragraph)
-            p = OxmlElement('w:p')
-            p.set(qn('w:rsidR'), '00D9489C')
-            p.set(qn('w:rsidRDefault'), '00D9489C')
+            # Tạo multiple paragraphs để user có thể click vào từng dòng riêng lẻ
+            # Tương tự như ô gốc có 6 paragraphs (1 text + 4 empty + 1 text)
+            for para_idx in range(6):
+                # Tạo p element (paragraph)
+                p = OxmlElement('w:p')
+                p.set(qn('w:rsidR'), '00D9489C')
+                p.set(qn('w:rsidRDefault'), '00D9489C')
 
-            # Tạo pPr (paragraph properties)
-            pPr = OxmlElement('w:pPr')
-            p.append(pPr)
+                # Tạo pPr (paragraph properties)
+                pPr = OxmlElement('w:pPr')
+                p.append(pPr)
 
-            # CRITICAL FIX: Tạo Run và Text node để ô có thể nhận nội dung
-            # Không có Run/Text → ô trống và không thể edit
-            r = OxmlElement('w:r')
-            t = OxmlElement('w:t')
-            t.set(qn('xml:space'), 'preserve')
-            t.text = ""  # Empty text initially, but can be filled later
-            r.append(t)
-            p.append(r)
+                # Chỉ paragraph đầu tiên có Run/Text để có thể nhập liệu
+                # Các paragraph khác để trống để user có thể click vào từng dòng
+                if para_idx == 0:
+                    # CRITICAL FIX: Tạo Run và Text node để ô có thể nhận nội dung
+                    # Không có Run/Text → ô trống và không thể edit
+                    r = OxmlElement('w:r')
+                    t = OxmlElement('w:t')
+                    t.set(qn('xml:space'), 'preserve')
+                    t.text = ""  # Empty text initially, but can be filled later
+                    r.append(t)
+                    p.append(r)
 
-            tc.append(p)
+                tc.append(p)
 
             # Chèn cell vào vị trí cụ thể
             if col_index >= len(row.cells):
@@ -1628,7 +1814,12 @@ class DocxFullEditor:
         col_index: int,
         format_options: dict
     ):
-        """Format table cell (background color, vertical alignment, borders)"""
+        """Format table cell (background color, vertical alignment, horizontal alignment, borders)
+
+        Supports 9 alignment options (3 horizontal × 3 vertical):
+        - Horizontal: left, center, right
+        - Vertical: top, center, bottom
+        """
         if table_index >= len(self.doc.tables):
             return False
 
@@ -1680,6 +1871,27 @@ class DocxFullEditor:
                         tc_pr.append(v_align_element)
 
                     v_align_element.set(qn('w:val'), v_align)
+
+            # Horizontal alignment (NEW)
+            if 'horizontal_align' in format_options:
+                h_align = format_options['horizontal_align']
+                if h_align in ['left', 'center', 'right']:
+                    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+                    from docx.oxml import OxmlElement
+                    from docx.oxml.ns import qn
+
+                    # Map alignment string to WD_PARAGRAPH_ALIGNMENT enum
+                    alignment_map = {
+                        'left': WD_PARAGRAPH_ALIGNMENT.LEFT,
+                        'center': WD_PARAGRAPH_ALIGNMENT.CENTER,
+                        'right': WD_PARAGRAPH_ALIGNMENT.RIGHT
+                    }
+
+                    alignment_value = alignment_map.get(h_align)
+                    if alignment_value is not None:
+                        # Apply horizontal alignment to ALL paragraphs in the cell
+                        for para in cell.paragraphs:
+                            para.alignment = alignment_value
 
             # Borders (optional)
             if 'borders' in format_options:

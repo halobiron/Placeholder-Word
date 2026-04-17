@@ -684,6 +684,16 @@ JSON:"""
 
                     if target_para:
                         if self._inject_placeholder_in_paragraph(target_para, placeholder_name, context_hint, position):
+                            # Set vertical alignment to center for table cell
+                            from docx.oxml import OxmlElement
+                            from docx.oxml.ns import qn
+                            tc_pr = cell._element.get_or_add_tcPr()
+                            v_align = tc_pr.find(qn('w:vAlign'))
+                            if v_align is None:
+                                v_align = OxmlElement('w:vAlign')
+                                tc_pr.append(v_align)
+                            v_align.set(qn('w:val'), 'center')
+
                             doc.save(docx_path)
                             print(f"✓ INJECTION SUCCESSFUL")
                             return True
@@ -1589,10 +1599,54 @@ JSON:"""
 
                     if not para_content.strip():
                         # Empty paragraph in cell - preserve it but make it clickable
-                        cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="min-height: 1.2em; margin: 2px 0; cursor: crosshair;" title="Click để thêm placeholder">&nbsp;</p>')
+                        # CRITICAL FIX: Extract and preserve alignment even for empty paragraphs
+                        para_style = "min-height: 1.2em; margin: 2px 0; cursor: crosshair;"
+
+                        # Extract horizontal alignment from paragraph properties (NEW - for empty paragraphs too)
+                        try:
+                            pPr = para._p.find(f"{self.w_ns}pPr")
+                            if pPr is not None:
+                                jc = pPr.find(f"{self.w_ns}jc")
+                                if jc is not None:
+                                    jc_val = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "left")
+                                    # Map Word alignment to CSS
+                                    align_map = {
+                                        "left": "left",
+                                        "center": "center",
+                                        "right": "right",
+                                        "both": "justify"
+                                    }
+                                    css_align = align_map.get(jc_val, "left")
+                                    para_style = f"min-height: 1.2em; margin: 2px 0; text-align: {css_align}; cursor: crosshair;"
+                                    print(f"[_process_table_to_html] Empty Para[{para_index}] horizontal-align: {css_align} (PRESERVED)")
+                        except Exception as e:
+                            print(f"[_process_table_to_html] Error extracting empty paragraph alignment: {e}")
+
+                        cell_paragraphs_html.append(f'<p {para_metadata} class="cell-paragraph" style="{para_style}" title="Click để thêm placeholder">&nbsp;</p>')
                     else:
                         # Non-empty paragraph - wrap in p tag with metadata
                         para_style = "margin: 2px 0;"
+
+                        # Extract horizontal alignment from paragraph properties (NEW)
+                        try:
+                            pPr = para._p.find(f"{self.w_ns}pPr")
+                            if pPr is not None:
+                                jc = pPr.find(f"{self.w_ns}jc")
+                                if jc is not None:
+                                    jc_val = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "left")
+                                    # Map Word alignment to CSS
+                                    align_map = {
+                                        "left": "left",
+                                        "center": "center",
+                                        "right": "right",
+                                        "both": "justify"
+                                    }
+                                    css_align = align_map.get(jc_val, "left")
+                                    para_style += f" text-align: {css_align};"
+                                    print(f"[_process_table_to_html] Para[{para_index}] horizontal-align: {css_align}")
+                        except Exception as e:
+                            print(f"[_process_table_to_html] Error extracting paragraph alignment: {e}")
+
                         import re
                         text_content = re.sub(r'<[^>]+>', '', para_content)
                         if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
@@ -1605,19 +1659,30 @@ JSON:"""
 
                 tag = "th" if row_idx == 0 else "td"
 
-                # Extract cell background color from tcPr/shd element
+                # Extract cell formatting from tcPr (table cell properties)
                 cell_style = "border: 1px solid #ccc; padding: 5px;"
                 try:
                     tcPr = cell._element.find(f"{self.w_ns}tcPr")
                     if tcPr is not None:
+                        # Background color
                         shd = tcPr.find(f"{self.w_ns}shd")
                         if shd is not None:
                             fill = shd.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}fill")
                             if fill and fill != "auto":
                                 cell_style += f" background-color: #{fill};"
                                 print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] background: #{fill}")
+
+                        # Vertical alignment (NEW)
+                        v_align = tcPr.find(f"{self.w_ns}vAlign")
+                        if v_align is not None:
+                            v_align_val = v_align.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "center")
+                            # Map Word values to CSS
+                            v_align_map = {"top": "top", "center": "middle", "bottom": "bottom"}
+                            css_v_align = v_align_map.get(v_align_val, "middle")
+                            cell_style += f" vertical-align: {css_v_align};"
+                            print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] vertical-align: {css_v_align}")
                 except Exception as e:
-                    print(f"[_process_table_to_html] Error extracting cell color: {e}")
+                    print(f"[_process_table_to_html] Error extracting cell formatting: {e}")
 
                 # Add data-block-index for this cell (matching extract_structured_content)
                 table_html.append('<{0} data-block-index="{1}" data-type="table_cell" data-table-index="{4}" data-row="{2}" data-col="{3}" style="{5}">{6}</{0}>'.format(

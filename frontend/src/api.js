@@ -345,3 +345,83 @@ export const formatTableCell = async (templateId, tableIndex, rowIndex, colIndex
   })
   return response.data
 }
+
+export const addParagraph = async (templateId, blockIndex, position = 'after', text = '', tableIndex = null, rowIndex = null, colIndex = null, paraInCell = null) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+
+  if (blockIndex !== null && blockIndex !== undefined) {
+    formData.append('block_index', blockIndex)
+  }
+
+  formData.append('position', position)
+
+  if (text) {
+    formData.append('text', text)
+  }
+
+  if (tableIndex !== null && tableIndex !== undefined) {
+    formData.append('table_index', tableIndex)
+  }
+
+  if (rowIndex !== null && rowIndex !== undefined) {
+    formData.append('row_index', rowIndex)
+  }
+
+  if (colIndex !== null && colIndex !== undefined) {
+    formData.append('col_index', colIndex)
+  }
+
+  if (paraInCell !== null && paraInCell !== undefined) {
+    formData.append('para_in_cell', paraInCell)
+  }
+
+  const response = await axios.post(`${API_BASE}/add-paragraph`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const deleteParagraph = async (templateId, blockIndex, tableIndex = null, rowIndex = null, colIndex = null, paraInCell = null) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('block_index', blockIndex)
+
+  if (tableIndex !== null && tableIndex !== undefined) {
+    formData.append('table_index', tableIndex)
+  }
+
+  if (rowIndex !== null && rowIndex !== undefined) {
+    formData.append('row_index', rowIndex)
+  }
+
+  if (colIndex !== null && colIndex !== undefined) {
+    formData.append('col_index', colIndex)
+  }
+
+  if (paraInCell !== null && paraInCell !== undefined) {
+    formData.append('para_in_cell', paraInCell)
+  }
+
+  const response = await axios.post(`${API_BASE}/delete-paragraph`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const deleteMultipleParagraphs = async (templateId, blocks) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('blocks', JSON.stringify(blocks))
+
+  const response = await axios.post(`${API_BASE}/delete-multiple-paragraphs`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}

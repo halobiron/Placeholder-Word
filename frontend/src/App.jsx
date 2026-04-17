@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -45,7 +45,8 @@ function App() {
   const [showCellFormatDialog, setShowCellFormatDialog] = useState(false)
   const [cellFormatOptions, setCellFormatOptions] = useState({
     background_color: '#ffffff',
-    vertical_align: 'top'
+    vertical_align: 'top',
+    horizontal_align: 'left'
   })
 
   // Extract placeholders from HTML
@@ -66,7 +67,21 @@ function App() {
     const temp = document.createElement('div')
     temp.innerHTML = html
     const block = temp.querySelector(`[data-block-index="${blockIndex}"]`)
-    return block ? block.textContent : ''
+    if (!block) return ''
+
+    // CRITICAL FIX: Preserve non-breaking spaces (&nbsp;) as \u00a0
+    let text = block.textContent
+
+    // Check if original HTML had &nbsp; and preserve it as non-breaking space
+    const originalHtml = block.innerHTML
+    if (originalHtml.includes('&nbsp;') || originalHtml.includes('\u00a0')) {
+      // If the text is only whitespace, use non-breaking spaces
+      if (text.trim() === '' && text.length > 0) {
+        text = text.replace(/ /g, '\u00a0')
+      }
+    }
+
+    return text
   }
 
   // Helper: Get current text from a specific block
@@ -75,7 +90,21 @@ function App() {
     const temp = document.createElement('div')
     temp.innerHTML = html
     const block = temp.querySelector(`[data-block-index="${blockIndex}"]`)
-    return block ? block.textContent : ''
+    if (!block) return ''
+
+    // CRITICAL FIX: Preserve non-breaking spaces (&nbsp;) as \u00a0
+    let text = block.textContent
+
+    // Check if original HTML had &nbsp; and preserve it as non-breaking space
+    const originalHtml = block.innerHTML
+    if (originalHtml.includes('&nbsp;') || originalHtml.includes('\u00a0')) {
+      // If the text is only whitespace, use non-breaking spaces
+      if (text.trim() === '' && text.length > 0) {
+        text = text.replace(/ /g, '\u00a0')
+      }
+    }
+
+    return text
   }
 
   // Helper: Get current block index from selection
@@ -95,7 +124,25 @@ function App() {
 
     // Find the specific paragraph in the table cell
     const paragraph = temp.querySelector(`[data-cell-block-index="${cellBlockIndex}"][data-para-in-cell="${paraInCell}"]`)
-    return paragraph ? paragraph.textContent : ''
+    if (!paragraph) return ''
+
+    // CRITICAL FIX: Preserve non-breaking spaces (&nbsp;) as \u00a0
+    // textContent converts &nbsp; to regular space, but DOCX uses non-breaking space
+    // So we need to preserve the non-breaking space character
+    let text = paragraph.textContent
+
+    // Check if original HTML had &nbsp; and preserve it as non-breaking space
+    const originalHtml = paragraph.innerHTML
+    if (originalHtml.includes('&nbsp;') || originalHtml.includes('\u00a0')) {
+      // Replace regular spaces at positions where &nbsp; was with non-breaking spaces
+      // This is a heuristic: if the text is only spaces, they were probably &nbsp;
+      if (text.trim() === '' && text.length > 0) {
+        // All whitespace - use non-breaking spaces
+        text = text.replace(/ /g, '\u00a0')
+      }
+    }
+
+    return text
   }
 
   // Debounced text update function
@@ -395,10 +442,27 @@ function App() {
     const refreshAfterTextUpdate = async () => {
       if (templateNeedsUpdate && templateId) {
         try {
+          // CRITICAL FIX: Save scroll position before refreshing
+          const editor = document.getElementById('document-editor')
+          const savedScrollTop = editor ? editor.scrollTop : 0
+          const savedScrollLeft = editor ? editor.scrollLeft : 0
+
+          console.log('[DEBUG] Refresh: Saved scroll position:', { scrollTop: savedScrollTop, scrollLeft: savedScrollLeft })
+
           const info = await getTemplateInfo(templateId)
           setEditorHtml(info.html_preview)
           setFields(info.fields)
           setTemplateNeedsUpdate(false)
+
+          // Restore scroll position after React re-renders
+          setTimeout(() => {
+            const editorAfter = document.getElementById('document-editor')
+            if (editorAfter) {
+              editorAfter.scrollTop = savedScrollTop
+              editorAfter.scrollLeft = savedScrollLeft
+              console.log('[DEBUG] Refresh: Restored scroll position:', { scrollTop: editorAfter.scrollTop, scrollLeft: editorAfter.scrollLeft })
+            }
+          }, 0)
         } catch (err) {
           console.error('Failed to refresh template:', err)
         }
@@ -1469,6 +1533,320 @@ function App() {
                   className="border border-gray-300 rounded-lg p-6 bg-white min-h-[400px] overflow-auto focus:ring-2 focus:ring-blue-500"
                   style={{ maxHeight: '600px' }}
                   suppressContentEditableWarning={true}
+                  onKeyDown={async (e) => {
+                    // Detect Enter key to create new paragraph
+                    if (e.key === 'Enter' && !e.shiftKey && !isAddMode) {
+                      const selection = window.getSelection()
+                      if (selection.rangeCount > 0) {
+                        const range = selection.getRangeAt(0)
+                        const startElement = range.startContainer.nodeType === Node.TEXT_NODE
+                          ? range.startContainer.parentElement
+                          : range.startContainer
+
+                        // Check if we're in a table cell paragraph or regular block
+                        const cellParagraph = startElement?.closest('.cell-paragraph')
+                        const editedBlock = startElement?.closest('[data-block-index]')
+
+                        if (cellParagraph || editedBlock) {
+                          e.preventDefault()
+
+                          try {
+                            // Determine parameters for addParagraph API
+                            let params = {
+                              position: 'after',
+                              text: ''
+                            }
+
+                            if (cellParagraph) {
+                              // In table cell
+                              const cellBlock = cellParagraph?.closest('[data-block-index]')
+                              if (cellBlock) {
+                                const cellBlockIndex = parseInt(cellBlock.getAttribute('data-block-index'))
+                                const paraInCell = parseInt(cellParagraph.getAttribute('data-para-in-cell'))
+                                const tableIndex = parseInt(cellBlock.getAttribute('data-table-index') || '0')
+                                const row = parseInt(cellBlock.getAttribute('data-row'))
+                                const col = parseInt(cellBlock.getAttribute('data-col'))
+
+                                params = {
+                                  ...params,
+                                  blockIndex: cellBlockIndex,
+                                  tableIndex: tableIndex,
+                                  rowIndex: row,
+                                  colIndex: col,
+                                  paraInCell: paraInCell
+                                }
+                              }
+                            } else if (editedBlock) {
+                              // In regular block
+                              const blockIndex = parseInt(editedBlock.getAttribute('data-block-index'))
+                              params = {
+                                ...params,
+                                blockIndex: blockIndex
+                              }
+                            }
+
+                            console.log('[DEBUG] Creating new paragraph with params:', params)
+
+                            // Call API to add paragraph
+                            const result = await addParagraph(
+                              templateId,
+                              params.blockIndex,
+                              params.position,
+                              params.text,
+                              params.tableIndex,
+                              params.rowIndex,
+                              params.colIndex,
+                              params.paraInCell
+                            )
+
+                            // Update UI with new HTML preview
+                            setEditorHtml(result.html_preview)
+                            setFields(result.fields)
+                            setOriginalFields(result.fields)
+
+                            setError('✅ Đã thêm dòng mới thành công!')
+                            setTimeout(() => setError(null), 2000)
+
+                          } catch (err) {
+                            console.error('Failed to add paragraph:', err)
+                            setError('⚠️ Thêm dòng mới thất bại: ' + (err.response?.data?.detail || err.message))
+                            setTimeout(() => setError(null), 3000)
+                          }
+                        }
+                      }
+                    }
+
+                    // Detect Delete/Backspace to remove characters or paragraphs
+                    if ((e.key === 'Delete' || e.key === 'Backspace') && !isAddMode) {
+                      const selection = window.getSelection()
+                      if (selection.rangeCount > 0) {
+                        const range = selection.getRangeAt(0)
+
+                        // Check if user is selecting multiple blocks (not just text)
+                        const isMultipleBlockSelection = () => {
+                          // Get selection boundaries
+                          const startContainer = range.startContainer
+                          const endContainer = range.endContainer
+
+                          // Get block elements for start and end
+                          const startElement = startContainer.nodeType === Node.TEXT_NODE
+                            ? startContainer.parentElement
+                            : startContainer
+                          const endElement = endContainer.nodeType === Node.TEXT_NODE
+                            ? endContainer.parentElement
+                            : endContainer
+
+                          const startBlock = startElement?.closest('[data-block-index], .cell-paragraph')
+                          const endBlock = endElement?.closest('[data-block-index], .cell-paragraph')
+
+                          // If start and end are in different blocks, it's multi-block selection
+                          if (startBlock && endBlock && startBlock !== endBlock) {
+                            return true
+                          }
+
+                          // Check if entire block content is selected
+                          if (startBlock) {
+                            const blockText = startBlock.textContent
+                            const selectedText = selection.toString()
+
+                            // If entire block text is selected (or close to entire)
+                            if (selectedText.length >= blockText.length * 0.9) {
+                              return true
+                            }
+                          }
+
+                          return false
+                        }
+
+                        // Case 1: Delete entire empty paragraph with Backspace/Delete
+                        const isDeletingEmptyParagraph = () => {
+                          const startElement = range.startContainer.nodeType === Node.TEXT_NODE
+                            ? range.startContainer.parentElement
+                            : range.startContainer
+
+                          const cellParagraph = startElement?.closest('.cell-paragraph')
+                          const editedBlock = startElement?.closest('[data-block-index]')
+
+                          // Get current block/paragraph text
+                          let currentText = ''
+                          if (cellParagraph) {
+                            currentText = cellParagraph.textContent?.trim() || ''
+                          } else if (editedBlock) {
+                            currentText = editedBlock.textContent?.trim() || ''
+                          }
+
+                          // If block is empty and cursor is at start/end
+                          const isAtStart = range.startOffset === 0 && range.endOffset === 0
+                          const isAtEnd = range.startOffset === (range.startContainer.length || 0) &&
+                                         range.endOffset === (range.endContainer.length || 0)
+
+                          return currentText === '' && (isAtStart || isAtEnd)
+                        }
+
+                        // Case 2: Multiple block selection - delete all selected blocks
+                        if (isMultipleBlockSelection()) {
+                          e.preventDefault()
+
+                          try {
+                            // Helper function to get all blocks in selection
+                            const getBlocksInSelection = () => {
+                              const blocks = []
+                              const editor = document.getElementById('document-editor')
+                              if (!editor) return blocks
+
+                              // Get all blocks within the selection range
+                              const allBlocks = editor.querySelectorAll('[data-block-index], .cell-paragraph')
+
+                              allBlocks.forEach(block => {
+                                // Check if this block intersects with selection
+                                const blockRange = document.createRange()
+                                blockRange.selectNodeContents(block)
+
+                                const intersects = range.intersectsNode(block)
+                                if (intersects) {
+                                  // Get block metadata
+                                  if (block.classList.contains('cell-paragraph')) {
+                                    // Table cell paragraph
+                                    const cellBlock = block.closest('[data-block-index]')
+                                    if (cellBlock) {
+                                      blocks.push({
+                                        type: 'table_cell',
+                                        blockIndex: parseInt(cellBlock.getAttribute('data-block-index')),
+                                        paraInCell: parseInt(block.getAttribute('data-para-in-cell')),
+                                        tableIndex: parseInt(cellBlock.getAttribute('data-table-index') || '0'),
+                                        rowIndex: parseInt(cellBlock.getAttribute('data-row')),
+                                        colIndex: parseInt(cellBlock.getAttribute('data-col')),
+                                        text: block.textContent?.trim() || ''
+                                      })
+                                    }
+                                  } else if (block.hasAttribute('data-block-index')) {
+                                    // Regular paragraph block
+                                    blocks.push({
+                                      type: 'paragraph',
+                                      blockIndex: parseInt(block.getAttribute('data-block-index')),
+                                      text: block.textContent?.trim() || ''
+                                    })
+                                  }
+                                }
+                              })
+
+                              return blocks
+                            }
+
+                            const selectedBlocks = getBlocksInSelection()
+
+                            if (selectedBlocks.length > 0) {
+                              // Prepare blocks data for API
+                              const blocksData = selectedBlocks.map(block => {
+                                if (block.type === 'table_cell') {
+                                  return {
+                                    block_index: block.blockIndex,
+                                    table_index: block.tableIndex,
+                                    row_index: block.rowIndex,
+                                    col_index: block.colIndex,
+                                    para_in_cell: block.paraInCell
+                                  }
+                                } else {
+                                  return {
+                                    block_index: block.blockIndex
+                                  }
+                                }
+                              })
+
+                              console.log('[DEBUG] Deleting multiple paragraphs:', blocksData)
+
+                              // Call API to delete multiple paragraphs
+                              const result = await deleteMultipleParagraphs(
+                                templateId,
+                                blocksData
+                              )
+
+                              // Update UI with new HTML preview
+                              setEditorHtml(result.html_preview)
+                              setFields(result.fields)
+                              setOriginalFields(result.fields)
+
+                              setError(`✅ Đã xóa ${result.deleted_count} dòng!`)
+                              setTimeout(() => setError(null), 2000)
+                            }
+
+                          } catch (err) {
+                            console.error('Failed to delete paragraphs:', err)
+                            setError('⚠️ Xóa dòng thất bại: ' + (err.response?.data?.detail || err.message))
+                            setTimeout(() => setError(null), 3000)
+                          }
+                        }
+                        // Case 3: Delete empty single paragraph
+                        else if (isDeletingEmptyParagraph()) {
+                          e.preventDefault()
+
+                          try {
+                            const startElement = range.startContainer.nodeType === Node.TEXT_NODE
+                              ? range.startContainer.parentElement
+                              : range.startContainer
+
+                            const cellParagraph = startElement?.closest('.cell-paragraph')
+                            const editedBlock = startElement?.closest('[data-block-index]')
+
+                            let params = {
+                              blockIndex: null
+                            }
+
+                            if (cellParagraph) {
+                              const cellBlock = cellParagraph?.closest('[data-block-index]')
+                              if (cellBlock) {
+                                const cellBlockIndex = parseInt(cellBlock.getAttribute('data-block-index'))
+                                const paraInCell = parseInt(cellParagraph.getAttribute('data-para-in-cell'))
+                                const tableIndex = parseInt(cellBlock.getAttribute('data-table-index') || '0')
+                                const row = parseInt(cellBlock.getAttribute('data-row'))
+                                const col = parseInt(cellBlock.getAttribute('data-col'))
+
+                                params = {
+                                  ...params,
+                                  blockIndex: cellBlockIndex,
+                                  tableIndex: tableIndex,
+                                  rowIndex: row,
+                                  colIndex: col,
+                                  paraInCell: paraInCell
+                                }
+                              }
+                            } else if (editedBlock) {
+                              const blockIndex = parseInt(editedBlock.getAttribute('data-block-index'))
+                              params = {
+                                ...params,
+                                blockIndex: blockIndex
+                              }
+                            }
+
+                            console.log('[DEBUG] Deleting empty paragraph with params:', params)
+
+                            const result = await deleteParagraph(
+                              templateId,
+                              params.blockIndex,
+                              params.tableIndex,
+                              params.rowIndex,
+                              params.colIndex,
+                              params.paraInCell
+                            )
+
+                            setEditorHtml(result.html_preview)
+                            setFields(result.fields)
+                            setOriginalFields(result.fields)
+
+                            setError('✅ Đã xóa dòng trống!')
+                            setTimeout(() => setError(null), 2000)
+
+                          } catch (err) {
+                            console.error('Failed to delete paragraph:', err)
+                            setError('⚠️ Xóa dòng thất bại: ' + (err.response?.data?.detail || err.message))
+                            setTimeout(() => setError(null), 3000)
+                          }
+                        }
+                        // Case 4: Normal character deletion - let contentEditable handle it
+                        // Don't preventDefault, allow normal delete behavior
+                      }
+                    }
+                  }}
                   onInput={async (e) => {
                     const newHtml = e.target.innerHTML
                     const newFields = extractFields(newHtml)
@@ -1543,28 +1921,121 @@ function App() {
                             return
                           }
 
-                          // Get text from specific paragraph in cell
-                          const originalText = getTextFromCellParagraph(editorHtml, cellBlockIndex, paraInCell)
-                          const newText = getTextFromCellParagraph(newHtml, cellBlockIndex, paraInCell)
+                          // CRITICAL FIX: Check if paragraph count in cell changed (paragraph added/deleted)
+                          const tempDivOld = document.createElement('div')
+                          tempDivOld.innerHTML = editorHtml
+                          const oldCellParas = tempDivOld.querySelectorAll(`[data-block-index="${cellBlockIndex}"] .cell-paragraph`)
 
-                          console.log('[DEBUG] Text comparison:', {
-                            originalText,
-                            newText,
-                            changed: originalText !== newText
+                          const tempDivNew = document.createElement('div')
+                          tempDivNew.innerHTML = newHtml
+                          const newCellParas = tempDivNew.querySelectorAll(`[data-block-index="${cellBlockIndex}"] .cell-paragraph`)
+
+                          console.log('[DEBUG] Paragraph count:', {
+                            old: oldCellParas.length,
+                            new: newCellParas.length,
+                            changed: oldCellParas.length !== newCellParas.length
                           })
 
-                          // Only trigger update if text actually changed
-                          if (originalText !== newText && deletedFields.length === 0) {
-                            console.log('[DEBUG] Calling debouncedUpdateTextInCell with:', {
-                              cellBlockIndex,
-                              paraInCell,
+                          // Track if we need to refresh after processing all changes
+                          let needsRefresh = false
+                          let skipTextUpdates = false // Skip text updates if structure changed significantly
+
+                          // If paragraph count changed, user deleted/added a paragraph
+                          if (oldCellParas.length !== newCellParas.length && deletedFields.length === 0) {
+                            console.log('[DEBUG] Paragraph count changed - processing paragraph deletion/addition')
+
+                            // Find which paragraphs were deleted by comparing para-in-cell indices
+                            const oldIndices = Array.from(oldCellParas).map(p => parseInt(p.getAttribute('data-para-in-cell')))
+                            const newIndices = Array.from(newCellParas).map(p => parseInt(p.getAttribute('data-para-in-cell')))
+                            const deletedIndices = oldIndices.filter(i => !newIndices.includes(i))
+
+                            console.log('[DEBUG] Deleted paragraph indices:', deletedIndices)
+
+                            // Delete each deleted paragraph by clearing its content
+                            for (const deletedParaIndex of deletedIndices) {
+                              try {
+                                // Get the text content before deletion
+                                const deletedText = getTextFromCellParagraph(editorHtml, cellBlockIndex, deletedParaIndex)
+
+                                console.log('[DEBUG] Deleting paragraph:', {
+                                  cellBlockIndex,
+                                  deletedParaIndex,
+                                  deletedText
+                                })
+
+                                // Call backend to delete the paragraph (clear its content)
+                                const formData = new FormData()
+                                formData.append('template_id', templateId)
+                                formData.append('block_index', cellBlockIndex)
+                                formData.append('old_text', deletedText)
+                                formData.append('new_text', '') // Empty to delete
+                                formData.append('edit_type', 'text')
+                                formData.append('para_in_cell', deletedParaIndex)
+
+                                await axios.post(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`, formData, {
+                                  headers: { 'Content-Type': 'multipart/form-data' }
+                                })
+
+                                console.log('[DEBUG] Successfully deleted paragraph', deletedParaIndex)
+                                needsRefresh = true
+                              } catch (err) {
+                                console.error('[DEBUG] Failed to delete paragraph:', err)
+                              }
+                            }
+
+                            // CRITICAL: After deletions, refresh from backend to get correct HTML with preserved alignment
+                            // DON'T use newHtml from contentEditable as it may lose alignment styles
+                            console.log('[DEBUG] Refreshing from backend after paragraph deletions')
+
+                            // Save scroll position before refreshing
+                            const editor = document.getElementById('document-editor')
+                            const savedScrollTop = editor ? editor.scrollTop : 0
+                            const savedScrollLeft = editor ? editor.scrollLeft : 0
+
+                            console.log('[DEBUG] Saved positions:', { scrollTop: savedScrollTop, scrollLeft: savedScrollLeft })
+
+                            // Trigger refresh from backend to get HTML with correct alignment
+                            setTemplateNeedsUpdate(true)
+                            skipTextUpdates = true // Skip individual text updates to avoid conflicts
+
+                            // Restore scroll position after refresh
+                            setTimeout(() => {
+                              const editorAfter = document.getElementById('document-editor')
+                              if (editorAfter) {
+                                editorAfter.scrollTop = savedScrollTop
+                                editorAfter.scrollLeft = savedScrollLeft
+                                console.log('[DEBUG] Restored scroll position:', { scrollTop: editorAfter.scrollTop, scrollLeft: editorAfter.scrollLeft })
+                              }
+                            }, 100) // Wait for refresh to complete
+                          }
+
+                          // Get text from specific paragraph in cell
+                          // Only process if we didn't just do a batch structure update
+                          if (!skipTextUpdates) {
+                            const originalText = getTextFromCellParagraph(editorHtml, cellBlockIndex, paraInCell)
+                            const newText = getTextFromCellParagraph(newHtml, cellBlockIndex, paraInCell)
+
+                            console.log('[DEBUG] Text comparison:', {
                               originalText,
-                              newText
+                              newText,
+                              changed: originalText !== newText
                             })
-                            // For table cells, we need to use the cell's block index and para_in_cell
-                            debouncedUpdateTextInCell(cellBlockIndex, paraInCell, originalText, newText)
+
+                            // Only trigger update if text actually changed
+                            if (originalText !== newText && deletedFields.length === 0) {
+                              console.log('[DEBUG] Calling debouncedUpdateTextInCell with:', {
+                                cellBlockIndex,
+                                paraInCell,
+                                originalText,
+                                newText
+                              })
+                              // For table cells, we need to use the cell's block index and para_in_cell
+                              debouncedUpdateTextInCell(cellBlockIndex, paraInCell, originalText, newText)
+                            } else {
+                              console.log('[DEBUG] Skipping update - no change or placeholders deleted')
+                            }
                           } else {
-                            console.log('[DEBUG] Skipping update - no change or placeholders deleted')
+                            console.log('[DEBUG] Skipping text updates - batch structure update was done')
                           }
                         }
                       } else if (editedBlock) {
@@ -1852,18 +2323,127 @@ function App() {
                 </div>
               </div>
 
-              {/* Vertical alignment */}
+              {/* Alignment grid (3x3 = 9 options like Word) */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Căn lề dọc:</label>
-                <select
-                  value={cellFormatOptions.vertical_align}
-                  onChange={(e) => setCellFormatOptions({...cellFormatOptions, vertical_align: e.target.value})}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                >
-                  <option value="top">Trên (Top)</option>
-                  <option value="center">Giữa (Center)</option>
-                  <option value="bottom">Dưới (Bottom)</option>
-                </select>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Căn lề (9 hướng như Word):</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {/* Top row */}
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'left', vertical_align: 'top'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'top'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Trên-Trái"
+                  >
+                    ⬉ Top-Left
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'center', vertical_align: 'top'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'top'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Trên-Giữa"
+                  >
+                    ⬆ Top-Center
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'right', vertical_align: 'top'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'top'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Trên-Phải"
+                  >
+                    ⬈ Top-Right
+                  </button>
+
+                  {/* Middle row */}
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'left', vertical_align: 'center'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'center'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Giữa-Trái"
+                  >
+                    ⬅ Mid-Left
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'center', vertical_align: 'center'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'center'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Giữa-Giữa"
+                  >
+                    ⌧ Mid-Center
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'right', vertical_align: 'center'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'center'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Giữa-Phải"
+                  >
+                    ➡ Mid-Right
+                  </button>
+
+                  {/* Bottom row */}
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'left', vertical_align: 'bottom'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'bottom'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Dưới-Trái"
+                  >
+                    ⬋ Bot-Left
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'center', vertical_align: 'bottom'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'bottom'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Dưới-Giữa"
+                  >
+                    ⬇ Bot-Center
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'right', vertical_align: 'bottom'})}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
+                      cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'bottom'
+                        ? 'bg-indigo-500 text-white border-indigo-600'
+                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                    }`}
+                    title="Dưới-Phải"
+                  >
+                    ⬊ Bot-Right
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Hiện tại: {cellFormatOptions.vertical_align} - {cellFormatOptions.horizontal_align}
+                </p>
               </div>
 
               {/* Buttons */}
@@ -1879,7 +2459,8 @@ function App() {
                     setShowCellFormatDialog(false)
                     setCellFormatOptions({
                       background_color: '#ffffff',
-                      vertical_align: 'top'
+                      vertical_align: 'top',
+                      horizontal_align: 'left'
                     })
                   }}
                   className="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 font-medium"
