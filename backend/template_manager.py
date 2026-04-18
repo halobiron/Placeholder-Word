@@ -132,12 +132,21 @@ class MailMergeProcessor:
 
         try:
             doc = Document(docx_path)
+            self.doc = doc  # Store for image extraction
             html_parts = []
             block_index = 0  # Track block index for click-to-add functionality
             table_index = 0  # Track table index for table operations
 
             print("=== GENERATING HTML PREVIEW ===")
             print(f"[DEBUG] Document has {len(doc.tables)} tables total")
+            print(f"[DEBUG] Document has {len(doc.part.rels)} relationships")
+
+            # Count images
+            image_count = 0
+            for rId, rel in doc.part.rels.items():
+                if 'image' in rel.target_ref:
+                    image_count += 1
+            print(f"[DEBUG] Document has {image_count} images")
 
             # Use body children directly to preserve document order
             # IMPORTANT: Use same logic as inject_placeholder_at_location for consistency
@@ -169,13 +178,22 @@ class MailMergeProcessor:
                             text_from_xml += t.text
                     text = text_from_xml.strip()
 
+                    # Check if paragraph has images (drawing elements)
+                    has_images = len(child.findall(f".//{self.w_ns}drawing")) > 0
+                    if has_images:
+                        print(f"[DEBUG] Paragraph #{block_index} has {len(child.findall(f'.//{self.w_ns}drawing'))} drawing(s)")
+
                     # Process ALL paragraphs (including empty ones) to preserve document structure
                     # Empty lines ARE selectable for adding placeholders
                     # This preserves visual layout while maintaining index consistency
-                    if text:
+                    # Paragraphs with images are NOT empty even if they have no text
+                    if text or has_images:
                         html = self._process_para_to_html(para, block_index, is_empty=False)
                         html_parts.append(html)
-                        print(f"[HTML Preview] Block {block_index}: {text[:60]}...")
+                        if text:
+                            print(f"[HTML Preview] Block {block_index}: {text[:60]}...")
+                        else:
+                            print(f"[HTML Preview] Block {block_index}: IMAGE ONLY (no text)")
                         block_index += 1
                     else:
                         # Empty paragraph - render with block_index (selectable for adding placeholders)
@@ -1624,16 +1642,18 @@ JSON:"""
     def _process_xml_element_to_html(self, element) -> str:
         """Thực hiện xử lý XML element để lấy html"""
         import re
+        import base64
         if element is None:
             return ""
-            
+
         tag_name = element.tag.split('}')[1] if '}' in element.tag else element.tag
-        
+
         if tag_name == 'r':
             text_parts = []
+            image_html = []
             rPr = element.find(f"{self.w_ns}rPr")
             style_text = self._get_run_style_text(rPr)
-            
+
             for child in element:
                 c_tag = child.tag.split('}')[1] if '}' in child.tag else child.tag
                 if c_tag == 't' and child.text:
@@ -1642,40 +1662,121 @@ JSON:"""
                     text_parts.append("                              ")
                 elif c_tag == 'br':
                     text_parts.append("<br>")
-                    
+                elif c_tag == 'drawing':
+                    # Extract image from drawing element
+                    img_html = self._extract_image_from_element(child)
+                    if img_html:
+                        image_html.append(img_html)
+                        print(f"[DEBUG] Found image in drawing element")
+
             text = "".join(text_parts)
-            if not text:
+
+            # Combine text and images
+            result_parts = []
+            if text:
+                def highlight_placeholder(match):
+                    field_name = match.group(1).strip()
+                    return f'<span class="mail-merge-placeholder" data-field="{field_name}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
+
+                text_with_highlights = re.sub(r'«([^»]+)»', highlight_placeholder, text)
+                if style_text and "mail-merge-placeholder" not in text_with_highlights:
+                    result_parts.append(f'<span style="{style_text}">{text_with_highlights}</span>')
+                else:
+                    result_parts.append(text_with_highlights)
+
+            # Add images
+            result_parts.extend(image_html)
+
+            if not result_parts:
                 return ""
-                
-            def highlight_placeholder(match):
-                field_name = match.group(1).strip()
-                return f'<span class="mail-merge-placeholder" data-field="{field_name}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
-                
-            text_with_highlights = re.sub(r'«([^»]+)»', highlight_placeholder, text)
-            if style_text and "mail-merge-placeholder" not in text_with_highlights:
-                return f'<span style="{style_text}">{text_with_highlights}</span>'
-            return text_with_highlights
-            
+
+            return "".join(result_parts)
+
         elif tag_name == 'fldSimple':
             instr = element.get(f"{self.w_ns}instr", "")
             match = re.search(r'MERGEFIELD\s+(\S+)', instr)
             field_name = match.group(1) if match else "unknown"
             z_match = re.search(r'\\z\s*"([^"]*)"', instr)
             field_original = z_match.group(1) if z_match else ""
-            
+
             nested_r = element.find(f"{self.w_ns}r")
             style_text = ""
             actual_text = ""
             if nested_r is not None:
                 style_text = self._get_run_style_text(nested_r.find(f"{self.w_ns}rPr"))
                 actual_text = "".join(t.text for t in nested_r.findall(f"{self.w_ns}t") if t.text)
-                
+
             if actual_text and not re.match(r'^«[^»]+»$', actual_text):
                 return f'<span style="{style_text}">{actual_text}</span>'
             return f'<span class="mail-merge-placeholder" data-field="{field_name}" data-original="{field_original}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
-            
+
         # Recursive process children
         return "".join(self._process_xml_element_to_html(child) for child in element)
+
+    def _extract_image_from_element(self, element) -> str:
+        """Extract image from drawing/pic element and convert to base64 HTML img tag
+
+        Args:
+            element: XML element containing drawing/pic
+
+        Returns:
+            HTML img tag with base64 data or empty string
+        """
+        import base64
+
+        try:
+            # Find blip element (contains image reference)
+            for elem in element.iter():
+                tag_name = elem.tag.split('}')[1] if '}' in elem.tag else elem.tag
+                if tag_name == 'blip':
+                    embed = elem.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                    if embed and hasattr(self, 'doc') and self.doc and embed in self.doc.part.rels:
+                        image_part = self.doc.part.rels[embed].target_part
+                        image_data = image_part.blob
+                        content_type = image_part.content_type
+
+                        # Convert to base64
+                        b64_data = base64.b64encode(image_data).decode('utf-8')
+                        data_uri = f"data:{content_type};base64,{b64_data}"
+
+                        print(f"[DEBUG] Extracted image: {content_type}, {len(image_data)} bytes")
+
+                        # Try to get width from extent element (wordprocessingDrawing namespace)
+                        width_percent = None
+
+                        # Try wp:extent first (wordprocessingDrawing namespace)
+                        extent = element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}extent')
+                        if extent is None:
+                            # Fallback to main namespace
+                            extent = element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}extent')
+
+                        if extent is not None:
+                            cx = extent.get('cx')
+                            if cx:
+                                # Calculate width as percentage of page width
+                                # Letter width = 8.5 inches = 7772400 EMU
+                                # A4 width = 8.27 inches = 7560288 EMU
+                                # Use Letter as default (most common)
+                                page_width_emu = 7772400  # 8.5 inches
+                                image_width_emu = int(cx)
+
+                                ratio = image_width_emu / page_width_emu
+                                width_percent = ratio * 100
+
+                                print(f"[DEBUG] Image size: cx={cx} EMU, {width_percent:.1f}% of page width")
+
+                        style_attr = f'width: {width_percent:.1f}%;' if width_percent else 'max-width: 100%;'
+
+                        return f'<img src="{data_uri}" style="{style_attr}" alt="embedded image" />'
+
+            print("[DEBUG] No blip element found in drawing")
+            return ""
+
+        except Exception as e:
+            print(f"[ERROR] Failed to extract image: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return ""
 
     def _process_para_to_html(self, para, block_index: int, is_empty: bool = False) -> str:
         """Xử lý Paragraph thành thẻ p hoặc h1/h2/h3 với block_index metadata

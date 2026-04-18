@@ -3,10 +3,12 @@ DocxFullEditor - Edit mọi thứ trong DOCX mà vẫn giữ nguyên formatting
 Hỗ trợ: text edit, format changes, add content, delete content, tables, images
 """
 import re
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.oxml.ns import qn
 from lxml import etree
 
 
@@ -1986,6 +1988,181 @@ class DocxFullEditor:
                     return True
         return False
 
+    def add_image_at_cursor(
+        self,
+        paragraph_index: int,
+        offset: int,
+        image_path: str,
+        width: float = 4.0
+    ):
+        """
+        Insert image at exact cursor position within paragraph
+
+        Strategy:
+        1. Find paragraph and run containing offset
+        2. Split run at offset
+        3. Insert image between text parts
+        4. Text after offset → new paragraph after image
+
+        Args:
+            paragraph_index: Index of paragraph (from all paragraphs iterator)
+            offset: Character offset within paragraph text
+            image_path: Path to image file
+            width: Image width in inches
+
+        Returns:
+            True if successful
+
+        Raises:
+            ValueError: If parameters are invalid
+            RuntimeError: If operation fails
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        import copy
+
+        # Validate inputs
+        if paragraph_index < 0:
+            raise ValueError(f"Invalid paragraph_index: {paragraph_index} (must be >= 0)")
+        if offset < 0:
+            raise ValueError(f"Invalid offset: {offset} (must be >= 0)")
+        if not image_path or not Path(image_path).exists():
+            raise ValueError(f"Image file not found: {image_path}")
+        if width < 1.0 or width > 8.0:
+            raise ValueError(f"Invalid width: {width} (must be 1.0-8.0 inches)")
+
+        # Find target paragraph
+        target_para = None
+        total_paragraphs = 0
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            total_paragraphs += 1
+            if p_idx == paragraph_index:
+                target_para = paragraph
+                break
+
+        if not target_para:
+            raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
+
+        # Build run text map (similar to insert_placeholder_at_offset)
+        run_text_map = []
+        current_offset = 0
+
+        for run in target_para.runs:
+            if run.text:
+                text_len = len(run.text)
+                run_text_map.append({
+                    'run': run,
+                    'start': current_offset,
+                    'end': current_offset + text_len,
+                    'text': run.text
+                })
+                current_offset += text_len
+
+        # Find which run contains the offset
+        target_run_info = None
+        total_text_length = sum(run_info['end'] - run_info['start'] for run_info in run_text_map)
+
+        # Special case: empty paragraph - create a new run
+        if total_text_length == 0:
+            if offset == 0:
+                # Empty paragraph, offset 0 is valid - create a new run
+                target_run = target_para.add_run("")
+                target_run_info = {
+                    'run': target_run,
+                    'start': 0,
+                    'end': 0,
+                    'text': ''
+                }
+                text_before = ""
+                text_after = ""
+            else:
+                raise RuntimeError(
+                    f"Offset {offset} not found in empty paragraph {paragraph_index}. "
+                    f"Valid range: 0-0"
+                )
+        else:
+            # Non-empty paragraph - find the run containing offset
+            for run_info in run_text_map:
+                if run_info['start'] <= offset <= run_info['end']:
+                    target_run_info = run_info
+                    break
+
+            if not target_run_info:
+                para_text = target_para.text
+                para_preview = para_text[:50] + "..." if len(para_text) > 50 else para_text
+                raise RuntimeError(
+                    f"Offset {offset} not found in paragraph {paragraph_index}. "
+                    f"Paragraph text length: {total_text_length}, "
+                    f"Valid range: 0-{total_text_length}, "
+                    f"Text preview: '{para_preview}'"
+                )
+
+        # Get original format from target run
+        target_run = target_run_info['run']
+        original_rpr = target_run._r.get_or_add_rPr()
+
+        # Calculate split position and text_before/after (only for non-empty case)
+        if total_text_length > 0:
+            # Calculate split position within the run
+            split_pos = offset - target_run_info['start']
+            text_before = target_run.text[:split_pos]
+            text_after = target_run.text[split_pos:]
+
+            # Update original run to only contain text_before
+            target_run.text = text_before
+
+        # Find the document body
+        doc_element = self.doc._element.body
+        p_element = target_para._p
+
+        # Find the index of the paragraph element in body
+        para_index_in_doc = list(doc_element).index(p_element)
+
+        # Create new paragraph for image (AFTER target paragraph)
+        image_paragraph = self.doc.add_paragraph()
+
+        # Add picture to the new paragraph
+        try:
+            from docx.shared import Inches
+            image_run = image_paragraph.add_run()
+            image_run.add_picture(image_path, width=Inches(width))
+        except Exception as e:
+            # Clean up - remove the paragraph we just added
+            image_p_element = image_paragraph._element
+            image_p_element.getparent().remove(image_p_element)
+            raise RuntimeError(f"Failed to insert image: {str(e)}")
+
+        # Move the image paragraph to right after target paragraph
+        image_p_element = image_paragraph._element
+        doc_element.remove(image_p_element)
+        doc_element.insert(para_index_in_doc + 1, image_p_element)
+
+        # Create new paragraph for text_after (AFTER image paragraph)
+        if text_after.strip():
+            text_paragraph = self.doc.add_paragraph()
+            new_run = text_paragraph.add_run(text_after)
+
+            # Copy formatting from original run
+            if original_rpr is not None:
+                new_run._element.get_or_add_rPr()
+                new_run._element.rPr.append(copy.deepcopy(original_rpr))
+
+            # Move the text paragraph to right after image paragraph
+            text_p_element = text_paragraph._element
+            doc_element.remove(text_p_element)
+
+            # Find image paragraph index again (it may have shifted)
+            image_p_index = list(doc_element).index(image_p_element)
+            doc_element.insert(image_p_index + 1, text_p_element)
+
+        # Clean up empty runs
+        self._remove_empty_runs(target_para)
+
+        # IMPORTANT: Invalidate block index map to force rebuild
+        self._block_to_para_index_map = None
+
+        return True
+
     # ===== TABLE EDITING =====
 
     def edit_table_cell(
@@ -2700,3 +2877,206 @@ class DocxFullEditor:
             print(f"Error extracting run format: {e}")
 
         return format_info
+
+    def add_hyperlink(self, paragraph_index: int, start_offset: int, end_offset: int, url: str) -> bool:
+        """
+        Apply hyperlink formatting to selected text range
+        Similar to text formatting (bold, italic) but creates hyperlink element
+
+        Args:
+            paragraph_index: Index of paragraph (from all paragraphs iterator)
+            start_offset: Start character offset within paragraph text
+            end_offset: End character offset within paragraph text
+            url: Target URL
+
+        Returns:
+            True if successful
+
+        Raises:
+            ValueError: If parameters are invalid
+            RuntimeError: If operation fails
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        import copy
+
+        # Validate inputs
+        if paragraph_index < 0:
+            raise ValueError(f"Invalid paragraph_index: {paragraph_index} (must be >= 0)")
+        if start_offset < 0 or end_offset < 0:
+            raise ValueError(f"Invalid offsets: start={start_offset}, end={end_offset} (must be >= 0)")
+        if start_offset >= end_offset:
+            raise ValueError(f"Invalid range: start={start_offset} must be < end={end_offset}")
+        if not url or not url.strip():
+            raise ValueError("URL cannot be empty")
+
+        # Find target paragraph
+        target_para = None
+        total_paragraphs = 0
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            total_paragraphs += 1
+            if p_idx == paragraph_index:
+                target_para = paragraph
+                break
+
+        if not target_para:
+            raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
+
+        # Build run text map
+        run_text_map = []
+        current_offset = 0
+        for run in target_para.runs:
+            run_text = run.text
+            if run_text:
+                run_text_map.append({
+                    'run': run,
+                    'start': current_offset,
+                    'end': current_offset + len(run_text),
+                    'text': run_text
+                })
+                current_offset += len(run_text)
+
+        # Find all runs that overlap with selection [start_offset, end_offset]
+        affected_runs = []
+        for run_info in run_text_map:
+            if run_info['end'] > start_offset and run_info['start'] < end_offset:
+                affected_runs.append(run_info)
+
+        if not affected_runs:
+            raise RuntimeError(f"Selection range [{start_offset}, {end_offset}] not found in paragraph {paragraph_index}")
+
+        # Get paragraph element for relationship addition
+        p_element = target_para._element
+        document_part = self.doc.part
+
+        # Add relationship for hyperlink ONCE (shared by all hyperlink elements)
+        r_id = document_part.relate_to(url,
+                                       "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                                       is_external=True)
+
+        # Process each affected run in reverse order to maintain insertion positions
+        for i, run_info in enumerate(reversed(affected_runs)):
+            run = run_info['run']
+            run_start = run_info['start']
+            run_end = run_info['end']
+            run_text = run_info['text']
+
+            # Calculate overlap with selection
+            overlap_start = max(start_offset, run_start)
+            overlap_end = min(end_offset, run_end)
+
+            if overlap_start >= overlap_end:
+                continue
+
+            # Calculate position within this run
+            start_in_run = overlap_start - run_start
+            end_in_run = overlap_end - run_start
+
+            # Extract text parts
+            before_text = run_text[:start_in_run]
+            selected_text = run_text[start_in_run:end_in_run]
+            after_text = run_text[end_in_run:]
+
+            # Get original run formatting
+            original_rpr = run._element.find(qn('w:rPr'))
+
+            # Get current position in paragraph (before modifications)
+            run_elements = list(p_element.findall(qn('w:r')))
+            try:
+                run_index = run_elements.index(run._element)
+            except ValueError:
+                # Run not found in paragraph, skip this iteration
+                continue
+
+            # Strategy: Replace the run with [before_text] + [hyperlink] + [after_text]
+            # Remove original run
+            p_element.remove(run._element)
+
+            # Insert offset to track current position
+            insert_offset = run_index
+
+            # 1. Insert "before" text run (if not empty)
+            if before_text:
+                before_run = OxmlElement('w:r')
+
+                # Copy original formatting
+                if original_rpr is not None:
+                    before_rpr = copy.deepcopy(original_rpr)
+                    before_run.append(before_rpr)
+
+                # Add before text
+                before_t = OxmlElement('w:t')
+                before_t.set(qn('xml:space'), 'preserve')
+                before_t.text = before_text
+                before_run.append(before_t)
+
+                # Insert before hyperlink
+                p_element.insert(insert_offset, before_run)
+                insert_offset += 1
+
+            # 2. Insert hyperlink with selected text
+            hyperlink = OxmlElement('w:hyperlink')
+            hyperlink.set(qn('r:id'), r_id)
+
+            # Create run for hyperlink text with original formatting + hyperlink style
+            hyperlink_run = OxmlElement('w:r')
+
+            # Copy original formatting
+            if original_rpr is not None:
+                hyperlink_rpr = copy.deepcopy(original_rpr)
+
+                # Add hyperlink style (blue and underlined)
+                color = OxmlElement('w:color')
+                color.set(qn('w:val'), '0000FF')
+                hyperlink_rpr.append(color)
+
+                underline = OxmlElement('w:u')
+                underline.set(qn('w:val'), 'single')
+                hyperlink_rpr.append(underline)
+
+                hyperlink_run.append(hyperlink_rpr)
+            else:
+                # No original formatting, add basic hyperlink style
+                hyperlink_rpr = OxmlElement('w:rPr')
+
+                color = OxmlElement('w:color')
+                color.set(qn('w:val'), '0000FF')
+                hyperlink_rpr.append(color)
+
+                underline = OxmlElement('w:u')
+                underline.set(qn('w:val'), 'single')
+                hyperlink_rpr.append(underline)
+
+                hyperlink_run.append(hyperlink_rpr)
+
+            # Add selected text
+            t = OxmlElement('w:t')
+            t.set(qn('xml:space'), 'preserve')
+            t.text = selected_text
+            hyperlink_run.append(t)
+
+            hyperlink.append(hyperlink_run)
+
+            # Insert hyperlink
+            p_element.insert(insert_offset, hyperlink)
+            insert_offset += 1
+
+            # 3. Insert "after" text run (if not empty)
+            if after_text:
+                after_run = OxmlElement('w:r')
+
+                # Copy original formatting
+                if original_rpr is not None:
+                    after_rpr = copy.deepcopy(original_rpr)
+                    after_run.append(after_rpr)
+
+                # Add after text
+                after_t = OxmlElement('w:t')
+                after_t.set(qn('xml:space'), 'preserve')
+                after_t.text = after_text
+                after_run.append(after_t)
+
+                # Insert after hyperlink
+                p_element.insert(insert_offset, after_run)
+
+        return True

@@ -457,3 +457,35 @@ export const addTableAtCursor = async (templateId, blockIndex, offset, rows = 3,
   })
   return response.data
 }
+
+export const addImageAtCursor = async (templateId, blockIndex, offset, imageFile, width = 4.0) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('block_index', blockIndex)
+  formData.append('offset', offset)
+  formData.append('width', width)
+  formData.append('image', imageFile)
+
+  const response = await axios.post(`${API_BASE}/add-image-at-cursor`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const addHyperlink = async (templateId, blockIndex, startOffset, endOffset, url) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('block_index', blockIndex)
+  formData.append('start_offset', startOffset)
+  formData.append('end_offset', endOffset)
+  formData.append('url', url)
+
+  const response = await axios.post(`${API_BASE}/add-hyperlink`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}

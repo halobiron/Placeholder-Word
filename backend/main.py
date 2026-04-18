@@ -28,11 +28,12 @@ BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 TEMPLATE_DIR = UPLOAD_DIR / "templates"
 RESULT_DIR = UPLOAD_DIR / "results"
+IMAGE_DIR = UPLOAD_DIR / "images"  # Directory for uploaded images
 
 # Ensure directories exist
 def ensure_directories():
     """Create required directories if they don't exist"""
-    dirs_to_create = [UPLOAD_DIR, TEMPLATE_DIR, RESULT_DIR]
+    dirs_to_create = [UPLOAD_DIR, TEMPLATE_DIR, RESULT_DIR, IMAGE_DIR]
     for directory in dirs_to_create:
         try:
             directory.mkdir(parents=True, exist_ok=True)
@@ -1285,6 +1286,70 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
 
+@app.post("/add-hyperlink")
+async def add_hyperlink_to_template(
+    template_id: str = Form(...),
+    block_index: int = Form(...),
+    start_offset: int = Form(...),
+    end_offset: int = Form(...),
+    url: str = Form(...)
+):
+    """
+    Add hyperlink to selected text range
+
+    Args:
+        template_id: Template ID
+        block_index: Block index from HTML preview
+        start_offset: Start character offset of selected text
+        end_offset: End character offset of selected text
+        url: Target URL
+
+    Returns:
+        Updated template and preview
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        from docx_editor import DocxFullEditor
+
+        editor = DocxFullEditor(str(template_path))
+
+        # Map block_index to paragraph_index
+        paragraph_index = editor.get_paragraph_index_from_block(block_index)
+        if paragraph_index is None:
+            raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
+
+        print(f"[DEBUG] Mapped block_index={block_index} to paragraph_index={paragraph_index}")
+        print(f"[DEBUG] Adding hyperlink to range [{start_offset}, {end_offset}] -> {url}")
+
+        success = editor.add_hyperlink(paragraph_index, start_offset, end_offset, url)
+
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to add hyperlink")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Get updated fields and preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "fields": fields,
+            "html_preview": html_preview,
+            "added": True,
+            "hyperlink": {"start_offset": start_offset, "end_offset": end_offset, "url": url}
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Add hyperlink failed: {str(e)}")
+
 @app.post("/update-text")
 async def update_text_in_template(
     template_id: str = Form(...),
@@ -2511,6 +2576,151 @@ async def add_table_at_cursor(request: Request):
         import traceback
         error_detail = f"Add table at cursor failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /add-table-at-cursor ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/add-image-at-cursor")
+async def add_image_at_cursor(request: Request):
+    """Thêm ảnh tại vị trí cursor chính xác
+
+    Args:
+        template_id: Template ID
+        block_index: Block index từ HTML preview
+        offset: Character offset trong paragraph
+        image: Upload image file
+        width: Image width in inches (default: 4.0)
+
+    Returns:
+        Updated template với ảnh mới và HTML preview
+    """
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        block_index = form.get("block_index")
+        offset = form.get("offset")
+        width = form.get("width", "4.0")
+
+        # Get uploaded file
+        image_file = form.get("image")
+        if not image_file:
+            raise HTTPException(status_code=400, detail="image file is required")
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if block_index is None:
+            raise HTTPException(status_code=400, detail="block_index is required")
+        if offset is None:
+            raise HTTPException(status_code=400, detail="offset is required")
+
+        # Parse numeric parameters
+        try:
+            block_index = int(block_index)
+            offset = int(offset)
+            width = float(width)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid numeric parameters")
+
+        # Validate ranges
+        if width < 1.0 or width > 8.0:
+            raise HTTPException(status_code=400, detail="width must be between 1.0 and 8.0 inches")
+        if offset < 0:
+            raise HTTPException(status_code=400, detail="offset must be >= 0")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        print(f"[INFO] add_image_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, width={width}")
+
+        # Validate image file
+        if not image_file.filename:
+            raise HTTPException(status_code=400, detail="Invalid image file")
+
+        # Check file extension
+        allowed_extensions = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
+        file_ext = Path(image_file.filename).suffix.lower()
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}"
+            )
+
+        # Generate unique filename
+        import uuid
+        unique_filename = f"{uuid.uuid4()}{file_ext}"
+        image_path = IMAGE_DIR / unique_filename
+
+        # Save uploaded image
+        try:
+            with open(image_path, "wb") as buffer:
+                content = await image_file.read()
+                buffer.write(content)
+            print(f"[DEBUG] Image saved to: {image_path}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to save image: {str(e)}")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Map block_index to paragraph_index
+        paragraph_index = editor.get_paragraph_index_from_block(block_index)
+        if paragraph_index is None:
+            raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
+
+        print(f"[DEBUG] Mapped block_index={block_index} to paragraph_index={paragraph_index}")
+
+        # Add image at cursor position
+        try:
+            editor.add_image_at_cursor(
+                paragraph_index=paragraph_index,
+                offset=offset,
+                image_path=str(image_path),
+                width=width
+            )
+            print(f"[INFO] Successfully added image at cursor position")
+        except Exception as e:
+            import traceback
+            error_detail = f"Failed to add image at cursor: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+            print(f"=== add_image_at_cursor ERROR ===")
+            print(error_detail)
+            print(f"=== END ERROR ===")
+            raise HTTPException(status_code=500, detail=error_detail)
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # IMPORTANT: Reload editor from saved file
+        editor = DocxFullEditor(str(template_path))
+
+        # Regenerate HTML preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "field_count": len(fields),
+            "html_preview": html_preview,
+            "operation": "add_image_at_cursor",
+            "image_width": f"{width} inches"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Add image at cursor failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /add-image-at-cursor ERROR ===")
         print(error_detail)
         print(f"=== END ERROR ===")
         raise HTTPException(status_code=500, detail=error_detail)

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, addPlaceholderAtOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, addPlaceholderAtOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -26,6 +26,9 @@ function App() {
   const [selectedCellIndex, setSelectedCellIndex] = useState(null) // Selected cell index within table (for table cells)
   const [showAddTablePopup, setShowAddTablePopup] = useState(false) // Show add table popup
   const [tableSize, setTableSize] = useState({ rows: 3, cols: 3 }) // Default table size
+  const [showAddImagePopup, setShowAddImagePopup] = useState(false) // Show add image popup
+  const [imageWidth, setImageWidth] = useState(4.0) // Default image width (inches)
+  const [selectedImageFile, setSelectedImageFile] = useState(null) // Selected image file
   const [selectedTableBlockIndex, setSelectedTableBlockIndex] = useState(null) // Table block index when cell is selected
   const [selectedParaInCell, setSelectedParaInCell] = useState(null) // Selected paragraph index within cell (for table cell paragraphs)
   const [newFieldName, setNewFieldName] = useState('') // New placeholder name
@@ -50,6 +53,18 @@ function App() {
     background_color: '#ffffff',
     vertical_align: 'top',
     horizontal_align: 'left'
+  })
+
+  // Hyperlink editing states
+  const [showHyperlinkDialog, setShowHyperlinkDialog] = useState(false)
+  const [hyperlinkData, setHyperlinkData] = useState({
+    url: ''
+  })
+  const [hyperlinkPosition, setHyperlinkPosition] = useState({
+    blockIndex: null,
+    startOffset: null,
+    endOffset: null,
+    selectedText: ''
   })
 
   // Extract placeholders from HTML
@@ -948,12 +963,32 @@ function App() {
       // Find block_index from parent elements
       let blockIndex = null
       let currentElement = element
+      let blockElement = null
       while (currentElement && currentElement.id !== 'document-editor') {
         if (currentElement.hasAttribute && currentElement.hasAttribute('data-block-index')) {
           blockIndex = parseInt(currentElement.getAttribute('data-block-index'))
+          blockElement = currentElement
           break
         }
         currentElement = currentElement.parentElement
+      }
+
+      // Calculate offset within block
+      let offset = 0
+      let endOffset = 0
+      if (blockElement) {
+        // Get text before selection in the block
+        const range = selection.getRangeAt(0)
+        const preSelectionRange = range.cloneRange()
+        preSelectionRange.selectNodeContents(blockElement)
+        preSelectionRange.setEnd(range.startContainer, range.startOffset)
+        offset = preSelectionRange.toString().length
+
+        // Get text before end of selection
+        const postSelectionRange = range.cloneRange()
+        postSelectionRange.selectNodeContents(blockElement)
+        postSelectionRange.setEnd(range.endContainer, range.endOffset)
+        endOffset = postSelectionRange.toString().length
       }
 
       // Get accurate format from DOCX backend (not from HTML computed style)
@@ -996,7 +1031,9 @@ function App() {
         text: selectedText,
         element: element,
         format: format,
-        blockIndex: blockIndex
+        blockIndex: blockIndex,
+        offset: offset,
+        endOffset: endOffset
       })
       setShowEditPopup(true)
     }
@@ -1193,6 +1230,66 @@ function App() {
     }
   }
 
+  const handleAddImageAtCursor = async () => {
+    try {
+      // Validate image file selected
+      if (!selectedImageFile) {
+        setError('❌ Vui lòng chọn ảnh muốn chèn!')
+        return
+      }
+
+      // Get current selection
+      const selection = window.getSelection()
+      if (!selection.rangeCount) {
+        setError('❌ Vui lòng chọn vị trí muốn thêm ảnh!')
+        return
+      }
+
+      // Get cursor position info
+      const blockIndex = getCurrentBlockIndex()
+      if (blockIndex === null || blockIndex === -1) {
+        setError('❌ Vui lòng click vào vị trí muốn thêm ảnh!')
+        return
+      }
+
+      // Calculate offset within block
+      const range = selection.getRangeAt(0)
+      const offset = calculateCursorOffset(range, blockIndex)
+
+      if (offset === null) {
+        setError('❌ Không thể xác định vị trí cursor!')
+        return
+      }
+
+      console.log(`[DEBUG] Adding image at blockIndex=${blockIndex}, offset=${offset}, width=${imageWidth} inches`)
+
+      const result = await addImageAtCursor(
+        templateId,
+        blockIndex,
+        offset,
+        selectedImageFile,
+        imageWidth
+      )
+
+      console.log('[DEBUG] API result:', result)
+      console.log('[DEBUG] HTML preview length:', result.html_preview?.length)
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+      setTemplateNeedsUpdate(true)
+
+      setShowAddImagePopup(false)
+      setSelectedImageFile(null)
+      setImageWidth(4.0) // Reset to default
+      setError(`✅ Đã thêm ảnh thành công!`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Add image at cursor failed:', err)
+      setError('Thêm ảnh thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
   const handleFormatTableCell = async () => {
     if (!selectedTableInfo.isCellSelected) return
 
@@ -1210,6 +1307,46 @@ function App() {
     } catch (err) {
       console.error('Format table cell failed:', err)
       setError('Format cell thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
+  const handleOpenHyperlinkDialog = (blockIndex, startOffset, endOffset, selectedText) => {
+    setHyperlinkPosition({
+      blockIndex,
+      startOffset,
+      endOffset,
+      selectedText
+    })
+    setHyperlinkData({ url: '' })
+    setShowHyperlinkDialog(true)
+  }
+
+  const handleAddHyperlink = async () => {
+    if (!hyperlinkData.url.trim()) {
+      setError('Vui lòng nhập URL cho hyperlink')
+      return
+    }
+
+    try {
+      const result = await addHyperlink(
+        templateId,
+        hyperlinkPosition.blockIndex,
+        hyperlinkPosition.startOffset,
+        hyperlinkPosition.endOffset,
+        hyperlinkData.url
+      )
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      setShowHyperlinkDialog(false)
+      setHyperlinkData({ url: '' })
+      setError(`✅ Đã thêm hyperlink vào "${hyperlinkPosition.selectedText}"!`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Add hyperlink failed:', err)
+      setError('Thêm hyperlink thất bại: ' + (err.response?.data?.detail || err.message))
     }
   }
 
@@ -1639,6 +1776,13 @@ function App() {
                         title="Thêm placeholder"
                       >
                         ➕ Thêm
+                      </button>
+                      <button
+                        onClick={() => setShowAddImagePopup(true)}
+                        className="ml-2 px-3 py-1 bg-orange-500 text-white rounded hover:bg-orange-600 transition-colors text-sm"
+                        title="Thêm ảnh tại vị trí cursor"
+                      >
+                        📷 Thêm Ảnh
                       </button>
                       <button
                         onClick={() => setShowAddTablePopup(true)}
@@ -2490,7 +2634,10 @@ function App() {
       {/* Format-only popup for text selection */}
       {showEditPopup && selectedTextForEdit && (
         <EditPopup
-          selectedText={selectedTextForEdit}
+          selectedText={{
+            ...selectedTextForEdit,
+            onOpenHyperlink: handleOpenHyperlinkDialog
+          }}
           onFormatApplied={handleFormatApplied}
           onClose={() => {
             setShowEditPopup(false)
@@ -2564,6 +2711,105 @@ function App() {
               </button>
               <button
                 onClick={() => setShowAddTablePopup(false)}
+                className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 transition-colors font-medium"
+              >
+                Hủy
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add image popup */}
+      {showAddImagePopup && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full shadow-xl">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold text-gray-900">📷 Thêm Ảnh</h3>
+              <button
+                onClick={() => {
+                  setShowAddImagePopup(false)
+                  setSelectedImageFile(null)
+                  setImageWidth(4.0)
+                }}
+                className="text-gray-500 hover:text-gray-700 text-2xl"
+              >
+                ×
+              </button>
+            </div>
+
+            <p className="text-sm text-gray-600 mb-4">
+              Ảnh sẽ được chèn tại vị trí cursor trong document
+            </p>
+
+            {/* File upload */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Chọn ảnh:
+              </label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const file = e.target.files[0]
+                  if (file) {
+                    setSelectedImageFile(file)
+                    console.log('[DEBUG] Selected image:', file.name, file.type, file.size)
+                  }
+                }}
+                className="w-full border border-gray-300 rounded px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              {selectedImageFile && (
+                <div className="mt-2 text-sm text-gray-600">
+                  Đã chọn: <strong>{selectedImageFile.name}</strong> ({(selectedImageFile.size / 1024).toFixed(1)} KB)
+                </div>
+              )}
+            </div>
+
+            {/* Width slider */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Chiều rộng ảnh: <strong>{imageWidth} inches</strong> (~{(imageWidth * 2.54).toFixed(1)} cm)
+              </label>
+              <input
+                type="range"
+                min="1.0"
+                max="8.0"
+                step="0.5"
+                value={imageWidth}
+                onChange={(e) => setImageWidth(parseFloat(e.target.value))}
+                className="w-full"
+              />
+              <div className="flex justify-between text-xs text-gray-500 mt-1">
+                <span>1" (2.5cm)</span>
+                <span>4" (10cm)</span>
+                <span>8" (20cm)</span>
+              </div>
+            </div>
+
+            <div className="bg-orange-50 border border-orange-200 rounded p-3 mb-4">
+              <p className="text-sm text-orange-800">
+                📷 Kích thước: <strong>{imageWidth} inches</strong>
+              </p>
+              <p className="text-xs text-orange-600 mt-1">
+                Click vào vị trí muốn thêm ảnh trong document trước khi nhấn "Thêm Ảnh"
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleAddImageAtCursor}
+                disabled={!selectedImageFile}
+                className="flex-1 bg-orange-500 text-white px-4 py-2 rounded hover:bg-orange-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-medium"
+              >
+                📷 Thêm Ảnh
+              </button>
+              <button
+                onClick={() => {
+                  setShowAddImagePopup(false)
+                  setSelectedImageFile(null)
+                  setImageWidth(4.0)
+                }}
                 className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 transition-colors font-medium"
               >
                 Hủy
@@ -2742,6 +2988,58 @@ function App() {
                       vertical_align: 'top',
                       horizontal_align: 'left'
                     })
+                  }}
+                  className="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 font-medium"
+                >
+                  Hủy
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hyperlink dialog */}
+      {showHyperlinkDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900 mb-4">🔗 Thêm Hyperlink</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Vị trí: Block {hyperlinkPosition.blockIndex}, Range [{hyperlinkPosition.startOffset}, {hyperlinkPosition.endOffset}]
+            </p>
+
+            {/* Selected text preview */}
+            <div className="mb-4 p-3 bg-gray-50 rounded border border-gray-200">
+              <p className="text-xs text-gray-500 mb-1">Văn bản đã chọn:</p>
+              <p className="text-sm font-medium text-gray-800">"{hyperlinkPosition.selectedText}"</p>
+            </div>
+
+            <div className="space-y-4">
+              {/* URL input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">URL đích:</label>
+                <input
+                  type="url"
+                  value={hyperlinkData.url}
+                  onChange={(e) => setHyperlinkData({...hyperlinkData, url: e.target.value})}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="https://example.com"
+                  autoFocus
+                />
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex gap-2 pt-4">
+                <button
+                  onClick={handleAddHyperlink}
+                  className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium"
+                >
+                  Thêm Hyperlink
+                </button>
+                <button
+                  onClick={() => {
+                    setShowHyperlinkDialog(false)
+                    setHyperlinkData({ url: '' })
                   }}
                   className="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 font-medium"
                 >

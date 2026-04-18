@@ -359,6 +359,32 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
         )}
       </div>
 
+      {/* Hyperlink section */}
+      <div className="mb-3 p-2 bg-blue-50 rounded border border-blue-200">
+        <button
+          onClick={() => {
+            if (selectedText?.blockIndex !== undefined && selectedText?.offset !== undefined && selectedText?.endOffset !== undefined) {
+              // Get the callback function from selectedText
+              const onOpenHyperlink = selectedText.onOpenHyperlink
+              if (onOpenHyperlink && typeof onOpenHyperlink === 'function') {
+                // Close edit popup first
+                if (onClose) {
+                  onClose()
+                }
+                // Trigger hyperlink dialog through parent callback with selection range
+                onOpenHyperlink(selectedText.blockIndex, selectedText.offset, selectedText.endOffset, selectedText.text)
+              }
+            }
+          }}
+          className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors font-medium text-sm"
+        >
+          🔗 Thêm Hyperlink
+        </button>
+        <p className="text-xs text-gray-500 mt-1 text-center">
+          Thêm hyperlink vào văn bản đã chọn: "{selectedText?.text || ''}"
+        </p>
+      </div>
+
       {/* Actions */}
       <div className="flex gap-2">
         <button
