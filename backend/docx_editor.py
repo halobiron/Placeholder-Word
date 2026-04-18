@@ -1696,6 +1696,250 @@ class DocxFullEditor:
         print(f"[SUCCESS] Inserted placeholder «{field_name}» at offset {offset} in paragraph {paragraph_index}")
         return True
 
+    def add_table_at_cursor(
+        self,
+        paragraph_index: int,
+        offset: int,
+        rows: int,
+        cols: int
+    ):
+        """
+        Insert table at exact cursor position within paragraph
+
+        Strategy:
+        1. Split paragraph at offset → 2 parts
+        2. Insert table between parts
+        3. Text after offset → new paragraph after table
+
+        Args:
+            paragraph_index: Index of paragraph (from all paragraphs iterator)
+            offset: Character offset within paragraph text
+            rows: Number of rows for new table
+            cols: Number of columns for new table
+
+        Returns:
+            True if successful
+
+        Raises:
+            ValueError: If parameters are invalid
+            RuntimeError: If operation fails
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        import copy
+
+        # Validate inputs
+        if paragraph_index < 0:
+            raise ValueError(f"Invalid paragraph_index: {paragraph_index} (must be >= 0)")
+        if offset < 0:
+            raise ValueError(f"Invalid offset: {offset} (must be >= 0)")
+        if rows < 1 or rows > 20:
+            raise ValueError(f"Invalid rows: {rows} (must be 1-20)")
+        if cols < 1 or cols > 10:
+            raise ValueError(f"Invalid cols: {cols} (must be 1-10)")
+
+        # Find target paragraph
+        target_para = None
+        total_paragraphs = 0
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            total_paragraphs += 1
+            if p_idx == paragraph_index:
+                target_para = paragraph
+                break
+
+        if not target_para:
+            raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
+
+        # Build run text map (similar to insert_placeholder_at_offset)
+        run_text_map = []
+        current_offset = 0
+
+        for run in target_para.runs:
+            if run.text:
+                text_len = len(run.text)
+                run_text_map.append({
+                    'run': run,
+                    'start': current_offset,
+                    'end': current_offset + text_len,
+                    'text': run.text
+                })
+                current_offset += text_len
+
+        # Find which run contains the offset
+        target_run_info = None
+        total_text_length = sum(run_info['end'] - run_info['start'] for run_info in run_text_map)
+
+        # Special case: Empty paragraph
+        if total_text_length == 0:
+            # For empty paragraphs, only offset 0 is valid
+            if offset != 0:
+                print(f"[WARN] Offset {offset} requested for empty paragraph {paragraph_index}. Using offset 0 instead.")
+                offset = 0
+
+            # Create a new run for the empty paragraph
+            if len(target_para.runs) == 0:
+                # Paragraph has no runs at all, create one
+                new_run = target_para.add_run("")
+                target_run_info = {
+                    'run': new_run,
+                    'start': 0,
+                    'end': 0,
+                    'text': ''
+                }
+            else:
+                # Use the first (empty) run
+                target_run_info = {
+                    'run': target_para.runs[0],
+                    'start': 0,
+                    'end': 0,
+                    'text': target_para.runs[0].text or ''
+                }
+        else:
+            # Normal case: Find run containing offset
+            for run_info in run_text_map:
+                if run_info['start'] <= offset <= run_info['end']:
+                    target_run_info = run_info
+                    break
+
+            if not target_run_info:
+                para_text = target_para.text
+                para_preview = para_text[:50] + "..." if len(para_text) > 50 else para_text
+                raise RuntimeError(
+                    f"Offset {offset} not found in paragraph {paragraph_index}. "
+                    f"Paragraph text length: {total_text_length}, "
+                    f"Valid range: 0-{total_text_length}, "
+                    f"Text preview: '{para_preview}'"
+                )
+
+        # Get original format from target run
+        target_run = target_run_info['run']
+        original_rpr = target_run._r.get_or_add_rPr()
+
+        # Calculate split position within the run
+        split_pos = offset - target_run_info['start']
+        text_before = target_run.text[:split_pos]
+        text_after = target_run.text[split_pos:]
+
+        # Update original run to only contain text_before
+        target_run.text = text_before
+
+        # Create table with simple borders
+        table = self.doc.add_table(rows=rows, cols=cols)
+        self._format_simple_table(table)
+
+        # Get paragraph element and its parent
+        p_element = target_para._p
+        parent = p_element.getparent()
+
+        # Find the index of the paragraph element in parent
+        para_index_in_parent = list(parent).index(p_element)
+
+        # Get the table element we just created
+        table_element = table._element
+
+        # Insert table element after the paragraph
+        parent.insert(para_index_in_parent + 1, table_element)
+
+        # Create new paragraph for text_after (AFTER table)
+        if text_after.strip():
+            new_p = OxmlElement('w:p')
+
+            # Copy paragraph properties from target paragraph
+            pPr = p_element.find(f"{self.w_ns}pPr")
+            if pPr is not None:
+                new_p.append(copy.deepcopy(pPr))
+
+            # Create run with text_after, preserving original formatting
+            new_r = OxmlElement('w:r')
+            new_rPr = new_r.find(f"{self.w_ns}rPr")
+            if new_rPr is None:
+                new_rPr = OxmlElement('w:rPr')
+                new_r.append(new_rPr)
+
+            # Copy run properties from original run
+            if original_rpr is not None:
+                new_rPr.append(copy.deepcopy(original_rpr))
+
+            # Create text element
+            new_t = OxmlElement('w:t')
+            new_t.set(qn('xml:space'), 'preserve')
+            new_t.text = text_after
+            new_r.append(new_t)
+            new_p.append(new_r)
+
+            # Insert new paragraph after table
+            # Find table element index again (it may have shifted)
+            table_index_in_parent = list(parent).index(table_element)
+            parent.insert(table_index_in_parent + 1, new_p)
+
+        # Clean up empty runs
+        self._remove_empty_runs(target_para)
+
+        # IMPORTANT: Invalidate block index map to force rebuild
+        # This ensures the new table will be included in HTML preview
+        self._block_to_para_index_map = None
+
+        return True
+
+    def _format_simple_table(self, table):
+        """
+        Apply simple border formatting to table
+
+        Args:
+            table: docx table object
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        # Set table borders
+        tbl_pr = table._element.tblPr
+        if tbl_pr is None:
+            tbl_pr = OxmlElement('w:tblPr')
+            table._element.insert(0, tbl_pr)
+
+        tbl_borders = OxmlElement('w:tblBorders')
+
+        for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+            border = OxmlElement(f'w:{border_name}')
+            border.set(qn('w:val'), 'single')
+            border.set(qn('w:sz'), '4')  # 4 half-points = 2pt
+            border.set(qn('w:space'), '0')
+            border.set(qn('w:color'), '000000')
+            tbl_borders.append(border)
+
+        tbl_pr.append(tbl_borders)
+
+        # Set table width to full page width (6.5 inches = standard A4 width)
+        table.width = Inches(6.5)
+
+        # Distribute column widths evenly across table width
+        # Each column gets equal share of table width
+        num_cols = len(table.columns)
+        if num_cols > 0:
+            column_width = Inches(6.5) / num_cols
+            for row in table.rows:
+                for cell in row.cells:
+                    # Set each cell to equal column width
+                    cell.width = column_width
+
+    def _remove_empty_runs(self, paragraph):
+        """
+        Remove empty runs from paragraph
+
+        Args:
+            paragraph: docx paragraph object
+        """
+        p_element = paragraph._p
+        runs_to_remove = []
+
+        for run in paragraph.runs:
+            if not run.text or not run.text.strip():
+                runs_to_remove.append(run)
+
+        for run in runs_to_remove:
+            run_element = run._element
+            run_element.getparent().remove(run_element)
+
     def add_page_break(self, position: str = "end", after_text: str = None):
         """
         Thêm ngắt trang

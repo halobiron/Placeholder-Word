@@ -137,9 +137,27 @@ class MailMergeProcessor:
             table_index = 0  # Track table index for table operations
 
             print("=== GENERATING HTML PREVIEW ===")
+            print(f"[DEBUG] Document has {len(doc.tables)} tables total")
 
             # Use body children directly to preserve document order
             # IMPORTANT: Use same logic as inject_placeholder_at_location for consistency
+            child_count = 0
+            table_count = 0
+            para_count = 0
+            for child in doc.element.body.iterchildren():
+                child_count += 1
+                child_type = type(child).__name__
+                if isinstance(child, CT_Tbl):
+                    table_count += 1
+                    print(f"[DEBUG] Child #{child_count}: TABLE #{table_count} (type: {child_type})")
+                elif isinstance(child, CT_P):
+                    para_count += 1
+                    print(f"[DEBUG] Child #{child_count}: PARAGRAPH #{para_count}")
+                else:
+                    print(f"[DEBUG] Child #{child_count}: UNKNOWN TYPE (type: {child_type}, isinstance CT_Tbl: {isinstance(child, CT_Tbl)}, isinstance CT_P: {isinstance(child, CT_P)})")
+
+            print(f"[DEBUG] Total children: {child_count} (tables: {table_count}, paras: {para_count})")
+
             for child in doc.element.body.iterchildren():
                 if isinstance(child, CT_P):
                     para = Paragraph(child, doc)
@@ -172,6 +190,8 @@ class MailMergeProcessor:
                     table_index += 1  # Increment for next table
                     table_has_content = False
 
+                    print(f"[DEBUG] Processing TABLE #{current_table_index} with {len(table.rows)} rows, {len(table.columns)} columns")
+
                     # Track starting block index for this table (for first cell)
                     table_start_block_index = block_index
 
@@ -181,7 +201,7 @@ class MailMergeProcessor:
                     cell_index = 0
                     for row_idx, row in enumerate(table.rows):
                         for cell_idx, cell in enumerate(row.cells):
-                            # Extract cell text to check if it has content
+                        # Extract cell text to check if it has content
                             cell_text = ""
                             for para in cell.paragraphs:
                                 for t in para._p.findall(f".//{self.w_ns}t"):
@@ -199,11 +219,12 @@ class MailMergeProcessor:
                             block_index += 1
                             cell_index += 1
 
-                    # Only render table HTML if it has content
-                    if table_has_content:
-                        # Use the starting block index for the table (first cell's block_index)
-                        html = self._process_table_to_html(table, table_start_block_index, current_table_index)
-                        html_parts.append(html)
+                    # CRITICAL FIX: Always render table, even if empty!
+                    # New tables added by user will be empty initially but should still be visible
+                    # Use the starting block index for the table (first cell's block_index)
+                    html = self._process_table_to_html(table, table_start_block_index, current_table_index)
+                    html_parts.append(html)
+                    print(f"[DEBUG] Added table HTML to preview, table {current_table_index}, has_content: {table_has_content}, HTML length: {len(html)}")
 
             print(f"=== TOTAL BLOCKS IN HTML PREVIEW: {block_index} ===")
 
@@ -1775,7 +1796,7 @@ JSON:"""
         Returns:
             HTML string for the entire table
         """
-        print(f"[_process_table_to_html] Processing table {table_index} with {len(table.rows)} rows")
+        print(f"[_process_table_to_html] START Processing table {table_index} with {len(table.rows)} rows, {len(table.columns)} columns")
         table_html = ['<table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; margin: 10px 0;">']
 
         # Track block index for each cell (matching extract_structured_content logic)
@@ -1913,7 +1934,8 @@ JSON:"""
             table_html.append('</tr>')
         table_html.append('</table>')
         html_result = "\n".join(table_html)
-        print(f"[_process_table_to_html] Processed {cells_processed} cells, HTML length: {len(html_result)}")
+        print(f"[_process_table_to_html] END Processed {cells_processed} cells, HTML length: {len(html_result)}")
+        print(f"[_process_table_to_html] HTML preview: {html_result[:200]}...")
         return html_result
 
 

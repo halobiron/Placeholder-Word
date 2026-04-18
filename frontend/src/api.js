@@ -441,3 +441,19 @@ export const deleteMultipleParagraphs = async (templateId, blocks) => {
   })
   return response.data
 }
+
+export const addTableAtCursor = async (templateId, blockIndex, offset, rows = 3, cols = 3) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('block_index', blockIndex)
+  formData.append('offset', offset)
+  formData.append('rows', rows)
+  formData.append('cols', cols)
+
+  const response = await axios.post(`${API_BASE}/add-table-at-cursor`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}

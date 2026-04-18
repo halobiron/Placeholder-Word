@@ -2389,3 +2389,128 @@ async def delete_multiple_paragraphs(request: Request):
         print(error_detail)
         print(f"=== END ERROR ===")
         raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/add-table-at-cursor")
+async def add_table_at_cursor(request: Request):
+    """Thêm bảng mới tại vị trí cursor chính xác
+
+    Args:
+        template_id: Template ID
+        block_index: Block index từ HTML preview (chỉ định paragraph)
+        offset: Character offset trong paragraph (vị trí cursor)
+        rows: Số hàng cho bảng mới (default: 3)
+        cols: Số cột cho bảng mới (default: 3)
+
+    Returns:
+        Updated template với bảng mới và HTML preview
+    """
+    try:
+        # Parse form data
+        form = await request.form()
+        template_id = form.get("template_id")
+        block_index = form.get("block_index")
+        offset = form.get("offset")
+        rows = form.get("rows", "3")
+        cols = form.get("cols", "3")
+
+        # Validate required parameters
+        if not template_id:
+            raise HTTPException(status_code=400, detail="template_id is required")
+        if block_index is None:
+            raise HTTPException(status_code=400, detail="block_index is required")
+        if offset is None:
+            raise HTTPException(status_code=400, detail="offset is required")
+
+        # Parse numeric parameters
+        try:
+            block_index = int(block_index)
+            offset = int(offset)
+            rows = int(rows)
+            cols = int(cols)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid numeric parameters")
+
+        # Validate ranges
+        if rows < 1 or rows > 20:
+            raise HTTPException(status_code=400, detail="rows must be between 1 and 20")
+        if cols < 1 or cols > 10:
+            raise HTTPException(status_code=400, detail="cols must be between 1 and 10")
+        if offset < 0:
+            raise HTTPException(status_code=400, detail="offset must be >= 0")
+
+        # Check template exists
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        print(f"[INFO] add_table_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, rows={rows}, cols={cols}")
+
+        # Open and edit template
+        from docx_editor import DocxFullEditor
+        editor = DocxFullEditor(str(template_path))
+
+        # Log initial document state
+        print(f"[DEBUG] Initial document has {len(editor.doc.tables)} tables")
+
+        # Map block_index to paragraph_index
+        paragraph_index = editor.get_paragraph_index_from_block(block_index)
+        if paragraph_index is None:
+            raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
+
+        print(f"[DEBUG] Mapped block_index={block_index} to paragraph_index={paragraph_index}")
+
+        # Add table at cursor position
+        try:
+            editor.add_table_at_cursor(
+                paragraph_index=paragraph_index,
+                offset=offset,
+                rows=rows,
+                cols=cols
+            )
+            print(f"[INFO] Successfully added table at cursor position")
+            print(f"[DEBUG] Document now has {len(editor.doc.tables)} tables after add_table_at_cursor")
+        except Exception as e:
+            import traceback
+            error_detail = f"Failed to add table at cursor: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+            print(f"=== add_table_at_cursor ERROR ===")
+            print(error_detail)
+            print(f"=== END ERROR ===")
+            raise HTTPException(status_code=500, detail=error_detail)
+
+        # Save updated template
+        editor.save(str(template_path))
+        print(f"[DEBUG] Document saved to {template_path}")
+
+        # IMPORTANT: Reload editor from saved file to get latest document structure
+        # This ensures the new table is included in HTML preview
+        editor = DocxFullEditor(str(template_path))
+        print(f"[DEBUG] Reloaded document has {len(editor.doc.tables)} tables")
+
+        # Regenerate HTML preview with reloaded editor
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path), fields)
+        print(f"[DEBUG] HTML preview regenerated, length: {len(html_preview)}")
+
+        return {
+            "template_id": template_id,
+            "success": True,
+            "fields": fields,
+            "field_count": len(fields),
+            "html_preview": html_preview,
+            "operation": "add_table_at_cursor",
+            "table_size": f"{rows}x{cols}"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Add table at cursor failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"=== /add-table-at-cursor ERROR ===")
+        print(error_detail)
+        print(f"=== END ERROR ===")
+        raise HTTPException(status_code=500, detail=error_detail)

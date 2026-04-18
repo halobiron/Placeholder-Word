@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, addPlaceholderAtOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs } from './api'
+import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, addPlaceholderAtOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -24,6 +24,8 @@ function App() {
   const [isAddMode, setIsAddMode] = useState(false) // Manual add placeholder mode
   const [selectedBlockIndex, setSelectedBlockIndex] = useState(null) // Selected block for adding placeholder
   const [selectedCellIndex, setSelectedCellIndex] = useState(null) // Selected cell index within table (for table cells)
+  const [showAddTablePopup, setShowAddTablePopup] = useState(false) // Show add table popup
+  const [tableSize, setTableSize] = useState({ rows: 3, cols: 3 }) // Default table size
   const [selectedTableBlockIndex, setSelectedTableBlockIndex] = useState(null) // Table block index when cell is selected
   const [selectedParaInCell, setSelectedParaInCell] = useState(null) // Selected paragraph index within cell (for table cell paragraphs)
   const [newFieldName, setNewFieldName] = useState('') // New placeholder name
@@ -113,8 +115,60 @@ function App() {
     const selection = window.getSelection()
     if (!selection.rangeCount) return null
     const range = selection.getRangeAt(0)
-    const editedBlock = range.startContainer.closest('[data-block-index]')
+
+    // Handle both Text nodes and Element nodes
+    let startNode = range.startContainer
+    // If it's a Text node, get its parent element
+    if (startNode.nodeType === Node.TEXT_NODE) {
+      startNode = startNode.parentElement
+    }
+
+    // Now startNode is guaranteed to be an Element
+    const editedBlock = startNode.closest('[data-block-index]')
     return editedBlock ? parseInt(editedBlock.getAttribute('data-block-index')) : null
+  }
+
+  // Helper: Calculate cursor offset within a block (excluding placeholders)
+  const calculateCursorOffset = (range, blockIndex) => {
+    try {
+      // Find the editor element
+      const editor = document.getElementById('document-editor')
+      if (!editor) return null
+
+      // Find the element with this blockIndex
+      const element = editor.querySelector(`[data-block-index="${blockIndex}"]`)
+      if (!element) return null
+
+      // Calculate offset within the block, excluding placeholder characters
+      const preCaretRange = range.cloneRange()
+      preCaretRange.selectNodeContents(element)
+      preCaretRange.setEnd(range.startContainer, range.startOffset)
+      const textBeforeCaret = preCaretRange.toString()
+
+      // Remove placeholder characters («field_name») from offset calculation
+      const textWithoutPlaceholders = textBeforeCaret.replace(/«[^»]+»/g, '')
+      let offset = textWithoutPlaceholders.length
+
+      // Special case: Empty paragraph
+      const plainText = element.textContent.replace(/«[^»]+»/g, '').trim()
+      if (plainText.length === 0 && offset > 0) {
+        console.log('[DEBUG] Empty paragraph detected, forcing offset to 0')
+        offset = 0
+      }
+
+      console.log('[DEBUG] Cursor offset calculation:', {
+        blockIndex,
+        offset,
+        textBeforeCaret: textBeforeCaret.substring(0, 50) + (textBeforeCaret.length > 50 ? '...' : ''),
+        textWithoutPlaceholders: textWithoutPlaceholders.substring(0, 50) + (textWithoutPlaceholders.length > 50 ? '...' : ''),
+        plainTextLength: plainText.length
+      })
+
+      return offset
+    } catch (error) {
+      console.error('[ERROR] calculateCursorOffset failed:', error)
+      return null
+    }
   }
 
   // Helper: Get text from a specific paragraph within a table cell
@@ -1086,6 +1140,59 @@ function App() {
     }
   }
 
+  const handleAddTableAtCursor = async () => {
+    try {
+      // Get current selection
+      const selection = window.getSelection()
+      if (!selection.rangeCount) {
+        setError('❌ Vui lòng chọn vị trí muốn thêm bảng!')
+        return
+      }
+
+      // Get cursor position info
+      const blockIndex = getCurrentBlockIndex()
+      if (blockIndex === null || blockIndex === -1) {
+        setError('❌ Vui lòng click vào vị trí muốn thêm bảng!')
+        return
+      }
+
+      // Calculate offset within block
+      const range = selection.getRangeAt(0)
+      const offset = calculateCursorOffset(range, blockIndex)
+
+      if (offset === null) {
+        setError('❌ Không thể xác định vị trí cursor!')
+        return
+      }
+
+      console.log(`[DEBUG] Adding table at blockIndex=${blockIndex}, offset=${offset}, size=${tableSize.rows}x${tableSize.cols}`)
+
+      const result = await addTableAtCursor(
+        templateId,
+        blockIndex,
+        offset,
+        tableSize.rows,
+        tableSize.cols
+      )
+
+      console.log('[DEBUG] API result:', result)
+      console.log('[DEBUG] HTML preview length:', result.html_preview?.length)
+      console.log('[DEBUG] HTML preview preview:', result.html_preview?.substring(0, 500))
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+      setTemplateNeedsUpdate(true)
+
+      setShowAddTablePopup(false)
+      setError(`✅ Đã thêm bảng ${tableSize.rows}x${tableSize.cols} thành công!`)
+      setTimeout(() => setError(null), 2000)
+    } catch (err) {
+      console.error('Add table at cursor failed:', err)
+      setError('Thêm bảng thất bại: ' + (err.response?.data?.detail || err.message))
+    }
+  }
+
   const handleFormatTableCell = async () => {
     if (!selectedTableInfo.isCellSelected) return
 
@@ -1532,6 +1639,13 @@ function App() {
                         title="Thêm placeholder"
                       >
                         ➕ Thêm
+                      </button>
+                      <button
+                        onClick={() => setShowAddTablePopup(true)}
+                        className="ml-2 px-3 py-1 bg-purple-500 text-white rounded hover:bg-purple-600 transition-colors text-sm"
+                        title="Thêm bảng mới tại vị trí cursor"
+                      >
+                        📊 Thêm Bảng
                       </button>
                     </div>
                   )}
@@ -2383,6 +2497,80 @@ function App() {
             setSelectedTextForEdit(null)
           }}
         />
+      )}
+
+      {/* Add table popup */}
+      {showAddTablePopup && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full shadow-xl">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold text-gray-900">📊 Thêm Bảng Mới</h3>
+              <button
+                onClick={() => setShowAddTablePopup(false)}
+                className="text-gray-500 hover:text-gray-700 text-2xl"
+              >
+                ×
+              </button>
+            </div>
+
+            <p className="text-sm text-gray-600 mb-4">
+              Bảng sẽ được chèn tại vị trí cursor trong document
+            </p>
+
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Số hàng:
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={tableSize.rows}
+                  onChange={(e) => setTableSize({ ...tableSize, rows: parseInt(e.target.value) || 1 })}
+                  className="w-full border border-gray-300 rounded px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Số cột:
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={tableSize.cols}
+                  onChange={(e) => setTableSize({ ...tableSize, cols: parseInt(e.target.value) || 1 })}
+                  className="w-full border border-gray-300 rounded px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="bg-blue-50 border border-blue-200 rounded p-3 mb-4">
+              <p className="text-sm text-blue-800">
+                📐 Kích thước bảng: <strong>{tableSize.rows} × {tableSize.cols}</strong>
+              </p>
+              <p className="text-xs text-blue-600 mt-1">
+                Click vào vị trí muốn thêm bảng trong document trước khi nhấn "Thêm bảng"
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleAddTableAtCursor}
+                className="flex-1 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-colors font-medium"
+              >
+                📊 Thêm Bảng
+              </button>
+              <button
+                onClick={() => setShowAddTablePopup(false)}
+                className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 transition-colors font-medium"
+              >
+                Hủy
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Cell format dialog */}
