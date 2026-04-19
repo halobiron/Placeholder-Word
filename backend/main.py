@@ -9,9 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import json
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from template_manager import MailMergeProcessor
 from merge_executor import MergeExecutor
 from gemini_client import GeminiClient
+from docx_editor import DocxFullEditor
+import traceback
 
 # Setup paths
 BASE_DIR = Path(__file__).parent
@@ -294,8 +298,6 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
                     parent = fld.getparent()
 
                     # Create a new run element with original text
-                    from docx.oxml import OxmlElement
-                    from docx.oxml.ns import qn
 
                     new_run = OxmlElement('w:r')
                     new_t = OxmlElement('w:t')
@@ -955,7 +957,6 @@ async def edit_selection(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Edit failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /edit-selection ERROR ===")
         print(error_detail)
@@ -1295,9 +1296,6 @@ async def update_text_in_template(
 
                 if target_paragraph and not target_paragraph.text.strip():
                     # Empty paragraph - add text directly
-                    from docx.oxml import OxmlElement
-                    from docx.oxml.ns import qn
-
                     # CRITICAL: Copy alignment from first paragraph in same cell for table cells
                     # This preserves center/right alignment when adding text to empty paragraphs
                     if para_in_cell is not None and block_index is not None:
@@ -1371,7 +1369,6 @@ async def update_text_in_template(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         raise HTTPException(
             status_code=500, 
             detail=f"Text update failed: {str(e)}\n{traceback.format_exc()}"
@@ -1466,7 +1463,6 @@ async def get_selection_format(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Format extraction failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /get-selection-format ERROR ===")
         print(error_detail)
@@ -1510,7 +1506,6 @@ async def add_table_row(request: Request):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Calculate insertion index based on position
@@ -1548,7 +1543,6 @@ async def add_table_row(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Add table row failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /add-table-row ERROR ===")
         print(error_detail)
@@ -1587,7 +1581,6 @@ async def delete_table_row(request: Request):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Delete row
@@ -1622,7 +1615,6 @@ async def delete_table_row(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Delete table row failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /delete-table-row ERROR ===")
         print(error_detail)
@@ -1664,7 +1656,6 @@ async def add_table_column(request: Request):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Calculate insertion index based on position
@@ -1702,7 +1693,6 @@ async def add_table_column(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Add table column failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /add-table-column ERROR ===")
         print(error_detail)
@@ -1741,7 +1731,6 @@ async def delete_table_column(request: Request):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Delete column
@@ -1776,7 +1765,6 @@ async def delete_table_column(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Delete table column failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /delete-table-column ERROR ===")
         print(error_detail)
@@ -1830,7 +1818,6 @@ async def format_table_cell(request: Request):
 
         # Parse format options JSON
         try:
-            import json
             format_options = json.loads(format_options_str)
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid format_options JSON: {str(e)}")
@@ -1841,7 +1828,6 @@ async def format_table_cell(request: Request):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Format cell
@@ -1875,7 +1861,6 @@ async def format_table_cell(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Format table cell failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /format-table-cell ERROR ===")
         print(error_detail)
@@ -1941,7 +1926,6 @@ async def add_paragraph(request: Request):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         success = False
@@ -2005,7 +1989,6 @@ async def add_paragraph(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Add paragraph failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /add-paragraph ERROR ===")
         print(error_detail)
@@ -2064,7 +2047,6 @@ async def delete_paragraph(request: Request):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         success = False
@@ -2126,7 +2108,6 @@ async def delete_paragraph(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Delete paragraph failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /delete-paragraph ERROR ===")
         print(error_detail)
@@ -2161,7 +2142,6 @@ async def delete_multiple_paragraphs(request: Request):
 
         # Parse blocks JSON
         try:
-            import json
             blocks = json.loads(blocks_str)
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid blocks JSON: {str(e)}")
@@ -2172,7 +2152,6 @@ async def delete_multiple_paragraphs(request: Request):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Sort blocks by index in descending order to avoid index shifting issues
@@ -2288,7 +2267,6 @@ async def delete_multiple_paragraphs(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Delete multiple paragraphs failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /delete-multiple-paragraphs ERROR ===")
         print(error_detail)
@@ -2352,7 +2330,6 @@ async def add_table_at_cursor(request: Request):
         print(f"[INFO] add_table_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, rows={rows}, cols={cols}")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Log initial document state
@@ -2413,7 +2390,6 @@ async def add_table_at_cursor(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Add table at cursor failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /add-table-at-cursor ERROR ===")
         print(error_detail)
@@ -2505,7 +2481,6 @@ async def add_image_at_cursor(request: Request):
             raise HTTPException(status_code=500, detail=f"Failed to save image: {str(e)}")
 
         # Open and edit template
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Map block_index to paragraph_index
@@ -2558,7 +2533,6 @@ async def add_image_at_cursor(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         error_detail = f"Add image at cursor failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"=== /add-image-at-cursor ERROR ===")
         print(error_detail)

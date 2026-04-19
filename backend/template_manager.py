@@ -6,6 +6,15 @@ import re
 import json
 from pathlib import Path
 from typing import Dict
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.oxml.text.paragraph import CT_P
+from docx.oxml.table import CT_Tbl
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+import copy
+import re
 from smart_mail_merge_converter import SmartMailMergeConverter
 from gemini_client import GeminiClient
 
@@ -124,12 +133,6 @@ class MailMergeProcessor:
         IMPORTANT: Must use same empty-check logic as inject_placeholder_at_location
         to ensure block_index consistency between HTML preview and injection
         """
-        from docx import Document
-        from docx.oxml.text.paragraph import CT_P
-        from docx.oxml.table import CT_Tbl
-        from docx.table import Table
-        from docx.text.paragraph import Paragraph
-
         try:
             doc = Document(docx_path)
             self.doc = doc  # Store for image extraction
@@ -267,12 +270,6 @@ class MailMergeProcessor:
         Returns:
             List of content blocks with text and metadata
         """
-        from docx import Document
-        from docx.oxml.text.paragraph import CT_P
-        from docx.oxml.table import CT_Tbl
-        from docx.table import Table
-        from docx.text.paragraph import Paragraph
-
         try:
             doc = Document(docx_path)
             content_blocks = []
@@ -551,13 +548,6 @@ JSON:"""
         Returns:
             True if successful, False otherwise
         """
-        from docx import Document
-        from docx.oxml.text.paragraph import CT_P
-        from docx.oxml.table import CT_Tbl
-        from docx.table import Table
-        from docx.text.paragraph import Paragraph
-        import re
-
         if before_context is None:
             before_context = []
         if after_context is None:
@@ -726,8 +716,6 @@ JSON:"""
                     if target_para:
                         if self._inject_placeholder_in_paragraph(target_para, placeholder_name, context_hint, position, insert_after):
                             # Set vertical alignment to center for table cell
-                            from docx.oxml import OxmlElement
-                            from docx.oxml.ns import qn
                             tc_pr = cell._element.get_or_add_tcPr()
                             v_align = tc_pr.find(qn('w:vAlign'))
                             if v_align is None:
@@ -767,7 +755,6 @@ JSON:"""
         Returns:
             Similarity score between 0 and 1
         """
-        import re
 
         # Remove placeholders for comparison
         text1_clean = re.sub(r'«[^»]+»', '', text1)
@@ -802,7 +789,6 @@ JSON:"""
         Returns:
             Combined similarity score
         """
-        import re
 
         # Base similarity on main text
         base_similarity = self._calculate_text_similarity(candidate['text'], context_hint)
@@ -839,7 +825,6 @@ JSON:"""
 
     def _signature_similarity(self, sig1: str, sig2: str) -> float:
         """Calculate similarity between two context signatures"""
-        import re
         words1 = set(re.findall(r'\w+', sig1.lower()))
         words2 = set(re.findall(r'\w+', sig2.lower()))
 
@@ -892,7 +877,6 @@ JSON:"""
 
     def _list_similarity(self, list1: list, list2: list) -> float:
         """Calculate similarity between two lists of text"""
-        import re
 
         # Convert lists to text
         text1 = " ".join(list1).lower()
@@ -927,10 +911,6 @@ JSON:"""
             position: Where to insert (left=before, right=after, new_line, inline)
             insert_after: Text to insert after (required for position='inline')
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        import re
-        import copy
 
         try:
             # Log context ban đầu
@@ -1009,8 +989,7 @@ JSON:"""
         Returns:
             True if successful, False otherwise
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
+        # Use body children to preserve document order
         import copy
 
         try:
@@ -1147,8 +1126,6 @@ JSON:"""
             original_text: Original text to preserve in \\z switch
             position: Where to insert (left=before text, right=after text, new_line)
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
 
         # Get paragraph element
         p_element = paragraph._p
@@ -1219,8 +1196,6 @@ JSON:"""
             original_text: Original text to preserve in \\z switch
             fld_element: The fldSimple element containing the placeholder
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
         import copy
 
         original_p_element = original_paragraph._p
@@ -1541,10 +1516,6 @@ JSON:"""
         Returns:
             True nếu thành công, False nếu thất bại
         """
-        from docx import Document
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        import copy
 
         if not rename_map:
             print("No renames needed")

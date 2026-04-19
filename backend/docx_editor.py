@@ -3,12 +3,18 @@ DocxFullEditor - Edit mọi thứ trong DOCX mà vẫn giữ nguyên formatting
 Hỗ trợ: text edit, format changes, add content, delete content, tables, images
 """
 import re
+import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
 from docx import Document
-from docx.shared import Pt, RGBColor, Inches
+from docx.shared import Pt, RGBColor, Inches, Twips
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.oxml.text.paragraph import CT_P
+from docx.oxml.table import CT_Tbl
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from lxml import etree
 
 
@@ -67,10 +73,6 @@ class DocxFullEditor:
         if self._block_to_para_index_map is not None:
             return
 
-        from docx.oxml.text.paragraph import CT_P
-        from docx.oxml.table import CT_Tbl
-        from docx.table import Table
-        from docx.text.paragraph import Paragraph
 
         self._block_to_para_index_map = {}
         block_index = 0
@@ -262,10 +264,6 @@ class DocxFullEditor:
         CRITICAL FIX: Yield ALL paragraphs including those in table cells
         to properly support text editing in any paragraph.
         """
-        from docx.oxml.text.paragraph import CT_P
-        from docx.oxml.table import CT_Tbl
-        from docx.table import Table
-        from docx.text.paragraph import Paragraph
 
         for child in self.doc.element.body.iterchildren():
             if isinstance(child, CT_P):
@@ -667,9 +665,6 @@ class DocxFullEditor:
             bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
             all_caps: All caps formatting
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-
         # CRITICAL: Preserve paragraph-level formatting before splitting runs
         # This prevents loss of alignment, indents, tabs used for right-alignment tricks
         paragraph_alignment = paragraph.alignment
@@ -750,9 +745,6 @@ class DocxFullEditor:
         Returns:
             New Run object
         """
-        from docx.oxml import OxmlElement
-        import copy
-
         new_run = paragraph.add_run(text)
 
         # Copy format properties, excluding specified ones
@@ -964,9 +956,6 @@ class DocxFullEditor:
         Word uses "justify" + trailing spaces to create right-aligned text
         Convert to "right" alignment + right indent for proper display
         """
-        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-        from docx.shared import Twips
-
         # Get paragraph text after formatting
         paragraph_text = "".join(run.text for run in paragraph.runs)
 
@@ -1018,9 +1007,6 @@ class DocxFullEditor:
         Returns:
             True if found and formatted, False otherwise
         """
-        from docx.shared import Pt
-        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-
         alignment_map = {
             "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
             "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
@@ -1373,8 +1359,6 @@ class DocxFullEditor:
             True nếu thành công, False nếu thất bại
         """
         try:
-            from docx.oxml import OxmlElement
-
             # Lấy paragraph element
             p_element = paragraph._element
             parent = p_element.getparent()
@@ -1404,9 +1388,6 @@ class DocxFullEditor:
         Returns:
             Paragraph object mới được tạo
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        import copy
 
         # Lấy paragraph element
         target_p_element = target_paragraph._p
@@ -1470,9 +1451,6 @@ class DocxFullEditor:
         cell = row.cells[col_index]
 
         try:
-            from docx.oxml import OxmlElement
-            from docx.oxml.ns import qn
-            import copy
 
             if after_para_index is not None and after_para_index < len(cell.paragraphs):
                 # Thêm sau một paragraph cụ thể trong cell
@@ -1557,9 +1535,6 @@ class DocxFullEditor:
             ValueError: If parameters are invalid
             RuntimeError: If operation fails
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        import copy
 
         # Validate inputs
         if paragraph_index < 0:
@@ -1726,9 +1701,6 @@ class DocxFullEditor:
             ValueError: If parameters are invalid
             RuntimeError: If operation fails
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        import copy
 
         # Validate inputs
         if paragraph_index < 0:
@@ -1890,8 +1862,6 @@ class DocxFullEditor:
         Args:
             table: docx table object
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
 
         # Set table borders
         tbl_pr = table._element.tblPr
@@ -2017,9 +1987,6 @@ class DocxFullEditor:
             ValueError: If parameters are invalid
             RuntimeError: If operation fails
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        import copy
 
         # Validate inputs
         if paragraph_index < 0:
@@ -2123,7 +2090,6 @@ class DocxFullEditor:
 
         # Add picture to the new paragraph
         try:
-            from docx.shared import Inches
             image_run = image_paragraph.add_run()
             image_run.add_picture(image_path, width=Inches(width))
         except Exception as e:
@@ -2195,8 +2161,6 @@ class DocxFullEditor:
             else:
                 # Paragraph exists but has no runs (edge case)
                 # Add a new run with the text
-                from docx.oxml import OxmlElement
-                from docx.oxml.ns import qn
 
                 r = OxmlElement('w:r')
                 t = OxmlElement('w:t')
@@ -2274,8 +2238,6 @@ class DocxFullEditor:
         if len(table.rows) > 0 and len(table.rows[0].cells) <= 1:
             return False
 
-        from docx.oxml.ns import qn
-
         # Xóa từng cell trong column VÀ update table grid
         for row in table.rows:
             if col_index < len(row.cells):
@@ -2309,9 +2271,6 @@ class DocxFullEditor:
 
         # Python-docx không hỗ trợ trực tiếp add column
         # Cách giải quyết: tạo table mới với cấu trúc cập nhật
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        import copy
 
         # Lưu số columns cũ
         old_col_count = len(table.columns)
@@ -2427,8 +2386,6 @@ class DocxFullEditor:
             if 'background_color' in format_options:
                 bg_color = format_options['background_color']
                 if bg_color and bg_color != 'auto':
-                    from docx.oxml import OxmlElement
-                    from docx.oxml.ns import qn
 
                     # Tạo hoặc cập nhật shd element (shading)
                     shd = tc_pr.find(qn('w:shd'))
@@ -2447,8 +2404,7 @@ class DocxFullEditor:
             if 'vertical_align' in format_options:
                 v_align = format_options['vertical_align']
                 if v_align in ['top', 'center', 'bottom']:
-                    from docx.oxml import OxmlElement
-                    from docx.oxml.ns import qn
+
 
                     # Tạo hoặc cập nhật vAlign element
                     v_align_element = tc_pr.find(qn('w:vAlign'))
@@ -2462,9 +2418,6 @@ class DocxFullEditor:
             if 'horizontal_align' in format_options:
                 h_align = format_options['horizontal_align']
                 if h_align in ['left', 'center', 'right']:
-                    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-                    from docx.oxml import OxmlElement
-                    from docx.oxml.ns import qn
 
                     # Map alignment string to WD_PARAGRAPH_ALIGNMENT enum
                     alignment_map = {
@@ -2492,9 +2445,6 @@ class DocxFullEditor:
 
     def _apply_cell_borders(self, tc_pr, borders: dict):
         """Apply borders to table cell"""
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-
         # Tạo hoặc lấy tcBorders element
         tc_borders = tc_pr.find(qn('w:tcBorders'))
         if tc_borders is None:
@@ -2896,9 +2846,6 @@ class DocxFullEditor:
             ValueError: If parameters are invalid
             RuntimeError: If operation fails
         """
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        import copy
 
         # Validate inputs
         if paragraph_index < 0:
