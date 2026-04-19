@@ -15,6 +15,9 @@ class GeminiClient:
         Args:
             api_key: Gemini API key
         """
+        if not bool(api_key and api_key != "your_gemini_api_key_here"):
+            raise ValueError("GEMINI_API_KEY not configured. Please set it in .env file")
+            
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('models/gemini-3.1-flash-lite-preview')
 

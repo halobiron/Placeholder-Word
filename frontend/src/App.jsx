@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, analyzeTemplate, applySuggestions, getTemplateInfo, addPlaceholder, addPlaceholderAtOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink } from './api'
+import { mergeTemplate, getPreview, updateTemplate, suggestPlaceholders, applySuggestions, getTemplateInfo, addPlaceholder, addPlaceholderAtOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -756,7 +756,7 @@ function App() {
     setError(null)
 
     try {
-      const result = await analyzeTemplate(templateId)
+      const result = await suggestPlaceholders(templateId)
       setSuggestions(result.suggestions || [])
       setSelectedSuggestions([]) // Reset selection
     } catch (err) {

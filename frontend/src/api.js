@@ -14,11 +14,11 @@ export const convertDocx = async (file) => {
   return response.data
 }
 
-export const analyzeTemplate = async (templateId) => {
+export const suggestPlaceholders = async (templateId) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
 
-  const response = await axios.post(`${API_BASE}/analyze-template`, formData, {
+  const response = await axios.post(`${API_BASE}/suggest-placeholders`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },

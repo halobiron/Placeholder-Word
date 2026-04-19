@@ -1,7 +1,3 @@
-"""
-Mail Merge Placeholder System - Backend API
-Demo standalone FastAPI application
-"""
 import os
 import re
 import uuid
@@ -11,17 +7,11 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 import json
 from docx import Document
 from template_manager import MailMergeProcessor
 from merge_executor import MergeExecutor
 from gemini_client import GeminiClient
-
-# Load environment variables
-load_dotenv()
 
 # Setup paths
 BASE_DIR = Path(__file__).parent
@@ -37,16 +27,17 @@ def ensure_directories():
     for directory in dirs_to_create:
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            print(f"✓ Directory ensured: {directory}")
         except Exception as e:
-            print(f"✗ Failed to create directory {directory}: {e}")
+            print(f"Create directory failed: {e}")
 
 # Create directories on startup
 ensure_directories()
 
+# Load environment variables
+load_dotenv()
 # Configuration
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-GEMINI_API_KEY = "AIzaSyA8vLsYB356Fb8KRx9s0UrrAjmIZF3SmRY"  # Direct API key
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 # Initialize FastAPI
@@ -55,15 +46,6 @@ app = FastAPI(
     description="Convert Word documents with placeholders to Mail Merge templates",
     version="1.0.0"
 )
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Ensure directories exist on startup"""
-    ensure_directories()
-    print(f"✓ Application started. Uploads directory: {UPLOAD_DIR}")
-    print(f"✓ Templates directory: {TEMPLATE_DIR}")
-    print(f"✓ Results directory: {RESULT_DIR}")
 
 # Configure CORS
 app.add_middleware(
@@ -75,21 +57,14 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "OK"
-    }
-
-
 @app.get("/")
 async def root():
-    """Root endpoint"""
+    """Root endpoint and Health check"""
     return {
-        "message": "Mail Merge Placeholder System API",
+        "status": "OK",
+        "message": "Mail Merge Placeholder System API is running",
         "endpoints": {
-            "health": "GET /health",
+            "root": "GET / (Health Check)",
             "convert": "POST /convert",
             "merge": "POST /merge",
             "download": "GET /download/{file_id}"
@@ -107,6 +82,7 @@ async def convert_to_template(file: UploadFile = File(...)):
     Returns:
         JSON with template_id and list of detected fields
     """
+    ensure_directories()
     # Validate file type
     if not file.filename.endswith('.docx'):
         raise HTTPException(status_code=400, detail="Only .docx files are supported")
@@ -121,36 +97,23 @@ async def convert_to_template(file: UploadFile = File(...)):
             detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024*1024)}MB"
         )
 
-    # Ensure directories exist before processing
-    ensure_directories()
-
     # Save uploaded file temporarily
     temp_path = UPLOAD_DIR / f"temp_{file.filename}"
     try:
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        # Process document with SmartMailMergeConverter
-        # Temporarily disable Gemini renaming for preview by not passing the API key
         processor = MailMergeProcessor(gemini_api_key=None)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path))
-
-        # Debug: Log HTML preview content
-        html_preview = result.get("html_preview", "")
-        print(f"=== HTML PREVIEW DEBUG ===")
-        print(f"Fields detected: {result['fields']}")
-        print(f"HTML preview length: {len(html_preview)}")
-        print(f"Contains mail-merge-placeholder: {'mail-merge-placeholder' in html_preview}")
-        print(f"=== END DEBUG ===")
 
         # Build response
         response_data = {
             "template_id": result["template_id"],
             "fields": result["fields"],
             "field_count": result["field_count"],
-            "html_preview": html_preview,
+            "html_preview": result["html_preview"],
             "download_url": f"/download/{result['template_id']}",
             "method": result.get("method", "smart_converter")
         }
@@ -203,13 +166,10 @@ async def merge_template(
 
         elif context:
             # Use Gemini to extract from context
-            if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key_here":
-                raise HTTPException(
-                    status_code=500,
-                    detail="GEMINI_API_KEY not configured. Please set it in .env file"
-                )
-
-            gemini_client = GeminiClient(GEMINI_API_KEY)
+            try:
+                gemini_client = GeminiClient(GEMINI_API_KEY)
+            except ValueError as e:
+                raise HTTPException(status_code=500, detail=str(e))
             
             if active_fields:
                 active_f = set(json.loads(active_fields))
@@ -217,8 +177,7 @@ async def merge_template(
 
             print(f"=== MERGE DEBUG ===")
             print(f"Template fields to extract: {template_fields}")
-            data = _extract_data_from_context(
-                gemini_client,
+            data = gemini_client.extract_data_from_context(
                 context,
                 template_fields
             )
@@ -229,9 +188,6 @@ async def merge_template(
                 status_code=400,
                 detail="Either 'context' or 'field_values' must be provided"
             )
-
-        # Ensure result directory exists
-        ensure_directories()
 
         # Execute merge
         result_path, result_id = executor.execute_merge(str(template_path), data)
@@ -314,149 +270,73 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
 
     try:
         rename_mapping = json.loads(rename_map)
+        print(f"[INFO] update_template called for '{template_id}' with map: {rename_mapping}")
+        
         doc = Document(str(template_path))
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         flds = [f for f in doc.element.iter(f"{w_ns}fldSimple") if "MERGEFIELD" in f.get(f"{w_ns}instr", "")]
 
         count_updated = 0
 
-        print(f"\n=== UPDATE TEMPLATE DEBUG ===")
-        print(f"Template ID: {template_id}")
-        print(f"Rename mapping: {rename_mapping}")
-        print(f"Total placeholders found: {len(flds)}")
-
-        for idx, fld in enumerate(flds):
+        for fld in flds:
             instr = fld.get(f"{w_ns}instr", "")
             match = re.search(r'MERGEFIELD\s+(\S+)', instr)
             if match:
                 current_name = match.group(1)
                 new_name = rename_mapping.get(current_name)
 
-                print(f"\n[FIELD {idx}] Current: '{current_name}'")
-                print(f"  → New name from mapping: {new_name}")
+                if new_name is None:
+                    # DELETE: Replace field with original text from \z switch
+                    z_match = re.search(r'\\z\s*"([^"]*)"', instr)
+                    original_text = z_match.group(1) if z_match else f"«{current_name}»"
 
-                if new_name is not None and new_name != current_name:
-                    # Keep the original \z part
+                    # Get parent element (paragraph or table cell)
+                    parent = fld.getparent()
+
+                    # Create a new run element with original text
+                    from docx.oxml import OxmlElement
+                    from docx.oxml.ns import qn
+
+                    new_run = OxmlElement('w:r')
+                    new_t = OxmlElement('w:t')
+                    new_t.set(qn('xml:space'), 'preserve')
+                    new_t.text = original_text
+                    new_run.append(new_t)
+
+                    # Replace fldSimple with the run
+                    parent.replace(fld, new_run)
+                    count_updated += 1
+                    print(f"[DELETE] Removed field '{current_name}', restored: '{original_text}'")
+
+                elif new_name != current_name:
+                    # RENAME: Keep the original \z part
                     z_match = re.search(r'\\z\s*"([^"]*)"', instr)
                     z_part = f' \\z "{z_match.group(1)}"' if z_match else ""
 
-                    print(f"  → UPDATING to '{new_name}'")
-                    print(f"  → Old instr: {instr}")
-                    print(f"  → Z part: {z_part}")
-
                     new_instr = f' MERGEFIELD {new_name} \\* MERGEFORMAT{z_part} '
-                    print(f"  → New instr: {new_instr}")
-
                     fld.set(f"{w_ns}instr", new_instr)
 
-                    text_update_count = 0
                     for t in fld.iter(f"{w_ns}t"):
-                        old_text = t.text
                         t.text = f"«{new_name}»"
-                        text_update_count += 1
-                        print(f"  → Updated text element {text_update_count}: '{old_text}' → '«{new_name}»'")
 
                     count_updated += 1
-                    print(f"  ✓ Field updated successfully (total updated: {count_updated})")
-
-                # Fields not in rename_map are kept as-is (no deletion)
-                # This prevents placeholders from disappearing when renamed
-                print(f"  → Keeping field '{current_name}' (not in rename_map)")
             else:
-                print(f"\n[FIELD {idx}] ⚠ Could not parse MERGEFIELD from instr: {instr}")
+                print(f"[WARNING] Could not parse MERGEFIELD from instr: {instr}")
 
-        print(f"\n=== UPDATE SUMMARY ===")
-        print(f"Fields updated: {count_updated}")
-        print(f"========================\n")
-
-        print(f"Saving document to: {template_path}")
         doc.save(str(template_path))
-        print(f"✓ Document saved successfully")
+        print(f"[INFO] Successfully updated {count_updated} fields in '{template_id}'")
 
-        # Verify save by re-reading the file
-        print(f"\n=== VERIFICATION ===")
-        verify_doc = Document(str(template_path))
-        verify_flds = [f for f in verify_doc.element.iter(f"{w_ns}fldSimple") if "MERGEFIELD" in f.get(f"{w_ns}instr", "")]
-        print(f"Placeholders after save: {len(verify_flds)}")
-        for idx, fld in enumerate(verify_flds):
-            instr = fld.get(f"{w_ns}instr", "")
-            match = re.search(r'MERGEFIELD\s+(\S+)', instr)
-            if match:
-                field_name = match.group(1)
-                # Get text content
-                text_content = ""
-                for t in fld.iter(f"{w_ns}t"):
-                    if t.text:
-                        text_content += t.text
-                print(f"  [{idx}] '{field_name}' → Display: '{text_content}'")
-        print(f"==================\n")
-
-        return {"template_id": template_id, "updated": True,
-                "fields_updated": count_updated}
+        return {
+            "template_id": template_id, 
+            "updated": True,
+            "fields_updated": count_updated
+        }
     except Exception as e:
+        print(f"[ERROR] Update template failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
-def _extract_data_from_context(
-    gemini_client: GeminiClient,
-    context: str,
-    template_fields: list
-) -> Dict[str, str]:
-    """Extract structured data from context using Gemini
 
-    Args:
-        gemini_client: Gemini client instance
-        context: User-provided context text
-        template_fields: List of required field names
-
-    Returns:
-        Dict mapping field names to values
-    """
-    prompt = f"""Extract data from this Vietnamese text for a mail merge template.
-
-Required fields: {', '.join(template_fields)}
-
-Context: {context}
-
-Return a JSON object with field names as keys and extracted values as values.
-Example: {{"ho_ten": "Nguyen Van A", "so_cmnd": "123456789"}}
-
-JSON:"""
-
-    try:
-        response = gemini_client.model.generate_content(prompt)
-
-        # Parse JSON response
-        import json
-        response_text = response.text.strip()
-        print(f"=== GEMINI RAW RESPONSE ===")
-        print(response_text)
-        print(f"=== END GEMINI RESPONSE ===")
-        
-        # Try to extract JSON if there's extra text
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0].strip()
-
-        data = json.loads(response_text)
-        print(f"Parsed JSON keys: {list(data.keys())}")
-
-        # Ensure all required fields are present
-        # If missing, use empty string as default
-        for field in template_fields:
-            if field not in data:
-                print(f"  ⚠ Field '{field}' missing in Gemini response → set to empty")
-                data[field] = ""
-
-        return data
-
-    except Exception as e:
-        print(f"Extraction failed: {e}")
-        # Fallback: return empty values for all fields
-        return {field: "" for field in template_fields}
-
-
-@app.post("/analyze-template")
-async def analyze_template(template_id: str = Form(...)):
+@app.post("/suggest-placeholders")
+async def suggest_placeholders(template_id: str = Form(...)):
     """Analyze template with AI to detect missing placeholders
 
     Args:
@@ -468,13 +348,6 @@ async def analyze_template(template_id: str = Form(...)):
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
         raise HTTPException(status_code=404, detail="Template not found")
-
-    # Check API key
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key_here":
-        raise HTTPException(
-            status_code=500,
-            detail="GEMINI_API_KEY not configured. Please set it in .env file"
-        )
 
     try:
         # Get existing fields from template
@@ -502,11 +375,7 @@ async def analyze_template(template_id: str = Form(...)):
 
         return {
             "template_id": template_id,
-            "existing_fields": existing_fields,
-            "existing_field_count": len(existing_fields),
-            "suggestions": suggestions,
-            "suggestion_count": len(suggestions),
-            "structured_content_preview": structured_content[:5]  # First 5 blocks for reference
+            "suggestions": suggestions
         }
 
     except HTTPException:
@@ -737,35 +606,6 @@ async def add_placeholder_manual(
                 status_code=400,
                 detail=f"Invalid position. Must be one of: {', '.join(valid_positions)}"
             )
-
-        # Initialize processor
-        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
-
-        # Extract structured content for smart field naming
-        structured_content = processor.extract_structured_content(str(template_path))
-
-        # Auto-generate field name if not provided, or refine with Gemini if requested
-        if not field_name or not field_name.strip():
-            # Auto-generate from block text
-            print("→ No field name provided, auto-generating from block text...")
-            extracted_text = processor.extract_text_from_block_with_fallback(
-                structured_content,
-                block_index,
-                para_in_cell
-            )
-
-            if extracted_text:
-                field_name = processor.generate_smart_field_name(
-                    extracted_text,
-                    structured_content,
-                    block_index
-                )
-                print(f"→ Auto-generated field name: {field_name}")
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Could not extract meaningful text from selected location"
-                )
 
         # Inject placeholder (with cell_index and para_in_cell if provided)
         success = processor.inject_placeholder_at_location(
