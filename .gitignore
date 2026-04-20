@@ -7,3 +7,5 @@
 .claude/skills/gitnexus
 backend/uploads.DS_Store
 backend/uploads/
+# Added by code-review-graph
+.code-review-graph/

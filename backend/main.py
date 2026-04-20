@@ -460,12 +460,16 @@ async def apply_ai_suggestions(
             else:
                 results["failed"] += 1
 
-        # Get updated field list
+        # Get updated field list and HTML preview
         executor = MergeExecutor()
         updated_fields = executor.get_template_fields(str(template_path))
 
+        # Generate HTML preview with updated placeholders
+        html_preview = processor._generate_html_preview(str(template_path))
+
         results["updated_field_count"] = len(updated_fields)
         results["updated_fields"] = updated_fields
+        results["html_preview"] = html_preview
 
         return results
 
@@ -742,44 +746,6 @@ async def add_placeholder_by_offset(
             detail=f"Unexpected error: {type(e).__name__}: {str(e)}"
         )
 
-
-@app.get("/template-info/{template_id}")
-async def get_template_info(template_id: str):
-    """Get current template information including fields
-
-    Args:
-        template_id: ID of template
-
-    Returns:
-        JSON with template fields and HTML preview
-    """
-    template_path = TEMPLATE_DIR / f"{template_id}.docx"
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail="Template not found")
-
-    try:
-        # Get fields from template
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        # Generate HTML preview
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
-
-        return {
-            "template_id": template_id,
-            "fields": fields,
-            "field_count": len(fields),
-            "html_preview": html_preview
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get template info: {str(e)}"
-        )
-
-
 def map_camel_to_snake(format_data: dict) -> dict:
     """Map camelCase keys to snake_case for Python functions"""
     format_mapping = {
@@ -924,98 +890,6 @@ async def edit_selection(
         raise HTTPException(status_code=500, detail=error_detail)
 
 
-@app.post("/add-content")
-async def add_content(
-    template_id: str = Form(...),
-    add_type: str = Form(...),  # "placeholder", "image"
-    position: str = Form(...),   # "end", "after:text", "before:text"
-    content: str = Form(None),   # Text content
-    field_name: str = Form(None), # Field name for placeholder
-    file: UploadFile = None,     # Image file
-    inherit_format: bool = Form(True),  # Inherit format from nearby text
-    format_config: str = Form(None)  # Format options for new content
-):
-    """
-    Add new content to template
-
-    Args:
-        template_id: Template ID
-        add_type: Type of content to add ("placeholder", "image")
-        position: Where to add ("end", "after:text", "before:text")
-        content: Text/paragraph content
-        field_name: Field name for placeholder
-        file: Image file (for image type)
-        inherit_format: True = inherit format from nearby text
-        format_config: Format options (optional)
-
-    Returns:
-        Updated template and preview
-    """
-    template_path = TEMPLATE_DIR / f"{template_id}.docx"
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail="Template not found")
-
-    try:
-        editor = DocxFullEditor(str(template_path))
-
-        if add_type == "placeholder":
-            # Add placeholder
-            if not field_name:
-                raise HTTPException(status_code=400, detail="field_name required for placeholder addition")
-
-            editor.add_placeholder(field_name, position)
-
-        elif add_type == "image":
-            # Add image
-            if not file:
-                raise HTTPException(status_code=400, detail="file required for image addition")
-
-            # Get file extension from original filename
-            file_ext = Path(file.filename).suffix or ".jpg"
-
-            # Save uploaded image temporarily
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
-                tmp.write(await file.read())
-                tmp_path = tmp.name
-
-            try:
-                # Extract width from format_config if provided
-                width = 4.0  # Default width
-                if format_config:
-                    format_data = json.loads(format_config)
-                    width = format_data.get("width", 4.0)
-
-                success = editor.add_image(tmp_path, position, width=width)
-                if not success and position != "end":
-                    raise HTTPException(status_code=404, detail="Target text not found for image placement")
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-
-        else:
-            raise HTTPException(status_code=400, detail=f"Invalid add_type: {add_type}")
-
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Get updated fields and preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
-
-        return {
-            "template_id": template_id,
-            "fields": fields,
-            "html_preview": html_preview,
-            "added": True,
-            "add_type": add_type
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Add content failed: {str(e)}")
-
 @app.post("/add-page-break-at-cursor")
 async def add_page_break_at_cursor_endpoint(request: Request):
     """
@@ -1133,10 +1007,9 @@ async def add_hyperlink_to_template(
 async def update_text_in_template(
     template_id: str = Form(...),
     block_index: int = Form(...),
-    old_text: str = Form(""),  # Changed to allow empty string for new cells
+    old_text: str = Form(""),
     new_text: str = Form(""),
-    edit_type: str = Form("text"),
-    para_in_cell: int = Form(None)  # NEW: Support table cell paragraph editing
+    para_in_cell: int = Form(None)
 ):
     """Update text in template while preserving formatting
 
@@ -1147,7 +1020,6 @@ async def update_text_in_template(
         block_index: Block index in HTML preview
         old_text: Original text (for fuzzy matching)
         new_text: New text to replace with (empty string for deletion)
-        edit_type: Type of edit (text-only in this case)
         para_in_cell: Optional paragraph index within table cell for precise targeting
 
     Returns:
@@ -1278,7 +1150,6 @@ async def update_text_in_template(
             "updated": True,
             "fields": fields,
             "html_preview": html_preview,
-            "edit_type": "text",
             "block_index": block_index,
             "action": "delete" if new_text == "" else "update"
         }

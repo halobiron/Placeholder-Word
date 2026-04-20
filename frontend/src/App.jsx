@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, suggestPlaceholders, applySuggestions, getTemplateInfo, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink } from './api'
+import { mergeTemplate, getPreview, updateTemplate, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -374,7 +374,6 @@ function App() {
             formData.append('block_index', cellBlockIndex)
             formData.append('old_text', oldText)
             formData.append('new_text', newText)
-            formData.append('edit_type', 'text')
             formData.append('para_in_cell', paraInCell)
 
             const response = await axios.post(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`, formData, {
@@ -726,24 +725,6 @@ function App() {
     }
   }, [editorHtml, isAddMode])
 
-  // Refresh template after text update
-  useEffect(() => {
-    const refreshAfterTextUpdate = async () => {
-      if (templateNeedsUpdate && templateId) {
-        try {
-          // CRITICAL FIX: Save scroll position before refreshing
-          const info = await getTemplateInfo(templateId)
-          updateEditorHtmlWithPreservation(info.html_preview, info.fields)  // ✅ Uses helper with scroll preservation
-          setTemplateNeedsUpdate(false)
-        } catch (err) {
-          console.error('Failed to refresh template:', err)
-        }
-      }
-    }
-
-    refreshAfterTextUpdate()
-  }, [templateNeedsUpdate, templateId])
-
   // Rename placeholder
   const renameField = async (oldName, newName) => {
     const editor = document.getElementById('document-editor')
@@ -956,11 +937,10 @@ function App() {
 
       const result = await applySuggestions(templateId, editedSuggestionsToApply)
 
-      // Reload template to get updated fields
-      const templateInfo = await getTemplateInfo(templateId)
-      setEditorHtml(templateInfo.html_preview)
-      setFields(templateInfo.fields)
-      setOriginalFields(templateInfo.fields)
+      // Update editor with result from applySuggestions (no extra API call needed)
+      setEditorHtml(result.html_preview)
+      setFields(result.updated_fields)
+      setOriginalFields(result.updated_fields)
 
       // Clear suggestions and edits after successful apply
       setSuggestions([])
@@ -1323,27 +1303,6 @@ function App() {
     }
   }
 
-  // Handle add content
-  const handleAddContent = async (addData) => {
-    if (!templateId) return
-
-    try {
-      const result = await addContent(templateId, addData)
-
-      // Update UI
-      setEditorHtml(result.html_preview)
-      setFields(result.fields)
-      setOriginalFields(result.fields)
-
-      // Show success message
-      setError(`✅ Đã thêm ${addData.type} thành công!`)
-      setTimeout(() => setError(null), 3000)
-    } catch (err) {
-      console.error('Add content failed:', err)
-      setError('Thêm nội dung thất bại: ' + (err.response?.data?.detail || err.message))
-    }
-  }
-
   const handleAddPageBreak = async () => {
     if (!templateId) return
 
@@ -1540,7 +1499,6 @@ function App() {
       console.log('[DEBUG] HTML preview preview:', result.html_preview?.substring(0, 500))
 
       updateEditorHtmlWithPreservation(result.html_preview, result.fields)  // ✅ Uses helper
-      setTemplateNeedsUpdate(true)
 
       setShowAddTablePopup(false)
       setError(`✅ Đã thêm bảng ${tableSize.rows}x${tableSize.cols} thành công!`)
@@ -1596,7 +1554,6 @@ function App() {
       console.log('[DEBUG] HTML preview length:', result.html_preview?.length)
 
       updateEditorHtmlWithPreservation(result.html_preview, result.fields)  // ✅ Uses helper
-      setTemplateNeedsUpdate(true)
 
       setShowAddImagePopup(false)
       setSelectedImageFile(null)
@@ -2002,19 +1959,6 @@ function App() {
                     <div className="flex gap-2">
                       <button
                         onClick={() => {
-                          const editor = document.getElementById('document-editor')
-                          if (editor) {
-                            editor.focus()
-                            setError('💡 Chọn văn bản trong tài liệu để mở menu chỉnh sửa')
-                          }
-                        }}
-                        className="px-3 py-1.5 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 font-medium"
-                        title="Click để chọn text để sửa"
-                      >
-                        ✏️ Chỉnh sửa
-                      </button>
-                      <button
-                        onClick={() => {
                           const selection = window.getSelection()
                           const selectedText = selection.toString().trim()
 
@@ -2088,13 +2032,6 @@ function App() {
                         title="Paste định dạng đã copy vào văn bản đang chọn"
                       >
                         🎨 Paste Format
-                      </button>
-                      <button
-                        onClick={() => handleAddContent({ type: 'placeholder', position: 'end', fieldName: prompt('Tên placeholder:') })}
-                        className="ml-2 px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 transition-colors text-sm"
-                        title="Thêm placeholder"
-                      >
-                        ➕ Thêm
                       </button>
                       <button
                         onClick={() => setShowAddImagePopup(true)}
@@ -2668,6 +2605,7 @@ function App() {
                           // Track if we need to refresh after processing all changes
                           let needsRefresh = false
                           let skipTextUpdates = false // Skip text updates if structure changed significantly
+                          let lastUpdateResponse = null // Store response from last update-text call
 
                           // If paragraph count changed, user deleted/added a paragraph
                           if (oldCellParas.length !== newCellParas.length && deletedFields.length === 0) {
@@ -2698,12 +2636,14 @@ function App() {
                                 formData.append('block_index', cellBlockIndex)
                                 formData.append('old_text', deletedText)
                                 formData.append('new_text', '') // Empty to delete
-                                formData.append('edit_type', 'text')
                                 formData.append('para_in_cell', deletedParaIndex)
 
-                                await axios.post(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`, formData, {
+                                const response = await axios.post(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`, formData, {
                                   headers: { 'Content-Type': 'multipart/form-data' }
                                 })
+
+                                // Store response for final update
+                                lastUpdateResponse = response.data
 
                                 console.log('[DEBUG] Successfully deleted paragraph', deletedParaIndex)
                                 needsRefresh = true
@@ -2712,30 +2652,31 @@ function App() {
                               }
                             }
 
-                            // CRITICAL: After deletions, refresh from backend to get correct HTML with preserved alignment
-                            // DON'T use newHtml from contentEditable as it may lose alignment styles
-                            console.log('[DEBUG] Refreshing from backend after paragraph deletions')
+                            // CRITICAL: After deletions, use response from backend to get correct HTML with preserved alignment
+                            if (lastUpdateResponse) {
+                              console.log('[DEBUG] Updating with response from backend after paragraph deletions')
 
-                            // Save scroll position before refreshing
-                            const editor = document.getElementById('document-editor')
-                            const savedScrollTop = editor ? editor.scrollTop : 0
-                            const savedScrollLeft = editor ? editor.scrollLeft : 0
+                              // Save scroll position before updating
+                              const editor = document.getElementById('document-editor')
+                              const savedScrollTop = editor ? editor.scrollTop : 0
+                              const savedScrollLeft = editor ? editor.scrollLeft : 0
 
-                            console.log('[DEBUG] Saved positions:', { scrollTop: savedScrollTop, scrollLeft: savedScrollLeft })
+                              console.log('[DEBUG] Saved positions:', { scrollTop: savedScrollTop, scrollLeft: savedScrollLeft })
 
-                            // Trigger refresh from backend to get HTML with correct alignment
-                            setTemplateNeedsUpdate(true)
-                            skipTextUpdates = true // Skip individual text updates to avoid conflicts
+                              // Update with response from backend
+                              updateEditorHtmlWithPreservation(lastUpdateResponse.html_preview, lastUpdateResponse.fields)
+                              skipTextUpdates = true // Skip individual text updates to avoid conflicts
 
-                            // Restore scroll position after refresh
-                            setTimeout(() => {
-                              const editorAfter = document.getElementById('document-editor')
-                              if (editorAfter) {
-                                editorAfter.scrollTop = savedScrollTop
-                                editorAfter.scrollLeft = savedScrollLeft
-                                console.log('[DEBUG] Restored scroll position:', { scrollTop: editorAfter.scrollTop, scrollLeft: editorAfter.scrollLeft })
-                              }
-                            }, 100) // Wait for refresh to complete
+                              // Restore scroll position after update
+                              setTimeout(() => {
+                                const editorAfter = document.getElementById('document-editor')
+                                if (editorAfter) {
+                                  editorAfter.scrollTop = savedScrollTop
+                                  editorAfter.scrollLeft = savedScrollLeft
+                                  console.log('[DEBUG] Restored scroll position:', { scrollTop: editorAfter.scrollTop, scrollLeft: editorAfter.scrollLeft })
+                                }
+                              }, 100) // Wait for update to complete
+                            }
                           }
 
                           // Get text from specific paragraph in cell

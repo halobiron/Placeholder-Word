@@ -369,13 +369,21 @@ class DocxFullEditor:
         if old_text is None or (isinstance(old_text, str) and not old_text.strip()):
             print(f"[DEBUG] Handling empty/whitespace old_text: repr={repr(old_text)}")
             if paragraph_index is not None:
-                # Find the target paragraph and clear its content
+                # Find the target paragraph and replace/add text
                 for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
                     if p_idx == paragraph_index:
-                        # Clear all runs in this paragraph
-                        for run in paragraph.runs:
-                            run.text = ""
-                        print(f"[DEBUG] Cleared paragraph {paragraph_index}")
+                        # CRITICAL FIX: Insert new_text if provided (e.g., adding text to new paragraph)
+                        if new_text and new_text.strip():
+                            if paragraph.runs:
+                                paragraph.runs[0].text = new_text
+                            else:
+                                paragraph.add_run(new_text)
+                            print(f"[DEBUG] Inserted new_text into paragraph {paragraph_index}: '{new_text}'")
+                        else:
+                            # Clear all runs if deleting
+                            for run in paragraph.runs:
+                                run.text = ""
+                            print(f"[DEBUG] Cleared paragraph {paragraph_index}")
                         return True
             return False
 
@@ -384,13 +392,21 @@ class DocxFullEditor:
         if not search_text_normalized:
             print(f"[DEBUG] Normalized text is empty, treating as deletion: repr(old_text)={repr(old_text)}")
             if paragraph_index is not None:
-                # Find the target paragraph and clear its content
+                # Find the target paragraph and replace/add text
                 for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
                     if p_idx == paragraph_index:
-                        # Clear all runs in this paragraph
-                        for run in paragraph.runs:
-                            run.text = ""
-                        print(f"[DEBUG] Cleared paragraph {paragraph_index} (normalized was empty)")
+                        # CRITICAL FIX: Insert new_text if provided (e.g., adding text to new paragraph)
+                        if new_text and new_text.strip():
+                            if paragraph.runs:
+                                paragraph.runs[0].text = new_text
+                            else:
+                                paragraph.add_run(new_text)
+                            print(f"[DEBUG] Inserted new_text into paragraph {paragraph_index} (normalized was empty): '{new_text}'")
+                        else:
+                            # Clear all runs if deleting
+                            for run in paragraph.runs:
+                                run.text = ""
+                            print(f"[DEBUG] Cleared paragraph {paragraph_index} (normalized was empty)")
                         return True
             return False
 
@@ -2072,28 +2088,6 @@ class DocxFullEditor:
         except Exception as e:
             print(f"Error adding paragraph in table cell: {e}")
             return False
-
-    def add_placeholder(self, field_name: str, position: str = "end", after_text: str = None):
-        """
-        Thêm placeholder merge field
-
-        Args:
-            field_name: Tên field
-            position: "end", "after:text", "before:text"
-            after_text: Text đích (cho after/before)
-        """
-        placeholder_text = f" «{field_name}»"
-        print(f"[DEBUG] add_placeholder called: field_name={field_name}, position={position}")
-
-        if position == "end":
-            # Use add_paragraph_at_end to inherit formatting
-            self.add_paragraph_at_end(placeholder_text)
-        elif position.startswith("after:"):
-            target_text = position.split("after:")[1].strip()
-            self.add_text_after(target_text, placeholder_text, inherit_format=True)
-        elif position.startswith("before:"):
-            target_text = position.split("before:")[1].strip()
-            self.add_text_before(target_text, placeholder_text, inherit_format=True)
 
     def insert_placeholder_at_offset(
         self,

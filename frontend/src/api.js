@@ -39,11 +39,6 @@ export const applySuggestions = async (templateId, suggestions) => {
   return response.data
 }
 
-export const getTemplateInfo = async (templateId) => {
-  const response = await axios.get(`${API_BASE}/template-info/${templateId}`)
-  return response.data
-}
-
 export const mergeTemplate = async (templateId, data, isDirectValues = false, activeFields = null) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
@@ -55,7 +50,7 @@ export const mergeTemplate = async (templateId, data, isDirectValues = false, ac
     // Send context text for Gemini extraction
     formData.append('context', data)
   }
-  
+
   if (activeFields) {
     formData.append('active_fields', JSON.stringify(activeFields))
   }
@@ -209,38 +204,7 @@ export const editSelection = async (templateId, editData) => {
   return response.data
 }
 
-export const addContent = async (templateId, addData) => {
-  const formData = new FormData()
-  formData.append('template_id', templateId)
-  formData.append('add_type', addData.type)
-  formData.append('position', addData.position)
-  formData.append('inherit_format', addData.inheritFormat ? 'true' : 'false')
-
-  if (addData.content) {
-    formData.append('content', addData.content)
-  }
-
-  if (addData.fieldName) {
-    formData.append('field_name', addData.fieldName)
-  }
-
-  if (addData.file) {
-    formData.append('file', addData.file)
-  }
-
-  if (addData.format) {
-    formData.append('format_config', JSON.stringify(addData.format))
-  }
-
-  const response = await axios.post(`${API_BASE}/add-content`, formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-  })
-  return response.data
-}
-
-export const updateTextInTemplate = async (templateId, { blockIndex, oldText, newText, editType = 'text' }) => {
+export const updateTextInTemplate = async (templateId, { blockIndex, oldText, newText }) => {
   // Validate blockIndex before making the request
   if (isNaN(blockIndex) || blockIndex === null || blockIndex === undefined) {
     throw new Error(`Invalid blockIndex: ${blockIndex}`)
@@ -251,18 +215,12 @@ export const updateTextInTemplate = async (templateId, { blockIndex, oldText, ne
   formData.append('block_index', blockIndex)
   formData.append('old_text', oldText)
   formData.append('new_text', newText)
-  formData.append('edit_type', editType)
 
   const response = await axios.post(`${API_BASE}/update-text`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
   })
-  return response.data
-}
-
-export const refreshTemplateInfo = async (templateId) => {
-  const response = await axios.get(`${API_BASE}/template-info/${templateId}`)
   return response.data
 }
 
