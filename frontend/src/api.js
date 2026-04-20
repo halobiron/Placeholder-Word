@@ -91,7 +91,7 @@ export const updateTemplate = async (templateId, renameMap, editorHtml) => {
   return response.data
 }
 
-export const addPlaceholder = async (templateId, blockIndex, fieldName, position = 'right', cellIndex = null, paraInCell = null) => {
+export const addPlaceholderByPosition = async (templateId, blockIndex, fieldName, position = 'right', cellIndex = null, paraInCell = null) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
   formData.append('block_index', blockIndex)
@@ -104,7 +104,7 @@ export const addPlaceholder = async (templateId, blockIndex, fieldName, position
     formData.append('para_in_cell', paraInCell)
   }
 
-  const response = await axios.post(`${API_BASE}/add-placeholder`, formData, {
+  const response = await axios.post(`${API_BASE}/add-placeholder-by-position`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
@@ -112,15 +112,18 @@ export const addPlaceholder = async (templateId, blockIndex, fieldName, position
   return response.data
 }
 
-export const addPlaceholderAtOffset = async (templateId, blockIndex, offset, fieldName, inheritFormat = true) => {
+export const addPlaceholderByOffset = async (templateId, blockIndex, offset, fieldName, inheritFormat = true, paraInCell = null) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
   formData.append('block_index', blockIndex)
   formData.append('offset', offset)
   formData.append('field_name', fieldName)
   formData.append('inherit_format', inheritFormat)
+  if (paraInCell !== null) {
+    formData.append('para_in_cell', paraInCell)
+  }
 
-  const response = await axios.post(`${API_BASE}/add-placeholder-at-offset`, formData, {
+  const response = await axios.post(`${API_BASE}/add-placeholder-by-offset`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },

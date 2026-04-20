@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, suggestPlaceholders, applySuggestions, getTemplateInfo, addPlaceholder, addPlaceholderAtOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink } from './api'
+import { mergeTemplate, getPreview, updateTemplate, suggestPlaceholders, applySuggestions, getTemplateInfo, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, addContent, refreshTemplateInfo, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -333,57 +333,72 @@ function App() {
       }
     })
 
-    // Add click handlers for table cells (ALWAYS ACTIVE, not just in add mode)
-    // This enables table editing toolbar for all table cells
-    // IMPORTANT: Setup AFTER paragraph handlers to override them
+    // Add click handlers for table cells
+    // In NORMAL mode: enable table editing toolbar (cell-level selection)
+    // In ADD mode: DISABLE to allow cell-paragraph handlers with offset calculation
+
+    // IMPORTANT: Clean up ALL previous cell-level event listeners first
     const tableCells = editor.querySelectorAll('[data-block-index][data-type="table_cell"]')
-    console.log(`[Table Debug] Found ${tableCells.length} table cells`)
     tableCells.forEach(element => {
-      element.style.cursor = 'crosshair'
-
-      // Use capture phase to override paragraph handlers
-      element.addEventListener('click', (e) => {
-        console.log(`[Table Debug] Cell click event captured`)
-
-        // Check if click is directly on cell or its children
-        const target = e.target
-        const isCellOrChild = target === element || element.contains(target)
-
-        if (isCellOrChild) {
-          e.preventDefault()
-          e.stopPropagation()
-          e.stopImmediatePropagation() // Stop other handlers
-
-          const cellBlockIndex = parseInt(element.getAttribute('data-block-index'))
-          const tableIndex = parseInt(element.getAttribute('data-table-index') || '0')
-          const row = parseInt(element.getAttribute('data-row'))
-          const col = parseInt(element.getAttribute('data-col'))
-
-          console.log(`[Table Debug] Clicked cell [${row},${col}], tableIndex: ${tableIndex}, blockIndex: ${cellBlockIndex}`)
-
-          setSelectedBlockIndex(cellBlockIndex) // Each cell now has its own block_index
-          setSelectedCellIndex(null) // No need for cell_index anymore
-          setSelectedTableBlockIndex(null)
-          setSelectedParaInCell(null) // Reset paragraph index when clicking whole cell
-
-          // Set table editing info
-          setSelectedTableInfo({
-            tableIndex: tableIndex,
-            rowIndex: row,
-            colIndex: col,
-            isCellSelected: true
-          })
-
-          // Highlight selected cell
-          editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
-            el.style.outline = ''
-          })
-          element.style.outline = '2px solid #8b5cf6'
-
-          setError(`Đã chọn ô [${row},${col}]. Nhập tên placeholder và nhấn "Thêm" hoặc dùng công cụ bảng.`)
-        }
-      }, true) // Use capture phase
+      // Clone node to remove ALL event listeners (both capture and bubble)
+      const newElement = element.cloneNode(true)
+      element.parentNode.replaceChild(newElement, element)
     })
+
+    // Re-select after cloning (original elements are gone)
+    const freshTableCells = editor.querySelectorAll('[data-block-index][data-type="table_cell"]')
+
+    if (!isAddMode) {
+      console.log(`[Table Debug] Found ${freshTableCells.length} table cells (normal mode)`)
+      freshTableCells.forEach(element => {
+        element.style.cursor = 'crosshair'
+
+        // Use capture phase to override paragraph handlers
+        element.addEventListener('click', (e) => {
+          console.log(`[Table Debug] Cell click event captured (normal mode)`)
+
+          // Check if click is directly on cell or its children
+          const target = e.target
+          const isCellOrChild = target === element || element.contains(target)
+
+          if (isCellOrChild) {
+            e.preventDefault()
+            e.stopPropagation()
+            e.stopImmediatePropagation() // Stop other handlers
+
+            const cellBlockIndex = parseInt(element.getAttribute('data-block-index'))
+            const tableIndex = parseInt(element.getAttribute('data-table-index') || '0')
+            const row = parseInt(element.getAttribute('data-row'))
+            const col = parseInt(element.getAttribute('data-col'))
+
+            console.log(`[Table Debug] Clicked cell [${row},${col}], tableIndex: ${tableIndex}, blockIndex: ${cellBlockIndex}`)
+
+            setSelectedBlockIndex(cellBlockIndex) // Each cell now has its own block_index
+            setSelectedCellIndex(null) // No need for cell_index anymore
+            setSelectedTableBlockIndex(null)
+            setSelectedParaInCell(null) // Reset paragraph index when clicking whole cell
+
+            // Set table editing info
+            setSelectedTableInfo({
+              tableIndex: tableIndex,
+              rowIndex: row,
+              colIndex: col,
+              isCellSelected: true
+            })
+
+            // Highlight selected cell
+            editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
+              el.style.outline = ''
+            })
+            element.style.outline = '2px solid #8b5cf6'
+
+            setError(`Đã chọn ô [${row},${col}]. Dùng công cụ bảng để chỉnh sửa.`)
+          }
+        }, true) // Use capture phase
+      })
+    } else {
+      console.log(`[Table Debug] Add mode - cell-level handlers DISABLED, using cell-paragraph handlers with offset`)
+    }
 
     // Add click handlers for block selection in add mode
     if (isAddMode) {
@@ -434,13 +449,24 @@ function App() {
             // Placeholders in HTML are rendered as: «field_name» (7+ chars depending on field name)
             // But in DOCX plain text, they might be counted differently or not at all
             const textWithoutPlaceholders = textBeforeCaret.replace(/«[^»]+»/g, '')
-            offset = textWithoutPlaceholders.length
+
+            // Clean up whitespace and check if empty
+            const cleanedText = textWithoutPlaceholders.trim()
+
+            // If paragraph is effectively empty (only whitespace), use offset 0
+            if (cleanedText.length === 0) {
+              offset = 0
+              console.log('[DEBUG] Empty paragraph detected, forcing offset=0')
+            } else {
+              offset = textWithoutPlaceholders.length
+            }
 
             console.log('[DEBUG] Click offset:', {
               blockIndex,
               offset,
               textBeforeCaret: textBeforeCaret.substring(0, 50) + '...',
-              textWithoutPlaceholders: textWithoutPlaceholders.substring(0, 50) + '...'
+              textWithoutPlaceholders: textWithoutPlaceholders.substring(0, 50) + '...',
+              cleanedText: cleanedText.substring(0, 50) + '...'
             })
           }
 
@@ -461,8 +487,10 @@ function App() {
         }
       })
 
-      // Handle paragraph-level clicks within table cells (for empty lines)
-      editor.querySelectorAll('.cell-paragraph').forEach(element => {
+      // Handle paragraph-level clicks within table cells (for offset-based insertion)
+      const cellParagraphs = editor.querySelectorAll('.cell-paragraph')
+      console.log(`[DEBUG] Found ${cellParagraphs.length} cell-paragraph elements in add mode`)
+      cellParagraphs.forEach(element => {
         element.style.cursor = 'crosshair'
         element.onclick = (e) => {
           e.preventDefault()
@@ -471,10 +499,72 @@ function App() {
           const cellBlockIndex = parseInt(element.getAttribute('data-cell-block-index'))
           const paraInCell = parseInt(element.getAttribute('data-para-in-cell'))
 
+          console.log(`[DEBUG] Cell-paragraph clicked: blockIndex=${cellBlockIndex}, paraInCell=${paraInCell}`)
+
+          // Find parent cell to get table context
+          const parentCell = element.closest('[data-type="table_cell"]')
+          let tableIndex = null
+          let rowIndex = null
+          let colIndex = null
+
+          if (parentCell) {
+            tableIndex = parseInt(parentCell.getAttribute('data-table-index') || '0')
+            rowIndex = parseInt(parentCell.getAttribute('data-row') || '0')
+            colIndex = parseInt(parentCell.getAttribute('data-col') || '0')
+            console.log(`[DEBUG] Parent cell context: table=${tableIndex}, row=${rowIndex}, col=${colIndex}`)
+          }
+
           setSelectedBlockIndex(cellBlockIndex) // Each cell has its own block_index
-          setSelectedCellIndex(null) // No need for cell_index anymore
-          setSelectedTableBlockIndex(null)
+          setSelectedCellIndex(colIndex) // Store column index for display
+          setSelectedTableBlockIndex(tableIndex) // Store table index for display
           setSelectedParaInCell(paraInCell) // Set paragraph index within cell
+
+          // Set table editing info
+          setSelectedTableInfo({
+            tableIndex: tableIndex,
+            rowIndex: rowIndex,
+            colIndex: colIndex,
+            isCellSelected: false // Not selecting the whole cell, just a paragraph
+          })
+
+          // Calculate caret offset for precise insertion
+          const selection = window.getSelection()
+          let offset = null
+
+          if (selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0)
+
+            // Calculate offset within the paragraph, excluding placeholder characters
+            const preCaretRange = range.cloneRange()
+            preCaretRange.selectNodeContents(element)
+            preCaretRange.setEnd(range.startContainer, range.startOffset)
+            const textBeforeCaret = preCaretRange.toString()
+
+            // Remove placeholder characters («field_name») from offset calculation
+            const textWithoutPlaceholders = textBeforeCaret.replace(/«[^»]+»/g, '')
+
+            // Clean up whitespace and check if empty
+            const cleanedText = textWithoutPlaceholders.trim()
+
+            // If paragraph is effectively empty (only whitespace), use offset 0
+            if (cleanedText.length === 0) {
+              offset = 0
+              console.log('[DEBUG] Empty paragraph detected, forcing offset=0')
+            } else {
+              offset = textWithoutPlaceholders.length
+            }
+
+            console.log('[DEBUG] Cell paragraph click offset:', {
+              cellBlockIndex,
+              paraInCell,
+              offset,
+              textBeforeCaret: textBeforeCaret.substring(0, 50) + '...',
+              textWithoutPlaceholders: textWithoutPlaceholders.substring(0, 50) + '...',
+              cleanedText: cleanedText.substring(0, 50) + '...'
+            })
+          }
+
+          setCaretOffset(offset) // Store caret offset for precise insertion
 
           // Highlight selected paragraph
           editor.querySelectorAll('[data-block-index], [data-cell-index], .cell-paragraph').forEach(el => {
@@ -482,7 +572,11 @@ function App() {
           })
           element.style.outline = '2px solid #8b5cf6'
 
-          setError(`Đã chọn dòng #${paraInCell}. Nhập tên placeholder và nhấn "Thêm".`)
+          const offsetMsg = offset !== null ? ` (vị trí ký tự #${offset})` : ''
+          const cellInfo = (tableIndex !== null && rowIndex !== null && colIndex !== null)
+            ? ` trong ô [${rowIndex},${colIndex}]`
+            : ''
+          setError(`Đã chọn dòng #${paraInCell}${cellInfo}${offsetMsg}. Nhập tên placeholder và nhấn "Thêm".`)
         }
       })
     } else {
@@ -863,22 +957,42 @@ function App() {
     setAnalyzing(true)
     setError(null)
 
+    console.log('[DEBUG] handleAddPlaceholder called:', {
+      templateId,
+      selectedBlockIndex,
+      selectedParaInCell,
+      caretOffset,
+      newFieldName: newFieldName.trim()
+    })
+
     try {
       let result
 
       // Use caret offset if available (precise insertion at click position)
       if (caretOffset !== null) {
-        console.log('[DEBUG] Using caret offset for insertion:', caretOffset)
-        result = await addPlaceholderAtOffset(
+        console.log('[DEBUG] Using caret offset for insertion:', {
+          blockIndex: selectedBlockIndex,
+          offset: caretOffset,
+          fieldName: newFieldName.trim(),
+          paraInCell: selectedParaInCell
+        })
+        result = await addPlaceholderByOffset(
           templateId,
           selectedBlockIndex,
           caretOffset,
           newFieldName.trim(),
-          true // inherit format
+          true, // inherit format
+          selectedParaInCell // Pass para_in_cell for table cell paragraphs
         )
       } else {
         // Fallback to old method (left/right/new_line)
-        result = await addPlaceholder(
+        console.log('[DEBUG] FALLBACK to position-based insertion:', {
+          blockIndex: selectedBlockIndex,
+          position: newFieldPosition,
+          paraInCell: selectedParaInCell,
+          reason: 'caretOffset is null'
+        })
+        result = await addPlaceholderByPosition(
           templateId,
           selectedBlockIndex,
           newFieldName.trim(),

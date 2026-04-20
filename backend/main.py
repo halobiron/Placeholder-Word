@@ -2,7 +2,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Literal
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -254,7 +254,7 @@ async def preview_result(result_id: str):
     try:
         # Generate HTML preview
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(result_path), [])
+        html_preview = processor._generate_html_preview(str(result_path))
 
         return JSONResponse(content={
             "result_id": result_id,
@@ -408,8 +408,6 @@ async def apply_ai_suggestions(
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        # Parse suggestions
-        import json
         suggestions_list = json.loads(suggestions)
 
         if not suggestions_list:
@@ -528,10 +526,7 @@ async def suggest_field_name(
 
         return {
             "success": True,
-            "field_name": field_name,
-            "extracted_text": extracted_text[:100],  # Return first 100 chars for preview
-            "block_index": block_index,
-            "para_in_cell": para_in_cell
+            "field_name": field_name
         }
 
     except HTTPException:
@@ -543,12 +538,12 @@ async def suggest_field_name(
         )
 
 
-@app.post("/add-placeholder")
-async def add_placeholder_manual(
+@app.post("/add-placeholder-by-position")
+async def add_placeholder_by_position(
     template_id: str = Form(...),
     block_index: int = Form(...),
     field_name: str = Form(...),
-    position: str = Form("right"),
+    position: Literal["left", "right", "new_line"] = Form("right"),
     cell_index: int = Form(None),
     para_in_cell: int = Form(None)
 ):
@@ -573,40 +568,12 @@ async def add_placeholder_manual(
         # Initialize processor
         processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
 
-        # Extract structured content for smart field naming
-        structured_content = processor.extract_structured_content(str(template_path))
-
-        # Auto-generate field name if not provided
-        if not field_name or not field_name.strip():
-            print("→ No field name provided, auto-generating from block text...")
-            extracted_text = processor.extract_text_from_block_with_fallback(
-                structured_content,
-                block_index,
-                para_in_cell
-            )
-
-            if extracted_text:
-                field_name = processor.generate_smart_field_name(
-                    extracted_text,
-                    structured_content,
-                    block_index
-                )
-                print(f"→ Auto-generated field name: {field_name}")
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Could not extract meaningful text from selected location"
-                )
-        else:
-            # Clean user-provided field name
-            field_name = field_name.strip().lower().replace(" ", "_")
-
-        # Validate position
-        valid_positions = ["left", "right", "new_line"]
-        if position not in valid_positions:
+        # Clean and validate field name
+        field_name = field_name.strip().lower().replace(" ", "_")
+        if not field_name:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid position. Must be one of: {', '.join(valid_positions)}"
+                detail="Field name cannot be empty"
             )
 
         # Inject placeholder (with cell_index and para_in_cell if provided)
@@ -631,7 +598,7 @@ async def add_placeholder_manual(
         # Get updated field list and HTML preview
         executor = MergeExecutor()
         updated_fields = executor.get_template_fields(str(template_path))
-        html_preview = processor._generate_html_preview(str(template_path), updated_fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -655,13 +622,14 @@ async def add_placeholder_manual(
         )
 
 
-@app.post("/add-placeholder-at-offset")
-async def add_placeholder_at_offset(
+@app.post("/add-placeholder-by-offset")
+async def add_placeholder_by_offset(
     template_id: str = Form(...),
     block_index: int = Form(...),
     offset: int = Form(...),
     field_name: str = Form(...),
-    inherit_format: bool = Form(True)
+    inherit_format: bool = Form(True),
+    para_in_cell: int = Form(None)
 ):
     """Add placeholder at specific character offset within paragraph
 
@@ -671,11 +639,12 @@ async def add_placeholder_at_offset(
         offset: Character offset within paragraph text
         field_name: Name for the new placeholder
         inherit_format: Whether to inherit format from surrounding text
+        para_in_cell: Optional paragraph index within table cell (for table cell editing)
 
     Returns:
         JSON with update results
     """
-    print(f"[INFO] add_placeholder_at_offset called: template_id={template_id}, block_index={block_index}, offset={offset}, field_name={field_name}")
+    print(f"[INFO] add_placeholder_by_offset called: template_id={template_id}, block_index={block_index}, offset={offset}, field_name={field_name}, para_in_cell={para_in_cell}")
 
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
@@ -690,10 +659,24 @@ async def add_placeholder_at_offset(
         from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
+        # Convert block_index to paragraph_index, handling table cells
+        paragraph_index = block_index
+        if para_in_cell is not None:
+            print(f"[DEBUG] Converting table cell location: block_index={block_index}, para_in_cell={para_in_cell}")
+            # Get actual paragraph_index for table cell paragraph
+            paragraph_index = editor.get_table_cell_paragraph_index(block_index, para_in_cell)
+            if paragraph_index is None:
+                print(f"[ERROR] Failed to find paragraph in table cell: block_index={block_index}, para_in_cell={para_in_cell}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not find paragraph {para_in_cell} in table cell at block_index {block_index}"
+                )
+            print(f"[DEBUG] Converted to paragraph_index={paragraph_index}")
+
         # Insert placeholder at offset
         try:
             editor.insert_placeholder_at_offset(
-                paragraph_index=block_index,
+                paragraph_index=paragraph_index,
                 offset=offset,
                 field_name=field_name,
                 inherit_format=inherit_format
@@ -724,7 +707,7 @@ async def add_placeholder_at_offset(
         processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
         executor = MergeExecutor()
         updated_fields = executor.get_template_fields(str(template_path))
-        html_preview = processor._generate_html_preview(str(template_path), updated_fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -732,6 +715,8 @@ async def add_placeholder_at_offset(
             "field_name": field_name,
             "block_index": block_index,
             "offset": offset,
+            "paragraph_index": paragraph_index,
+            "para_in_cell": para_in_cell,
             "updated_fields": updated_fields,
             "field_count": len(updated_fields),
             "html_preview": html_preview
@@ -742,7 +727,6 @@ async def add_placeholder_at_offset(
         raise
     except Exception as e:
         # Log unexpected errors with full context
-        import traceback
         error_details = {
             "error_type": type(e).__name__,
             "error_message": str(e),
@@ -752,7 +736,7 @@ async def add_placeholder_at_offset(
             "field_name": field_name,
             "traceback": traceback.format_exc()
         }
-        print(f"[ERROR] Unexpected error in add_placeholder_at_offset: {error_details}")
+        print(f"[ERROR] Unexpected error in add_placeholder_by_offset: {error_details}")
         raise HTTPException(
             status_code=500,
             detail=f"Unexpected error: {type(e).__name__}: {str(e)}"
@@ -780,7 +764,7 @@ async def get_template_info(template_id: str):
 
         # Generate HTML preview
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -934,8 +918,6 @@ async def edit_selection(
                     print(f"Warning: Paragraph formatting requested but no paragraph_index provided")
             except Exception as e:
                 print(f"Error applying paragraph format: {e}")
-                # Don't fail the entire request if paragraph formatting fails
-                import traceback
                 print(f"Traceback: {traceback.format_exc()}")
 
         # Save and return updated preview
@@ -944,7 +926,7 @@ async def edit_selection(
         executor = MergeExecutor()
         fields = executor.get_template_fields(str(template_path))
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -1109,7 +1091,7 @@ async def add_content(
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -1178,7 +1160,7 @@ async def add_hyperlink_to_template(
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -1232,43 +1214,22 @@ async def update_text_in_template(
 
         editor = DocxFullEditor(str(template_path))
 
-        # Map block_index to paragraph_index
-        # If para_in_cell is provided, we need to find the specific paragraph in table cell
+        # Convert block_index to paragraph_index, handling table cells
+        para_index = block_index
         if para_in_cell is not None:
-            print(f"[DEBUG] Finding paragraph in table cell: block_index={block_index}, para_in_cell={para_in_cell}")
-
-            # block_index refers to the table cell's block index
-            # Find the cell in the block index map
-            editor._build_block_index_map()
-
-            if block_index not in editor._block_to_para_index_map:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid block_index: {block_index}"
-                )
-
-            block_data = editor._block_to_para_index_map[block_index]
-
-            if block_data['type'] != 'table_cell':
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Block {block_index} is not a table cell, but para_in_cell was provided"
-                )
-
-            # Use the new method to find table cell paragraph
+            print(f"[DEBUG] Converting table cell location: block_index={block_index}, para_in_cell={para_in_cell}")
+            # Get actual paragraph_index for table cell paragraph
             para_index = editor.get_table_cell_paragraph_index(block_index, para_in_cell)
-
             if para_index is None:
+                print(f"[ERROR] Failed to find paragraph in table cell: block_index={block_index}, para_in_cell={para_in_cell}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Could not find paragraph {para_in_cell} in table cell at block_index {block_index}"
                 )
-
-            print(f"[DEBUG] Found paragraph at document index: {para_index}")
+            print(f"[DEBUG] Converted to para_index={para_index}")
         else:
             # Original logic for non-table-cell paragraphs
             para_index = editor.get_paragraph_index_from_block(block_index)
-
             if para_index is None:
                 raise HTTPException(
                     status_code=400,
@@ -1352,7 +1313,7 @@ async def update_text_in_template(
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         print(f"[DEBUG] HTML preview regenerated, length: {len(html_preview)}")
 
@@ -1528,7 +1489,7 @@ async def add_table_row(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -1600,7 +1561,7 @@ async def delete_table_row(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -1678,7 +1639,7 @@ async def add_table_column(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -1750,7 +1711,7 @@ async def delete_table_column(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -1844,7 +1805,7 @@ async def format_table_cell(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -1972,7 +1933,7 @@ async def add_paragraph(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -2093,7 +2054,7 @@ async def delete_paragraph(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -2252,7 +2213,7 @@ async def delete_multiple_paragraphs(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,
@@ -2353,7 +2314,6 @@ async def add_table_at_cursor(request: Request):
             print(f"[INFO] Successfully added table at cursor position")
             print(f"[DEBUG] Document now has {len(editor.doc.tables)} tables after add_table_at_cursor")
         except Exception as e:
-            import traceback
             error_detail = f"Failed to add table at cursor: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             print(f"=== add_table_at_cursor ERROR ===")
             print(error_detail)
@@ -2374,7 +2334,7 @@ async def add_table_at_cursor(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
         print(f"[DEBUG] HTML preview regenerated, length: {len(html_preview)}")
 
         return {
@@ -2500,7 +2460,6 @@ async def add_image_at_cursor(request: Request):
             )
             print(f"[INFO] Successfully added image at cursor position")
         except Exception as e:
-            import traceback
             error_detail = f"Failed to add image at cursor: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             print(f"=== add_image_at_cursor ERROR ===")
             print(error_detail)
@@ -2518,7 +2477,7 @@ async def add_image_at_cursor(request: Request):
         fields = executor.get_template_fields(str(template_path))
 
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path), fields)
+        html_preview = processor._generate_html_preview(str(template_path))
 
         return {
             "template_id": template_id,

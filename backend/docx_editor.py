@@ -1556,6 +1556,10 @@ class DocxFullEditor:
         if not target_para:
             raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
 
+        print(f"[DEBUG] Target paragraph found: index={paragraph_index}")
+        print(f"[DEBUG] Paragraph runs count: {len(target_para.runs)}")
+        print(f"[DEBUG] Paragraph text: {repr(target_para.text[:100] if target_para.text else '')}")
+
         # Build text with run mapping
         run_text_map = []  # [(run, start_offset, end_offset, text)]
         current_offset = 0
@@ -1580,10 +1584,175 @@ class DocxFullEditor:
                 target_run_info = run_info
                 break
 
+        # Handle empty paragraph or no valid run found
         if not target_run_info:
-            # Build detailed error message
             para_text = target_para.text
             para_preview = para_text[:50] + "..." if len(para_text) > 50 else para_text
+
+            print(f"[DEBUG] No target run found. Paragraph text length: {total_text_length}, offset: {offset}")
+            print(f"[DEBUG] Paragraph runs count: {len(target_para.runs)}")
+
+            # Special case: Empty paragraph - always insert at beginning, regardless of offset
+            # Auto-correct offset to 0 for empty paragraphs
+            if total_text_length == 0:
+                if offset != 0:
+                    print(f"[DEBUG] WARNING: Offset {offset} is invalid for empty paragraph, auto-correcting to 0")
+                    offset = 0
+                print(f"[DEBUG] Empty paragraph {paragraph_index}, inserting placeholder at beginning")
+
+                # Create placeholder text
+                placeholder_text = f"«{field_name}»"
+
+                # Get paragraph element
+                p_element = target_para._p
+                print(f"[DEBUG] Paragraph element: {p_element.tag}")
+
+                # Store current paragraph alignment before any changes
+                # Read alignment from XML directly to avoid object property issues
+                current_alignment = None
+                try:
+                    # Try to read from paragraph property (w:pPr/w:jc)
+                    pPr = p_element.find(f"{self.w_ns}pPr")
+                    if pPr is not None:
+                        jc = pPr.find(f"{self.w_ns}jc")
+                        if jc is not None:
+                            jc_val = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+                            alignment_map = {
+                                "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
+                                "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
+                                "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
+                                "both": WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+                            }
+                            current_alignment = alignment_map.get(jc_val)
+                            print(f"[DEBUG] Read alignment from XML: {jc_val} -> {current_alignment}")
+                except Exception as e:
+                    print(f"[DEBUG] Could not read alignment from XML: {e}")
+
+                # Fallback to object property if XML reading failed
+                if current_alignment is None:
+                    current_alignment = target_para.alignment
+                    print(f"[DEBUG] Using object alignment property: {current_alignment}")
+
+                # Try to find format from previous paragraph in document
+                original_rpr = None
+                original_alignment = None
+                try:
+                    # Look for previous paragraph with format
+                    # CRITICAL FIX: Compare by _element, not object identity!
+                    # Paragraph() creates new objects each time, so .index() fails
+                    all_paras = list(self._iterate_paragraphs_in_doc_order())
+                    current_idx = None
+                    for idx, para in enumerate(all_paras):
+                        if para._element == target_para._element:
+                            current_idx = idx
+                            break
+
+                    if current_idx is not None:
+                        print(f"[DEBUG] Current paragraph index: {current_idx}, total paragraphs: {len(all_paras)}")
+
+                        if current_idx > 0:
+                            prev_para = all_paras[current_idx - 1]
+                            print(f"[DEBUG] Previous paragraph has {len(prev_para.runs)} runs")
+                            # Find first run with format in previous paragraph
+                            for run in prev_para.runs:
+                                rpr = run._r.get_or_add_rPr()
+                                if rpr is not None and len(list(rpr)) > 0:
+                                    original_rpr = rpr
+                                    print(f"[DEBUG] Using format from previous paragraph")
+                                    break
+                            # Also get alignment from previous paragraph
+                            if prev_para.alignment is not None:
+                                original_alignment = prev_para.alignment
+                                print(f"[DEBUG] Using alignment from previous paragraph: {original_alignment}")
+                    else:
+                        print(f"[DEBUG] Could not find current paragraph in iterator")
+                except Exception as e:
+                    print(f"[DEBUG] Could not get format from previous paragraph: {e}")
+
+                # If no format found, use default
+                if original_rpr is None:
+                    # Create default format
+                    from docx.oxml import parse_xml
+                    default_rpr_xml = '<w:rPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'
+                    original_rpr = parse_xml(default_rpr_xml)
+                    print(f"[DEBUG] Using default format")
+
+                # Create placeholder with MERGEFIELD structure
+                placeholder_run = self._create_run_with_format(target_para, original_rpr, placeholder_text)
+                print(f"[DEBUG] Created placeholder run: {placeholder_run.text}")
+
+                # Convert to MERGEFIELD structure
+                fld = OxmlElement('w:fldSimple')
+                fld.set(qn('w:instr'), f' MERGEFIELD {field_name} \\* MERGEFORMAT \\z "" ')
+                print(f"[DEBUG] Created fldSimple element")
+
+                # Move the run element into fldSimple
+                fld.append(placeholder_run._element)
+                print(f"[DEBUG] Appended run to fldSimple")
+
+                # Insert at the beginning of paragraph
+                p_element.insert(0, fld)
+                print(f"[DEBUG] Inserted fldSimple at position 0")
+
+                # IMPORTANT: Preserve paragraph alignment
+                # Priority: current alignment > same cell alignment > previous paragraph alignment > default (left)
+
+                # If current paragraph has no alignment, try to find from same cell
+                if current_alignment is None:
+                    print(f"[DEBUG] Current paragraph has no alignment, looking in same cell...")
+                    try:
+                        # Find all paragraphs in the same table cell
+                        # Get parent cell from paragraph element
+                        # In Word XML: w:tbl/w:tr/w:tc/w:p
+                        # We need to find the parent w:tc element
+                        parent_tc = None
+                        current = p_element
+                        while current is not None:
+                            if current.tag == f"{self.w_ns}tc":
+                                parent_tc = current
+                                break
+                            current = current.getparent()
+
+                        if parent_tc is not None:
+                            print(f"[DEBUG] Found parent cell element")
+                            # Find all paragraphs in this cell
+                            cell_paras = parent_tc.findall(f"{self.w_ns}p")
+                            print(f"[DEBUG] Cell has {len(cell_paras)} paragraphs")
+
+                            # Look for first paragraph with alignment in this cell
+                            for cell_para_xml in cell_paras:
+                                if cell_para_xml == p_element:
+                                    continue  # Skip current paragraph
+                                cell_pPr = cell_para_xml.find(f"{self.w_ns}pPr")
+                                if cell_pPr is not None:
+                                    cell_jc = cell_pPr.find(f"{self.w_ns}jc")
+                                    if cell_jc is not None:
+                                        cell_jc_val = cell_jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+                                        alignment_map = {
+                                            "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
+                                            "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
+                                            "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
+                                            "both": WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+                                        }
+                                        cell_alignment = alignment_map.get(cell_jc_val)
+                                        if cell_alignment is not None:
+                                            original_alignment = cell_alignment
+                                            print(f"[DEBUG] Found alignment in same cell: {cell_jc_val} -> {cell_alignment}")
+                                            break
+                    except Exception as e:
+                        print(f"[DEBUG] Could not find alignment in same cell: {e}")
+
+                final_alignment = current_alignment if current_alignment is not None else original_alignment
+                if final_alignment is not None:
+                    target_para.alignment = final_alignment
+                    print(f"[DEBUG] Set paragraph alignment to: {final_alignment}")
+                else:
+                    print(f"[DEBUG] No alignment to set, using default")
+
+                print(f"[DEBUG] Successfully inserted placeholder into empty paragraph")
+                return True  # Early return for empty paragraph case
+
+            # Non-zero offset in empty paragraph or other error cases
             raise RuntimeError(
                 f"Offset {offset} not found in paragraph {paragraph_index}. "
                 f"Paragraph text length: {total_text_length}, "
@@ -1607,6 +1776,10 @@ class DocxFullEditor:
         p_element = target_para._p
         run_element = target_run._element
         insert_index = list(p_element).index(run_element)
+
+        # Store paragraph alignment before modification
+        paragraph_alignment = target_para.alignment
+        print(f"[DEBUG] Storing paragraph alignment: {paragraph_alignment}")
 
         # Find nearest format source (prefer text_before, then look for previous non-placeholder run)
         original_rpr = target_run._r.get_or_add_rPr()
@@ -1664,6 +1837,12 @@ class DocxFullEditor:
             if text_after:
                 new_run = self._create_run_with_format(target_para, original_rpr, text_after)
                 p_element.insert(insert_index, new_run._element)
+
+            # IMPORTANT: Restore paragraph alignment after modification
+            # This ensures placeholder inherits the paragraph's alignment (center, right, etc.)
+            if paragraph_alignment is not None:
+                target_para.alignment = paragraph_alignment
+                print(f"[DEBUG] Restored paragraph alignment to: {paragraph_alignment}")
 
         except Exception as e:
             raise RuntimeError(

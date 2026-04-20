@@ -113,7 +113,7 @@ class MailMergeProcessor:
                     # Continue with basic names
 
             # Step 4: Generate HTML preview from converted template
-            html_preview = self._generate_html_preview(str(output_path), fields)
+            html_preview = self._generate_html_preview(str(output_path))
 
             return {
                 "template_id": template_id,
@@ -127,7 +127,7 @@ class MailMergeProcessor:
         except Exception as e:
             raise RuntimeError(f"Conversion failed: {str(e)}")
 
-    def _generate_html_preview(self, docx_path: str, fields: list) -> str:
+    def _generate_html_preview(self, docx_path: str) -> str:
         """Generate HTML preview with highlighted placeholders and preserved document order
 
         IMPORTANT: Must use same empty-check logic as inject_placeholder_at_location
@@ -416,14 +416,21 @@ class MailMergeProcessor:
 
         target_block = structured_content[block_index]
         text = target_block.get("text", "")
+        block_type = target_block.get("type", "paragraph")
+
+        print(f"[extract_text] block_index={block_index}, block_type={block_type}, para_in_cell={para_in_cell}")
+        print(f"[extract_text] Full block text: {repr(text[:100])}")
 
         # If it's a table cell and para_in_cell is specified, extract that specific paragraph
-        if para_in_cell is not None and target_block.get("type") == "table_cell":
+        if para_in_cell is not None and block_type == "table_cell":
             # Split text by newlines and get the specific paragraph
             paragraphs = text.split("\n")
+            print(f"[extract_text] Table cell has {len(paragraphs)} paragraphs")
             if 0 <= para_in_cell < len(paragraphs):
                 text = paragraphs[para_in_cell].strip()
+                print(f"[extract_text] Extracted paragraph #{para_in_cell}: {repr(text[:100])}")
             else:
+                print(f"[extract_text] para_in_cell {para_in_cell} >= {len(paragraphs)}, returning empty")
                 text = ""
 
         # Check if meaningful (not just dots/underscores)
@@ -434,7 +441,22 @@ class MailMergeProcessor:
             print(f"→ Found text: {text[:60]}...")
             return text
 
-        # Fallback: search backwards
+        # Fallback: search backwards - BUT NOT for table cells!
+        # Table cells have their own context, don't fallback to other cells
+        if para_in_cell is not None and target_block.get("type") == "table_cell":
+            print(f"→ Table cell paragraph #{para_in_cell} is empty, not falling back to other cells")
+            # Try to find context within the same cell (other paragraphs)
+            cell_text = target_block.get("text", "")
+            all_paras = cell_text.split("\n")
+            # Look for the first non-empty paragraph in the same cell
+            for i, p in enumerate(all_paras):
+                if has_content(p.strip()):
+                    print(f"→ Found context in same cell, paragraph #{i}: {p[:60]}...")
+                    return p.strip()
+            print("→ No meaningful text found in this cell")
+            return ""
+
+        # Fallback for non-table blocks
         print(f"→ Block empty, searching backwards...")
         for i in range(block_index - 1, -1, -1):
             candidate_text = structured_content[i].get("text", "")
