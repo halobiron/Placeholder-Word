@@ -927,7 +927,7 @@ async def edit_selection(
 @app.post("/add-content")
 async def add_content(
     template_id: str = Form(...),
-    add_type: str = Form(...),  # "text", "placeholder", "image" (pagebreak deprecated)
+    add_type: str = Form(...),  # "placeholder", "image"
     position: str = Form(...),   # "end", "after:text", "before:text"
     content: str = Form(None),   # Text content
     field_name: str = Form(None), # Field name for placeholder
@@ -940,7 +940,7 @@ async def add_content(
 
     Args:
         template_id: Template ID
-        add_type: Type of content to add ("text", "placeholder", "image")
+        add_type: Type of content to add ("placeholder", "image")
         position: Where to add ("end", "after:text", "before:text")
         content: Text/paragraph content
         field_name: Field name for placeholder
@@ -958,30 +958,7 @@ async def add_content(
     try:
         editor = DocxFullEditor(str(template_path))
 
-        if add_type == "text":
-            # Add text
-            if not content:
-                raise HTTPException(status_code=400, detail="content required for text addition")
-
-            if position == "end":
-                editor.doc.paragraphs[-1].add_run(content)
-            elif position.startswith("after:"):
-                target_text = position.split("after:")[1].strip()
-                success = editor.add_text_after(target_text, content, inherit_format=inherit_format)
-                if not success:
-                    raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
-            elif position.startswith("before:"):
-                target_text = position.split("before:")[1].strip()
-                success = editor.add_text_before(target_text, content, inherit_format=inherit_format)
-                if not success:
-                    raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
-
-            # Apply format if provided
-            if format_config:
-                format_data = json.loads(format_config)
-                editor.apply_format_to_text(content, **map_camel_to_snake(format_data))
-
-        elif add_type == "placeholder":
+        if add_type == "placeholder":
             # Add placeholder
             if not field_name:
                 raise HTTPException(status_code=400, detail="field_name required for placeholder addition")
