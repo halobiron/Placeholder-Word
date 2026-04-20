@@ -147,25 +147,40 @@ export const suggestFieldName = async (templateId, blockIndex, paraInCell = null
   return response.data
 }
 
-// New API functions for enhanced editing
+// Apply formatting to selected text
 export const editSelection = async (templateId, editData) => {
   console.log('=== editSelection called ===')
   console.log('editData:', editData)
 
   const formData = new FormData()
   formData.append('template_id', templateId)
-  formData.append('edit_type', editData.type)
   formData.append('selected_text', editData.selectedText)
 
-  // Send blockIndex if available for precise editing
-  if (editData.blockIndex !== undefined && editData.blockIndex !== null) {
-    formData.append('paragraph_index', editData.blockIndex)
+  // blockIndex is required for precise editing
+  if (editData.blockIndex === undefined || editData.blockIndex === null) {
+    throw new Error('blockIndex is required for editing')
+  }
+  formData.append('paragraph_index', editData.blockIndex)
+
+  // CRITICAL FIX: Include offset information for precise targeting
+  // This fixes bug where duplicate words always format the first occurrence
+  if (editData.startOffset !== undefined && editData.startOffset !== null) {
+    formData.append('start_offset', editData.startOffset)
+    console.log('Including start_offset:', editData.startOffset)
+  }
+  if (editData.endOffset !== undefined && editData.endOffset !== null) {
+    formData.append('end_offset', editData.endOffset)
+    console.log('Including end_offset:', editData.endOffset)
   }
 
-  // Handle different edit types
-  if (editData.type === 'text' && editData.newText) {
-    formData.append('new_text', editData.newText)
-  } else if (editData.type === 'format' && editData.format) {
+  // CRITICAL FIX: Include para_in_cell for table cells with multiple paragraphs
+  if (editData.paraInCell !== undefined && editData.paraInCell !== null) {
+    formData.append('para_in_cell', editData.paraInCell)
+    console.log('Including para_in_cell:', editData.paraInCell)
+  }
+
+  // Process formatting
+  if (editData.format) {
     // Separate text-level and paragraph-level formatting
     const { alignment, ...textFormat } = editData.format
 
@@ -182,28 +197,8 @@ export const editSelection = async (templateId, editData) => {
     if (Object.keys(paragraphFormat).length > 0) {
       formData.append('paragraph_format', JSON.stringify(paragraphFormat))
     }
-  } else if (editData.type === 'both') {
-    // Send both new_text and format_config
-    if (editData.newText) {
-      formData.append('new_text', editData.newText)
-    }
-    if (editData.format) {
-      // Separate text-level and paragraph-level formatting
-      const { alignment, ...textFormat } = editData.format
-
-      // If alignment is set, include it in paragraph_format
-      let paragraphFormat = editData.paragraphFormat || {}
-      if (alignment !== undefined && alignment !== 'left') {
-        paragraphFormat.alignment = alignment
-      }
-
-      formData.append('format_config', JSON.stringify(textFormat))
-    }
-
-    // Include paragraph formatting if provided
-    if (editData.paragraphFormat && Object.keys(editData.paragraphFormat).length > 0) {
-      formData.append('paragraph_format', JSON.stringify(editData.paragraphFormat))
-    }
+  } else {
+    throw new Error('format is required')
   }
 
   const response = await axios.post(`${API_BASE}/edit-selection`, formData, {

@@ -523,6 +523,81 @@ class DocxFullEditor:
 
         return False
 
+    def _extract_all_text_runs(self, paragraph: Paragraph) -> list:
+        """
+        Extract all text runs from a paragraph, including those inside hyperlinks.
+
+        In DOCX, hyperlinks (w:hyperlink) contain runs (w:r) with text.
+        The standard paragraph.runs property doesn't include these hyperlink runs.
+
+        Args:
+            paragraph: Paragraph object
+
+        Returns:
+            List of dicts with keys:
+                - run: Run object
+                - text: str (run text)
+                - is_hyperlink: bool (True if run is inside a hyperlink)
+                - hyperlink_url: str or None (URL if is_hyperlink is True)
+                - start_offset: int (character offset in paragraph text)
+                - end_offset: int (end character offset in paragraph text)
+        """
+        from docx.text.run import Run
+
+        all_runs = []
+        char_offset = 0
+        w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+        # First, collect all runs including those in hyperlinks
+        for child in paragraph._element:
+            tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
+
+            if tag_name == 'r':
+                # Regular run - create Run object directly from CT_R element
+                run = Run(child, paragraph)
+                run_text = run.text or ""
+                all_runs.append({
+                    'run': run,
+                    'text': run_text,
+                    'is_hyperlink': False,
+                    'hyperlink_url': None,
+                    'start_offset': char_offset,
+                    'end_offset': char_offset + len(run_text),
+                    'element': child
+                })
+                char_offset += len(run_text)
+
+            elif tag_name == 'hyperlink':
+                # Hyperlink element - extract runs inside it
+                r_id = child.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+                hyperlink_url = ""
+
+                # Get URL from relationship
+                if r_id and r_id in self.doc.part.rels:
+                    rel = self.doc.part.rels[r_id]
+                    hyperlink_url = rel._target if hasattr(rel, '_target') else ""
+
+                # Process runs inside hyperlink
+                for hc_child in child:
+                    hc_tag = hc_child.tag.split('}')[1] if '}' in hc_child.tag else hc_child.tag
+                    if hc_tag == 'r':
+                        # Create Run object directly from CT_R element within hyperlink
+                        run = Run(hc_child, paragraph)
+                        run_text = run.text or ""
+                        all_runs.append({
+                            'run': run,
+                            'text': run_text,
+                            'is_hyperlink': True,
+                            'hyperlink_url': hyperlink_url,
+                            'start_offset': char_offset,
+                            'end_offset': char_offset + len(run_text),
+                            'element': hc_child,
+                            'hyperlink_element': child
+                        })
+                        char_offset += len(run_text)
+
+        return all_runs
+
     def apply_format_at_position(
         self,
         text: str,
@@ -537,17 +612,22 @@ class DocxFullEditor:
         highlight: str = None,
         font_name: str = None,
         font_size: int = None,
-        all_caps: bool = None
+        all_caps: bool = None,
+        start_offset: int = None,
+        end_offset: int = None
     ):
         """
         Apply formatting to text at a specific paragraph position
         Splits runs if needed to format only the target text, not the entire run
+        NOW SUPPORTS formatting text inside hyperlinks
 
         Args:
             text: Text to format
             paragraph_index: Index of paragraph containing the text
             bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
             all_caps: All caps formatting
+            start_offset: Start character offset for precise targeting (optional, for duplicate words)
+            end_offset: End character offset for precise targeting (optional, for duplicate words)
 
         Returns:
             True if found and formatted, False otherwise
@@ -558,64 +638,129 @@ class DocxFullEditor:
             if p_idx != paragraph_index:
                 continue
 
-            # Tìm vị trí chính xác của text trong paragraph
-            full_text = "".join(run.text for run in paragraph.runs)
+            # Use new helper to extract ALL runs including hyperlinks
+            all_runs = self._extract_all_text_runs(paragraph)
+            full_text = "".join(run_info['text'] for run_info in all_runs)
 
-            # Try direct search first (most accurate)
-            start_idx = full_text.find(text)
-            if start_idx == -1:
-                # Fallback: try normalized search for fuzzy matching
-                search_text_normalized = re.sub(r'\s+', ' ', text.strip())
-                full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
+            # DEBUG: Log paragraph details for troubleshooting
+            print(f"[DEBUG] apply_format_at_position:")
+            print(f"  p_idx={p_idx}, text='{full_text[:80]}...'")
+            print(f"  full_text length={len(full_text)}")
+            print(f"  provided offsets: start_offset={start_offset}, end_offset={end_offset}")
+            print(f"  searching for text='{text}'")
 
-                if search_text_normalized not in full_text_normalized:
-                    return False
-
-                # Map normalized position back to original text position
-                start_idx_normalized = full_text_normalized.find(search_text_normalized)
-                end_idx_normalized = start_idx_normalized + len(search_text_normalized)
-
-                # Build position mapping from normalized to original
-                norm_to_orig = []
-                norm_pos = 0
-                orig_pos = 0
-
-                for orig_idx, char in enumerate(full_text):
-                    if not char.isspace():
-                        norm_to_orig.append((norm_pos, orig_idx))
-                        norm_pos += 1
-                    orig_pos += 1
-
-                # Find original position from normalized position
-                if start_idx_normalized < len(norm_to_orig):
-                    start_idx = norm_to_orig[start_idx_normalized][1]
-                    if end_idx_normalized <= len(norm_to_orig):
-                        end_idx = norm_to_orig[end_idx_normalized - 1][1] + 1
-                    else:
-                        end_idx = start_idx + len(text)
+            # CRITICAL FIX: Use offset-based targeting when provided
+            # This fixes bug where duplicate words always format the first occurrence
+            if start_offset is not None and end_offset is not None:
+                # Validate that offsets are within bounds of this paragraph's text
+                # This handles table cells where offsets might be calculated from full cell text
+                if start_offset >= 0 and end_offset <= len(full_text) and start_offset < end_offset:
+                    start_idx = start_offset
+                    end_idx = end_offset
+                    print(f"[DEBUG] Using provided offsets (valid): start_idx={start_idx}, end_idx={end_idx}")
                 else:
-                    return False
-            else:
-                end_idx = start_idx + len(text)
+                    # Offsets are out of bounds for this paragraph
+                    # This happens in table cells where frontend calculates offset from full cell text
+                    # but backend processes each paragraph separately
+                    print(f"[DEBUG] Provided offsets out of bounds for this paragraph")
+                    print(f"[DEBUG] start_offset={start_offset}, end_offset={end_offset}, paragraph_len={len(full_text)}")
 
-            # Tìm runs chứa text cần format
-            char_count = 0
+                    # Try text-based search in this paragraph first
+                    start_idx = full_text.find(text)
+                    if start_idx != -1:
+                        end_idx = start_idx + len(text)
+                        print(f"[DEBUG] Found text in this paragraph at start_idx={start_idx}")
+                    else:
+                        # Text not found in this paragraph
+                        # Check if we're in a table cell and need to search other paragraphs in the same cell
+                        print(f"[DEBUG] Text not found in this paragraph, checking for table cell context")
+
+                        # Try to find the text using normalized search
+                        search_text_normalized = re.sub(r'\s+', ' ', text.strip())
+                        full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
+
+                        if search_text_normalized in full_text_normalized:
+                            # Found with normalized search
+                            start_idx_normalized = full_text_normalized.find(search_text_normalized)
+                            end_idx_normalized = start_idx_normalized + len(search_text_normalized)
+
+                            # Build position mapping from normalized to original
+                            norm_to_orig = []
+                            norm_pos = 0
+                            for orig_idx, char in enumerate(full_text):
+                                if not char.isspace():
+                                    norm_to_orig.append((norm_pos, orig_idx))
+                                    norm_pos += 1
+
+                            if start_idx_normalized < len(norm_to_orig):
+                                start_idx = norm_to_orig[start_idx_normalized][1]
+                                if end_idx_normalized <= len(norm_to_orig):
+                                    end_idx = norm_to_orig[end_idx_normalized - 1][1] + 1
+                                else:
+                                    end_idx = start_idx + len(text)
+                                print(f"[DEBUG] Found with normalized search at start_idx={start_idx}")
+                            else:
+                                return False
+                        else:
+                            print(f"[DEBUG] Text not found in this paragraph at all, returning False")
+                            return False
+            else:
+                # Original search-based logic (for backward compatibility)
+                # Try direct search first (most accurate)
+                start_idx = full_text.find(text)
+                if start_idx == -1:
+                    # Fallback: try normalized search for fuzzy matching
+                    search_text_normalized = re.sub(r'\s+', ' ', text.strip())
+                    full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
+
+                    if search_text_normalized not in full_text_normalized:
+                        return False
+
+                    # Map normalized position back to original text position
+                    start_idx_normalized = full_text_normalized.find(search_text_normalized)
+                    end_idx_normalized = start_idx_normalized + len(search_text_normalized)
+
+                    # Build position mapping from normalized to original
+                    norm_to_orig = []
+                    norm_pos = 0
+                    orig_pos = 0
+
+                    for orig_idx, char in enumerate(full_text):
+                        if not char.isspace():
+                            norm_to_orig.append((norm_pos, orig_idx))
+                            norm_pos += 1
+                        orig_pos += 1
+
+                    # Find original position from normalized position
+                    if start_idx_normalized < len(norm_to_orig):
+                        start_idx = norm_to_orig[start_idx_normalized][1]
+                        if end_idx_normalized <= len(norm_to_orig):
+                            end_idx = norm_to_orig[end_idx_normalized - 1][1] + 1
+                        else:
+                            end_idx = start_idx + len(text)
+                    else:
+                        return False
+                else:
+                    end_idx = start_idx + len(text)
+
+            # Tìm runs chứa text cần format (including hyperlinks)
             runs_to_format = []
 
-            for r_idx, run in enumerate(paragraph.runs):
-                run_start = char_count
-                run_end = char_count + len(run.text)
+            for r_idx, run_info in enumerate(all_runs):
+                run_start = run_info['start_offset']
+                run_end = run_info['end_offset']
 
                 # Check if this run overlaps with target text
                 if run_end > start_idx and run_start < end_idx:
                     overlap_start = max(start_idx, run_start)
                     overlap_end = min(end_idx, run_end)
 
-                    text_to_format = run.text[overlap_start - run_start:overlap_end - run_start]
+                    text_to_format = run_info['text'][overlap_start - run_start:overlap_end - run_start]
 
                     runs_to_format.append({
-                        'run': run,
-                        'r_idx': r_idx,
+                        'run': run_info['run'],
+                        'r_idx': r_idx,  # Add run index for backward compatibility
+                        'run_info': run_info,  # Store full run_info for hyperlink handling
                         'run_start': run_start,
                         'run_end': run_end,
                         'overlap_start': overlap_start,
@@ -623,18 +768,28 @@ class DocxFullEditor:
                         'text_to_format': text_to_format
                     })
 
-                char_count += len(run.text)
-
             if not runs_to_format:
                 continue
 
-            # Xử lý split runs và apply format
-            self._format_text_in_runs(
-                paragraph,
-                runs_to_format,
-                bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size,
-                all_caps
-            )
+            # Check if any runs are inside hyperlinks - need special handling
+            has_hyperlinks = any(rf['run_info']['is_hyperlink'] for rf in runs_to_format)
+
+            if has_hyperlinks:
+                # Handle hyperlink formatting separately to preserve hyperlink structure
+                self._format_hyperlink_text(
+                    paragraph,
+                    runs_to_format,
+                    bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size,
+                    all_caps
+                )
+            else:
+                # Regular formatting for non-hyperlink text
+                self._format_text_in_runs(
+                    paragraph,
+                    runs_to_format,
+                    bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size,
+                    all_caps
+                )
             return True
 
         return False
@@ -730,6 +885,163 @@ class DocxFullEditor:
 
         # CRITICAL: Restore paragraph-level formatting after splitting runs
         self._restore_paragraph_formatting(paragraph, paragraph_alignment, paragraph_format)
+
+    def _format_hyperlink_text(
+        self,
+        paragraph,
+        runs_to_format: List[Dict],
+        bold: bool = None,
+        italic: bool = None,
+        underline: bool = None,
+        strikethrough: bool = None,
+        subscript: bool = None,
+        superscript: bool = None,
+        color: str = None,
+        highlight: str = None,
+        font_name: str = None,
+        font_size: int = None,
+        all_caps: bool = None
+    ):
+        """
+        Format text inside hyperlinks while preserving hyperlink structure
+
+        CRITICAL: This method preserves the w:hyperlink element wrapper while modifying
+        the formatting of runs inside it. This is essential because breaking the hyperlink
+        structure would remove the link itself.
+
+        Args:
+            paragraph: Paragraph object
+            runs_to_format: List of run info dicts (must include hyperlink metadata)
+            bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
+            all_caps: All caps formatting
+        """
+        w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+        # Group runs by hyperlink element
+        hyperlink_groups = {}
+        for run_info in runs_to_format:
+            run_data = run_info['run_info']
+            if run_data['is_hyperlink']:
+                hl_element = run_data['hyperlink_element']
+                if id(hl_element) not in hyperlink_groups:
+                    hyperlink_groups[id(hl_element)] = {
+                        'hyperlink_element': hl_element,
+                        'runs': []
+                    }
+                hyperlink_groups[id(hl_element)]['runs'].append(run_info)
+
+        # Process each hyperlink group
+        for hl_id, hl_group in hyperlink_groups.items():
+            hl_element = hl_group['hyperlink_element']
+            group_runs = hl_group['runs']
+
+            for run_data in group_runs:
+                run = run_data['run']
+                overlap_start = run_data['overlap_start']
+                overlap_end = run_data['overlap_end']
+                run_start = run_data['run_start']
+                run_end = run_data['run_end']
+
+                # Calculate text segments
+                text_before = run.text[:overlap_start - run_start]
+                text_to_format = run.text[overlap_start - run_start:overlap_end - run_start]
+                text_after = run.text[overlap_end - run_start:]
+
+                # Get original run formatting
+                original_rpr = run._element.find(qn('w:rPr'))
+
+                # Get position in hyperlink element
+                run_elements = list(hl_element.findall(qn('w:r')))
+                try:
+                    run_index = run_elements.index(run._element)
+                except ValueError:
+                    continue
+
+                # Case 1: Entire run needs formatting
+                if not text_before and not text_after:
+                    # Just apply formatting to the existing run
+                    self._apply_format_to_run(run, bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size, all_caps)
+                    continue
+
+                # Case 2: Need to split the run
+                insert_offset = run_index
+
+                # Remove original run
+                hl_element.remove(run._element)
+
+                # Determine which properties will be explicitly set
+                skip_props = []
+                if bold is not None:
+                    skip_props.append('b')
+                if italic is not None:
+                    skip_props.append('i')
+                if underline is not None:
+                    skip_props.append('u')
+
+                # Insert before_text (keep original format)
+                if text_before:
+                    before_run = self._create_run_in_hyperlink(hl_element, original_rpr, text_before, insert_offset)
+                    insert_offset += 1
+
+                # Insert text_to_format with new formatting
+                if text_to_format:
+                    formatted_run = self._create_run_in_hyperlink(hl_element, original_rpr, text_to_format, insert_offset, skip_props=skip_props)
+                    self._apply_format_to_run(formatted_run, bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size, all_caps)
+                    insert_offset += 1
+
+                # Insert after_text (keep original format)
+                if text_after:
+                    after_run = self._create_run_in_hyperlink(hl_element, original_rpr, text_after, insert_offset)
+                    # No increment needed for last insert
+
+    def _create_run_in_hyperlink(self, hyperlink_element, rpr_element, text: str, insert_offset: int, skip_props: list = None):
+        """
+        Create a new run inside a hyperlink element
+
+        Args:
+            hyperlink_element: w:hyperlink XML element
+            rpr_element: RunProperties element to copy format from
+            text: Text for the new run
+            insert_offset: Position to insert the run
+            skip_props: Properties to skip when copying
+
+        Returns:
+            New Run object (not yet added to paragraph, just XML element created)
+        """
+        from docx.oxml import OxmlElement
+
+        # Create run element
+        new_run = OxmlElement('w:r')
+
+        # Copy format properties
+        if rpr_element is not None:
+            new_rpr = copy.deepcopy(rpr_element)
+
+            # Remove skipped properties
+            if skip_props:
+                for prop in skip_props:
+                    for child in new_rpr.findall(f'{self.w_ns}{prop}'):
+                        new_rpr.remove(child)
+
+            new_run.append(new_rpr)
+
+        # Add text
+        new_t = OxmlElement('w:t')
+        new_t.set(qn('xml:space'), 'preserve')
+        new_t.text = text
+        new_run.append(new_t)
+
+        # Insert into hyperlink element
+        hyperlink_element.insert(insert_offset, new_run)
+
+        # Return a minimal Run wrapper for _apply_format_to_run
+        # Note: This is a simplified wrapper, sufficient for format application
+        class SimpleRun:
+            def __init__(self, element):
+                self._element = element
+                self.text = text
+
+        return SimpleRun(new_run)
 
 
     def _create_run_with_format(self, paragraph, rpr_element, text: str, skip_props: list = None):
@@ -2798,6 +3110,7 @@ class DocxFullEditor:
     ) -> Optional[Dict]:
         """
         Extract formatting information for text at a specific position
+        NOW SUPPORTS extracting format from hyperlink text
 
         Args:
             text: Text to extract format from
@@ -2824,8 +3137,9 @@ class DocxFullEditor:
             if paragraph_index is not None and p_idx != paragraph_index:
                 continue
 
-            # Build the full text from runs
-            full_text = "".join(run.text for run in paragraph.runs)
+            # Use new helper to extract ALL runs including hyperlinks
+            all_runs = self._extract_all_text_runs(paragraph)
+            full_text = "".join(run_info['text'] for run_info in all_runs)
             full_text_normalized = self._normalize_text(full_text)
 
             if search_text_normalized not in full_text_normalized:
@@ -2870,28 +3184,25 @@ class DocxFullEditor:
                     end_idx_original = start_idx_original + len(text)
                 else:
                     # Try finding the search text in the runs directly
-                    for run in paragraph.runs:
-                        if search_text_normalized in self._normalize_text(run.text):
-                            return self._extract_run_format(run)
+                    for run_info in all_runs:
+                        if search_text_normalized in self._normalize_text(run_info['text']):
+                            return self._extract_run_format(run_info['run'])
                     continue
 
             # Find runs containing the text using original positions
-            char_count = 0
             formats_found = []
 
-            for r_idx, run in enumerate(paragraph.runs):
-                run_start = char_count
-                run_end = char_count + len(run.text)
+            for run_info in all_runs:
+                run_start = run_info['start_offset']
+                run_end = run_info['end_offset']
 
                 # Check if this run overlaps with the target text range
                 if run_end > start_idx_original and run_start < end_idx_original:
                     # This run contains part of the target text
                     # Only extract format from runs that have actual text content
-                    if run.text.strip():
-                        format_info = self._extract_run_format(run)
+                    if run_info['text'].strip():
+                        format_info = self._extract_run_format(run_info['run'])
                         formats_found.append(format_info)
-
-                char_count += len(run.text)
 
             if formats_found:
                 # Return format from the first non-empty run with actual content

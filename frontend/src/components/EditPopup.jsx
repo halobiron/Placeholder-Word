@@ -65,7 +65,13 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
         selectedText: selectedText?.text,
         format: format,
         type: 'format',
-        blockIndex: selectedText?.blockIndex
+        blockIndex: selectedText?.blockIndex,
+        // CRITICAL FIX: Include offset information for precise targeting
+        // This fixes bug where duplicate words always format the first occurrence
+        startOffset: selectedText?.offset,
+        endOffset: selectedText?.endOffset,
+        // CRITICAL FIX: Include para_in_cell for table cells with multiple paragraphs
+        paraInCell: selectedText?.paraInCell
       }
 
       // Include paragraph format if options are shown

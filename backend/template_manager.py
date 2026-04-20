@@ -1641,7 +1641,26 @@ JSON:"""
 
         tag_name = element.tag.split('}')[1] if '}' in element.tag else element.tag
 
-        if tag_name == 'r':
+        if tag_name == 'hyperlink':
+            # Handle hyperlink elements - extract URL and render as HTML anchor
+            # Get relationship ID to find the actual URL
+            r_id = element.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+
+            hyperlink_url = ""
+            if r_id and hasattr(self, 'doc') and self.doc and r_id in self.doc.part.rels:
+                rel = self.doc.part.rels[r_id]
+                hyperlink_url = rel._target if hasattr(rel, '_target') else ""
+
+            # Process all runs inside the hyperlink
+            hyperlink_content = "".join(self._process_xml_element_to_html(child) for child in element)
+
+            # If we have a URL, wrap in anchor tag, otherwise return content as-is
+            if hyperlink_url:
+                return f'<a href="{hyperlink_url}" style="color: #0000EE; text-decoration: underline;" data-is-hyperlink="true">{hyperlink_content}</a>'
+            else:
+                return hyperlink_content
+
+        elif tag_name == 'r':
             text_parts = []
             image_html = []
             rPr = element.find(f"{self.w_ns}rPr")

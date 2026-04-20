@@ -1087,22 +1087,92 @@ function App() {
         currentElement = currentElement.parentElement
       }
 
-      // Calculate offset within block
+      // CRITICAL FIX: For table cells, calculate offset relative to the paragraph, not the cell
+      // This fixes bug where duplicate words in table cells always format the first occurrence
       let offset = 0
       let endOffset = 0
-      if (blockElement) {
-        // Get text before selection in the block
-        const range = selection.getRangeAt(0)
-        const preSelectionRange = range.cloneRange()
-        preSelectionRange.selectNodeContents(blockElement)
-        preSelectionRange.setEnd(range.startContainer, range.startOffset)
-        offset = preSelectionRange.toString().length
+      let paraInCell = null  // Track paragraph index within table cell
 
-        // Get text before end of selection
-        const postSelectionRange = range.cloneRange()
-        postSelectionRange.selectNodeContents(blockElement)
-        postSelectionRange.setEnd(range.endContainer, range.endOffset)
-        endOffset = postSelectionRange.toString().length
+      if (blockElement) {
+        const range = selection.getRangeAt(0)
+
+        // Check if we're in a table cell (blockElement is a td/th)
+        const isTableCell = blockElement.tagName === 'TD' || blockElement.tagName === 'TH'
+
+        if (isTableCell) {
+          // Find the specific paragraph containing the selection
+          let paraElement = element
+          while (paraElement && paraElement !== blockElement) {
+            if (paraElement.tagName === 'P' && blockElement.contains(paraElement)) {
+              break
+            }
+            paraElement = paraElement.parentElement
+          }
+
+          // Calculate paragraph index within the cell
+          if (paraElement && paraElement.tagName === 'P') {
+            const paras = Array.from(blockElement.querySelectorAll('p'))
+            paraInCell = paras.indexOf(paraElement)
+
+            console.log(`[DEBUG] Table cell: paraInCell=${paraInCell}, total paragraphs=${paras.length}`)
+
+            // Calculate offset relative to this paragraph, not the entire cell
+            if (paraInCell >= 0) {
+              const preSelectionRange = range.cloneRange()
+              preSelectionRange.selectNodeContents(paraElement)
+              preSelectionRange.setEnd(range.startContainer, range.startOffset)
+              offset = preSelectionRange.toString().length
+
+              const postSelectionRange = range.cloneRange()
+              postSelectionRange.selectNodeContents(paraElement)
+              postSelectionRange.setEnd(range.endContainer, range.endOffset)
+              endOffset = postSelectionRange.toString().length
+
+              console.log(`[DEBUG] Calculated offset relative to paragraph: offset=${offset}, endOffset=${endOffset}`)
+            } else {
+              // Fallback to cell-level calculation
+              const preSelectionRange = range.cloneRange()
+              preSelectionRange.selectNodeContents(blockElement)
+              preSelectionRange.setEnd(range.startContainer, range.startOffset)
+              offset = preSelectionRange.toString().length
+
+              const postSelectionRange = range.cloneRange()
+              postSelectionRange.selectNodeContents(blockElement)
+              postSelectionRange.setEnd(range.endContainer, range.endOffset)
+              endOffset = postSelectionRange.toString().length
+
+              console.log(`[DEBUG] Could not find paragraph, using cell-level offset: offset=${offset}, endOffset=${endOffset}`)
+            }
+          } else {
+            // Fallback to cell-level calculation
+            const preSelectionRange = range.cloneRange()
+            preSelectionRange.selectNodeContents(blockElement)
+            preSelectionRange.setEnd(range.startContainer, range.startOffset)
+            offset = preSelectionRange.toString().length
+
+            const postSelectionRange = range.cloneRange()
+            postSelectionRange.selectNodeContents(blockElement)
+            postSelectionRange.setEnd(range.endContainer, range.endOffset)
+            endOffset = postSelectionRange.toString().length
+
+            console.log(`[DEBUG] Not in a paragraph, using cell-level offset: offset=${offset}, endOffset=${endOffset}`)
+          }
+        } else {
+          // Regular paragraph (not in table)
+          // Get text before selection in the block
+          const preSelectionRange = range.cloneRange()
+          preSelectionRange.selectNodeContents(blockElement)
+          preSelectionRange.setEnd(range.startContainer, range.startOffset)
+          offset = preSelectionRange.toString().length
+
+          // Get text before end of selection
+          const postSelectionRange = range.cloneRange()
+          postSelectionRange.selectNodeContents(blockElement)
+          postSelectionRange.setEnd(range.endContainer, range.endOffset)
+          endOffset = postSelectionRange.toString().length
+
+          console.log(`[DEBUG] Regular paragraph, offset=${offset}, endOffset=${endOffset}`)
+        }
       }
 
       // Get accurate format from DOCX backend (not from HTML computed style)
@@ -1147,7 +1217,8 @@ function App() {
         format: format,
         blockIndex: blockIndex,
         offset: offset,
-        endOffset: endOffset
+        endOffset: endOffset,
+        paraInCell: paraInCell  // Include paragraph index within table cell
       })
       setShowEditPopup(true)
     }

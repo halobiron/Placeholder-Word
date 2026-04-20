@@ -798,15 +798,26 @@ def map_camel_to_snake(format_data: dict) -> dict:
 @app.post("/edit-selection")
 async def edit_selection(
     template_id: str = Form(...),
-    edit_type: str = Form(...),
     selected_text: str = Form(...),
-    new_text: str = Form(None),
-    format_config: str = Form(None),
-    paragraph_index: int = Form(None),
-    run_index: int = Form(None),
-    paragraph_format: str = Form(None)
+    format_config: str = Form(...),
+    paragraph_index: int = Form(...),
+    paragraph_format: str = Form(None),
+    start_offset: int = Form(None),
+    end_offset: int = Form(None),
+    para_in_cell: int = Form(None)
 ):
-    """Edit DOCX based on user selection from HTML preview"""
+    """Apply formatting to selected text in DOCX
+
+    CRITICAL FIX: Added start_offset and end_offset parameters to support
+    formatting specific occurrences of duplicate words in the same paragraph.
+
+    CRITICAL FIX: Added para_in_cell parameter to support table cells with
+    multiple paragraphs. When para_in_cell is provided, we target the specific
+    paragraph within the table cell instead of the entire cell.
+
+    When offsets are provided, the method uses precise offset-based targeting
+    instead of text search (which always finds the first occurrence).
+    """
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
         raise HTTPException(status_code=404, detail="Template not found")
@@ -819,86 +830,59 @@ async def edit_selection(
         # Debug logging
         print(f"=== /edit-selection DEBUG ===")
         print(f"template_id: {template_id}")
-        print(f"edit_type: {edit_type}")
         print(f"selected_text: {selected_text[:50]}...")
         print(f"paragraph_index (block_index): {paragraph_index}")
+        print(f"start_offset: {start_offset}")
+        print(f"end_offset: {end_offset}")
+        print(f"para_in_cell: {para_in_cell}")
         print(f"format_config: {format_config[:200] if format_config else None}...")
         print(f"=== END DEBUG ===")
 
-        # Map block_index to paragraph_index if provided
-        actual_para_index = None
-        use_position = False
-
-        if paragraph_index is not None:
-            actual_para_index = editor.get_paragraph_index_from_block(paragraph_index)
-            print(f"actual_para_index: {actual_para_index}")
-            if actual_para_index is not None:
-                use_position = True
-
-        # Helper function for position-based text replacement
-        def replace_text(old, new):
-            if use_position:
-                success = editor.replace_text_at_position(
-                    old_text=old, new_text=new,
-                    paragraph_index=actual_para_index, run_index=run_index
+        # CRITICAL FIX: Map block_index to paragraph_index, handling table cells
+        # When para_in_cell is provided, we need to get the specific paragraph within the table cell
+        if para_in_cell is not None:
+            # This is a table cell with multiple paragraphs
+            # Get the paragraph index for the specific paragraph within the cell
+            actual_para_index = editor.get_table_cell_paragraph_index(paragraph_index, para_in_cell)
+            if actual_para_index is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid para_in_cell: {para_in_cell} for block_index: {paragraph_index}"
                 )
-                if not success:
-                    raise HTTPException(status_code=404, detail="Text not found at specified position")
-            else:
-                editor.replace_text_keep_format(old_text=old, new_text=new)
-
-        # Helper function for position-based formatting
-        def apply_format(text, format_data):
-            try:
-                format_kwargs = map_camel_to_snake(format_data)
-                print(f"apply_format kwargs: {format_kwargs}")
-            except Exception as e:
-                print(f"Error mapping format data: {e}")
-                raise HTTPException(status_code=400, detail=f"Invalid format data: {str(e)}")
-
-            if use_position:
-                success = editor.apply_format_at_position(
-                    text=text, paragraph_index=actual_para_index, **format_kwargs
-                )
-                if not success:
-                    raise HTTPException(status_code=404, detail="Text not found at specified position")
-            else:
-                editor.apply_format_to_text(text=text, **format_kwargs)
-
-        # Process edit type
-        if edit_type == "text":
-            if not new_text:
-                raise HTTPException(status_code=400, detail="new_text required")
-            replace_text(selected_text, new_text)
-
-        elif edit_type == "format":
-            if not format_config:
-                raise HTTPException(status_code=400, detail="format_config required")
-            try:
-                format_data = json.loads(format_config)
-            except json.JSONDecodeError as e:
-                raise HTTPException(status_code=400, detail=f"Invalid JSON in format_config: {str(e)}")
-            apply_format(selected_text, format_data)
-
-        elif edit_type == "both":
-            if not new_text:
-                raise HTTPException(status_code=400, detail="new_text required")
-            if not format_config:
-                raise HTTPException(status_code=400, detail="format_config required")
-
-            try:
-                format_data = json.loads(format_config)
-            except json.JSONDecodeError as e:
-                raise HTTPException(status_code=400, detail=f"Invalid JSON in format_config: {str(e)}")
-
-            replace_text(selected_text, new_text)
-            apply_format(new_text, format_data)
-
-        elif edit_type == "delete":
-            replace_text(selected_text, "")
-
+            print(f"[DEBUG] Table cell: block_index={paragraph_index}, para_in_cell={para_in_cell} -> actual_para_index={actual_para_index}")
         else:
-            raise HTTPException(status_code=400, detail=f"Invalid edit_type: {edit_type}")
+            # Regular paragraph or table cell without para_in_cell specified
+            actual_para_index = editor.get_paragraph_index_from_block(paragraph_index)
+            if actual_para_index is None:
+                raise HTTPException(status_code=400, detail=f"Invalid paragraph_index: {paragraph_index}")
+
+        print(f"actual_para_index: {actual_para_index}")
+
+        # Parse format config
+        try:
+            format_data = json.loads(format_config)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in format_config: {str(e)}")
+
+        # Apply text formatting
+        try:
+            format_kwargs = map_camel_to_snake(format_data)
+            print(f"apply_format kwargs: {format_kwargs}")
+        except Exception as e:
+            print(f"Error mapping format data: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid format data: {str(e)}")
+
+        # CRITICAL FIX: Pass offset parameters when available
+        # This enables precise targeting of duplicate word occurrences
+        success = editor.apply_format_at_position(
+            text=selected_text,
+            paragraph_index=actual_para_index,
+            start_offset=start_offset,
+            end_offset=end_offset,
+            **format_kwargs
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Text not found at specified position")
 
         # Handle paragraph formatting if provided
         if paragraph_format:
@@ -907,15 +891,12 @@ async def edit_selection(
                 paragraph_kwargs = map_camel_to_snake(paragraph_format_data)
                 print(f"paragraph_format kwargs: {paragraph_kwargs}")
 
-                if actual_para_index is not None:
-                    success = editor.apply_paragraph_formatting(
-                        paragraph_index=actual_para_index,
-                        **paragraph_kwargs
-                    )
-                    if not success:
-                        print(f"Warning: Could not apply paragraph formatting at index {actual_para_index}")
-                else:
-                    print(f"Warning: Paragraph formatting requested but no paragraph_index provided")
+                success = editor.apply_paragraph_formatting(
+                    paragraph_index=actual_para_index,
+                    **paragraph_kwargs
+                )
+                if not success:
+                    print(f"Warning: Could not apply paragraph formatting at index {actual_para_index}")
             except Exception as e:
                 print(f"Error applying paragraph format: {e}")
                 print(f"Traceback: {traceback.format_exc()}")
@@ -932,8 +913,7 @@ async def edit_selection(
             "template_id": template_id,
             "fields": fields,
             "html_preview": html_preview,
-            "updated": True,
-            "edit_type": edit_type
+            "updated": True
         }
 
     except HTTPException:
