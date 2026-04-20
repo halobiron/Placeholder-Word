@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import tempfile
 from pathlib import Path
 from typing import Dict, Literal
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
@@ -656,7 +657,6 @@ async def add_placeholder_by_offset(
         field_name = field_name.strip().lower().replace(" ", "_")
 
         # Initialize editor
-        from docx_editor import DocxFullEditor
         editor = DocxFullEditor(str(template_path))
 
         # Convert block_index to paragraph_index, handling table cells
@@ -823,8 +823,6 @@ async def edit_selection(
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        from docx_editor import DocxFullEditor
-
         editor = DocxFullEditor(str(template_path))
 
         # Debug logging
@@ -929,7 +927,7 @@ async def edit_selection(
 @app.post("/add-content")
 async def add_content(
     template_id: str = Form(...),
-    add_type: str = Form(...),  # "text", "paragraph", "placeholder", "image", "pagebreak"
+    add_type: str = Form(...),  # "text", "placeholder", "image" (pagebreak deprecated)
     position: str = Form(...),   # "end", "after:text", "before:text"
     content: str = Form(None),   # Text content
     field_name: str = Form(None), # Field name for placeholder
@@ -942,7 +940,7 @@ async def add_content(
 
     Args:
         template_id: Template ID
-        add_type: Type of content to add
+        add_type: Type of content to add ("text", "placeholder", "image")
         position: Where to add ("end", "after:text", "before:text")
         content: Text/paragraph content
         field_name: Field name for placeholder
@@ -958,9 +956,6 @@ async def add_content(
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        from docx_editor import DocxFullEditor
-        import tempfile
-
         editor = DocxFullEditor(str(template_path))
 
         if add_type == "text":
@@ -968,31 +963,15 @@ async def add_content(
             if not content:
                 raise HTTPException(status_code=400, detail="content required for text addition")
 
-            # Helper function to find paragraph index by text or element
-            def find_paragraph_index(target_text=None, target_element=None):
-                for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
-                    if target_text is not None and target_text in para.text:
-                        return idx
-                    if target_element is not None and para._element == target_element:
-                        return idx
-                return None
-
-            content_paragraph_index = None
-
             if position == "end":
-                # Add text at end
-                last_para = editor.doc.paragraphs[-1]
-                last_para.add_run(content)
-                content_paragraph_index = find_paragraph_index(target_element=last_para._element)
+                editor.doc.paragraphs[-1].add_run(content)
             elif position.startswith("after:"):
                 target_text = position.split("after:")[1].strip()
-                content_paragraph_index = find_paragraph_index(target_text=target_text)
                 success = editor.add_text_after(target_text, content, inherit_format=inherit_format)
                 if not success:
                     raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
             elif position.startswith("before:"):
                 target_text = position.split("before:")[1].strip()
-                content_paragraph_index = find_paragraph_index(target_text=target_text)
                 success = editor.add_text_before(target_text, content, inherit_format=inherit_format)
                 if not success:
                     raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
@@ -1000,28 +979,7 @@ async def add_content(
             # Apply format if provided
             if format_config:
                 format_data = json.loads(format_config)
-                # Pass paragraph_index to only format the newly added content
-                editor.apply_format_to_text(content, paragraph_index=content_paragraph_index, **map_camel_to_snake(format_data))
-
-        elif add_type == "paragraph":
-            # Add paragraph
-            if not content:
-                raise HTTPException(status_code=400, detail="content required for paragraph addition")
-
-            if position == "end":
-                editor.add_paragraph_at_end(content)
-            elif position.startswith("after:"):
-                target_text = position.split("after:")[1].strip()
-                success = editor.add_paragraph_after(target_text, content, inherit_format=inherit_format)
-                if not success:
-                    raise HTTPException(status_code=404, detail=f"Target text not found: {target_text}")
-
-            # Apply paragraph format if provided
-            if format_config:
-                format_data = json.loads(format_config)
-                # Apply paragraph-level formatting
-                if "alignment" in format_data:
-                    editor.apply_paragraph_format(content, alignment=format_data["alignment"])
+                editor.apply_format_to_text(content, **map_camel_to_snake(format_data))
 
         elif add_type == "placeholder":
             # Add placeholder
@@ -1035,8 +993,11 @@ async def add_content(
             if not file:
                 raise HTTPException(status_code=400, detail="file required for image addition")
 
+            # Get file extension from original filename
+            file_ext = Path(file.filename).suffix or ".jpg"
+
             # Save uploaded image temporarily
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
                 tmp.write(await file.read())
                 tmp_path = tmp.name
 
@@ -1051,14 +1012,8 @@ async def add_content(
                 if not success and position != "end":
                     raise HTTPException(status_code=404, detail="Target text not found for image placement")
             finally:
-                # Cleanup temp file
-                import os
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
-
-        elif add_type == "pagebreak":
-            # Add page break
-            editor.add_page_break(position)
 
         else:
             raise HTTPException(status_code=400, detail=f"Invalid add_type: {add_type}")
@@ -1084,10 +1039,56 @@ async def add_content(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Add content failed: {str(e)}")
 
+@app.post("/add-page-break-at-cursor")
+async def add_page_break_at_cursor_endpoint(request: Request):
+    """
+    Add page break at cursor position (split paragraph at offset)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    This is the CORRECT way to insert page breaks - at the exact cursor position,
+    not after/before entire paragraphs.
+    """
+    try:
+        data = await request.json()
+        template_id = data.get('template_id')
+        block_index = data.get('block_index')
+        offset = data.get('offset')
+
+        if not template_id or block_index is None or offset is None:
+            raise HTTPException(status_code=400, detail="Missing required fields: template_id, block_index, offset")
+
+        template_path = TEMPLATE_DIR / f"{template_id}.docx"
+        if not template_path.exists():
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Add page break at cursor position
+        editor = DocxFullEditor(str(template_path))
+        success = editor.add_page_break_at_cursor(int(block_index), int(offset))
+
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to add page break at cursor position")
+
+        # Save updated template
+        editor.save(str(template_path))
+
+        # Get updated fields and preview
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(template_path))
+
+        processor = MailMergeProcessor()
+        html_preview = processor._generate_html_preview(str(template_path))
+
+        return {
+            "template_id": template_id,
+            "fields": fields,
+            "html_preview": html_preview,
+            "added": True,
+            "add_type": "pagebreak"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Add page break at cursor failed: {str(e)}")
 
 @app.post("/add-hyperlink")
 async def add_hyperlink_to_template(
@@ -1115,8 +1116,6 @@ async def add_hyperlink_to_template(
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        from docx_editor import DocxFullEditor
-
         editor = DocxFullEditor(str(template_path))
 
         # Map block_index to paragraph_index
@@ -1183,8 +1182,6 @@ async def update_text_in_template(
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        from docx_editor import DocxFullEditor
-
         print(f"=== /update-text DEBUG ===")
         print(f"block_index: {block_index}")
         print(f"para_in_cell: {para_in_cell}")
@@ -1227,7 +1224,9 @@ async def update_text_in_template(
         else:
             # CRITICAL FIX: Check if old_text is empty or cell is empty
             # If old_text is empty or cell is empty, ADD text instead of REPLACE
-            if not old_text or old_text.strip() == "":
+            # CRITICAL FIX: Only treat as empty if old_text is None or "", NOT whitespace-only
+            # Whitespace-only (like " ") should go through REPLACE logic, not ADD
+            if old_text is None or old_text == "":
                 # Adding text to empty cell - get target paragraph first
                 target_paragraph = None
                 for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
@@ -1348,8 +1347,6 @@ async def get_selection_format(
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        from docx_editor import DocxFullEditor
-
         editor = DocxFullEditor(str(template_path))
 
         # Map block_index to paragraph_index if provided
@@ -2477,3 +2474,7 @@ async def add_image_at_cursor(request: Request):
         print(error_detail)
         print(f"=== END ERROR ===")
         raise HTTPException(status_code=500, detail=error_detail)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

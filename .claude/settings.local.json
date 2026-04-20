@@ -63,7 +63,10 @@
       "Bash(bash scripts/docx_preview.sh \"E:/Work/PhenikaaX/Placeholder-Word/backend/uploads/templates/f804889f-c4fa-4042-a080-80c032af7f45.docx\")",
       "Bash(netstat -ano)",
       "Bash(taskkill:*)",
-      "Bash(tasklist)"
+      "Bash(tasklist)",
+      "Bash(kill:*)",
+      "Bash(lsof:*)",
+      "Bash(npx gitnexus:*)"
     ]
   },
   "enabledPlugins": {

@@ -186,6 +186,100 @@ function App() {
     }
   }
 
+  // CRITICAL FIX: Helper function to update HTML while preserving scroll position and cursor
+  // This SOLVES the systemic issue of scroll jumping after HTML updates
+  const updateEditorHtmlWithPreservation = (newHtml, newFields, cursorTarget = null) => {
+    const editor = document.getElementById('document-editor')
+
+    // Save scroll position BEFORE HTML update
+    const savedScrollTop = editor?.scrollTop || 0
+    const savedScrollLeft = editor?.scrollLeft || 0
+
+    console.log('[DEBUG] updateEditorHtmlWithPreservation - Saving scroll:', {
+      scrollTop: savedScrollTop,
+      scrollLeft: savedScrollLeft,
+      cursorTarget
+    })
+
+    // Update HTML
+    setEditorHtml(newHtml)
+    setFields(newFields)
+    setOriginalFields(newFields)
+
+    // Restore scroll position and set cursor AFTER DOM update
+    setTimeout(() => {
+      const updatedEditor = document.getElementById('document-editor')
+      if (!updatedEditor) {
+        console.warn('[DEBUG] Editor not found after update')
+        return
+      }
+
+      // Restore scroll position
+      updatedEditor.scrollTop = savedScrollTop
+      updatedEditor.scrollLeft = savedScrollLeft
+
+      console.log('[DEBUG] Restored scroll position:', {
+        scrollTop: updatedEditor.scrollTop,
+        scrollLeft: updatedEditor.scrollLeft
+      })
+
+      // Set cursor to target if provided
+      if (cursorTarget) {
+        try {
+          const { blockIndex, paraInCell, tableIndex, rowIndex, colIndex, offset } = cursorTarget
+
+          let targetSelector = ''
+
+          // Build selector based on cursor target type
+          if (tableIndex !== undefined && rowIndex !== undefined && colIndex !== undefined) {
+            // Table cell paragraph
+            targetSelector = `[data-block-index="${blockIndex}"] .cell-paragraph[data-para-in-cell="${paraInCell || 0}"]`
+          } else {
+            // Regular paragraph
+            targetSelector = `[data-block-index="${blockIndex}"]`
+          }
+
+          const targetBlock = updatedEditor.querySelector(targetSelector)
+
+          if (targetBlock) {
+            const range = document.createRange()
+            const selection = window.getSelection()
+
+            // Try to find a suitable text node
+            const textNodes = Array.from(targetBlock.childNodes)
+              .filter(node => node.nodeType === Node.TEXT_NODE)
+
+            if (textNodes.length > 0) {
+              // Use first text node
+              const targetNode = textNodes[0]
+              const targetOffset = offset !== undefined ? Math.min(offset, targetNode.textContent.length) : 0
+              range.setStart(targetNode, targetOffset)
+              range.collapse(true)
+            } else {
+              // No text node, set at start of block
+              range.setStart(targetBlock, 0)
+              range.collapse(true)
+            }
+
+            selection.removeAllRanges()
+            selection.addRange(range)
+
+            console.log('[DEBUG] Cursor set to:', {
+              selector: targetSelector,
+              blockIndex,
+              paraInCell,
+              offset
+            })
+          } else {
+            console.warn('[DEBUG] Could not find target block:', targetSelector)
+          }
+        } catch (error) {
+          console.error('[DEBUG] Failed to set cursor:', error)
+        }
+      }
+    }, 0)  // Run in next tick after DOM update
+  }
+
   // Helper: Get text from a specific paragraph within a table cell
   const getTextFromCellParagraph = (html, cellBlockIndex, paraInCell) => {
     if (!html) return ''
@@ -638,26 +732,9 @@ function App() {
       if (templateNeedsUpdate && templateId) {
         try {
           // CRITICAL FIX: Save scroll position before refreshing
-          const editor = document.getElementById('document-editor')
-          const savedScrollTop = editor ? editor.scrollTop : 0
-          const savedScrollLeft = editor ? editor.scrollLeft : 0
-
-          console.log('[DEBUG] Refresh: Saved scroll position:', { scrollTop: savedScrollTop, scrollLeft: savedScrollLeft })
-
           const info = await getTemplateInfo(templateId)
-          setEditorHtml(info.html_preview)
-          setFields(info.fields)
+          updateEditorHtmlWithPreservation(info.html_preview, info.fields)  // ✅ Uses helper with scroll preservation
           setTemplateNeedsUpdate(false)
-
-          // Restore scroll position after React re-renders
-          setTimeout(() => {
-            const editorAfter = document.getElementById('document-editor')
-            if (editorAfter) {
-              editorAfter.scrollTop = savedScrollTop
-              editorAfter.scrollLeft = savedScrollLeft
-              console.log('[DEBUG] Refresh: Restored scroll position:', { scrollTop: editorAfter.scrollTop, scrollLeft: editorAfter.scrollLeft })
-            }
-          }, 0)
         } catch (err) {
           console.error('Failed to refresh template:', err)
         }
@@ -764,8 +841,7 @@ function App() {
 
       // Only update local state after successful server update
       setRenameMap(newMap)
-      setEditorHtml(newHtml)
-      setFields(extractFields(newHtml))
+      updateEditorHtmlWithPreservation(newHtml, extractFields(newHtml))  // ✅ Uses helper
       setTemplateNeedsUpdate(false) // Reset flag since we just updated
 
     } catch (err) {
@@ -774,8 +850,7 @@ function App() {
 
       // Rollback UI changes
       editor.innerHTML = oldHtml
-      setEditorHtml(oldHtml)
-      setFields(oldFields)
+      updateEditorHtmlWithPreservation(oldHtml, oldFields)  // ✅ Uses helper
       setRenameMap(oldRenameMap)
 
       setTimeout(() => setError(null), 3000)
@@ -1269,6 +1344,69 @@ function App() {
     }
   }
 
+  const handleAddPageBreak = async () => {
+    if (!templateId) return
+
+    try {
+      // Get current cursor position
+      const selection = window.getSelection()
+      if (!selection.rangeCount) {
+        setError('❌ Đặt cursor vào vị trí muốn ngắt trang trước!')
+        setTimeout(() => setError(null), 3000)
+        return
+      }
+
+      const range = selection.getRangeAt(0)
+      const blockIndex = getCurrentBlockIndex()
+      if (blockIndex === null) {
+        setError('❌ Đặt cursor vào vị trí muốn ngắt trang trước!')
+        setTimeout(() => setError(null), 3000)
+        return
+      }
+
+      // Calculate offset within block (excluding placeholders)
+      const offset = calculateCursorOffset(range, blockIndex)
+      if (offset === null) {
+        setError('❌ Không thể xác định vị trí cursor!')
+        setTimeout(() => setError(null), 3000)
+        return
+      }
+
+      // Call API with block_index and offset
+      const response = await fetch(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/add-page-break-at-cursor`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          template_id: templateId,
+          block_index: blockIndex,
+          offset: offset
+        })
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.detail || 'Failed to add page break')
+      }
+
+      const result = await response.json()
+
+      // Update UI
+      setEditorHtml(result.html_preview)
+      setFields(result.fields)
+      setOriginalFields(result.fields)
+
+      // Show success message
+      setError('✅ Đã thêm ngắt trang tại vị trí cursor!')
+      setTimeout(() => setError(null), 3000)
+    } catch (err) {
+      console.error('Add page break failed:', err)
+      setError('Thêm ngắt trang thất bại: ' + (err.message || err.response?.data?.detail))
+      setTimeout(() => setError(null), 3000)
+    }
+  }
+
   // Table operation handlers
   const handleAddTableRow = async (position = 'below') => {
     if (!selectedTableInfo.isCellSelected) return
@@ -1401,9 +1539,7 @@ function App() {
       console.log('[DEBUG] HTML preview length:', result.html_preview?.length)
       console.log('[DEBUG] HTML preview preview:', result.html_preview?.substring(0, 500))
 
-      setEditorHtml(result.html_preview)
-      setFields(result.fields)
-      setOriginalFields(result.fields)
+      updateEditorHtmlWithPreservation(result.html_preview, result.fields)  // ✅ Uses helper
       setTemplateNeedsUpdate(true)
 
       setShowAddTablePopup(false)
@@ -1459,9 +1595,7 @@ function App() {
       console.log('[DEBUG] API result:', result)
       console.log('[DEBUG] HTML preview length:', result.html_preview?.length)
 
-      setEditorHtml(result.html_preview)
-      setFields(result.fields)
-      setOriginalFields(result.fields)
+      updateEditorHtmlWithPreservation(result.html_preview, result.fields)  // ✅ Uses helper
       setTemplateNeedsUpdate(true)
 
       setShowAddImagePopup(false)
@@ -1976,6 +2110,13 @@ function App() {
                       >
                         📊 Thêm Bảng
                       </button>
+                      <button
+                        onClick={handleAddPageBreak}
+                        className="ml-2 px-3 py-1 bg-gray-600 text-white rounded hover:bg-gray-700 transition-colors text-sm"
+                        title="Thêm ngắt trang tại vị trí cursor (Ctrl+Enter trong Word)"
+                      >
+                        📄 Ngắt Trang
+                      </button>
                     </div>
                   )}
 
@@ -2122,6 +2263,12 @@ function App() {
 
                             console.log('[DEBUG] Creating new paragraph with params:', params)
 
+                            // CRITICAL FIX: Save scroll position and cursor info before API call
+                            const editor = document.getElementById('document-editor')
+                            const savedScrollTop = editor?.scrollTop || 0
+                            const savedScrollLeft = editor?.scrollLeft || 0
+                            console.log('[DEBUG] Saved scroll position:', { scrollTop: savedScrollTop, scrollLeft: savedScrollLeft })
+
                             // Call API to add paragraph
                             const result = await addParagraph(
                               templateId,
@@ -2138,6 +2285,59 @@ function App() {
                             setEditorHtml(result.html_preview)
                             setFields(result.fields)
                             setOriginalFields(result.fields)
+
+                            // CRITICAL FIX: Restore scroll position and set cursor after HTML update
+                            // Use setTimeout to ensure DOM is updated
+                            setTimeout(() => {
+                              const updatedEditor = document.getElementById('document-editor')
+                              if (updatedEditor) {
+                                // Restore scroll position
+                                updatedEditor.scrollTop = savedScrollTop
+                                updatedEditor.scrollLeft = savedScrollLeft
+                                console.log('[DEBUG] Restored scroll position:', { scrollTop: savedScrollTop, scrollLeft: savedScrollLeft })
+
+                                // Try to find and set cursor to the new paragraph
+                                // The new paragraph should be after the block we just edited
+                                // For regular paragraphs: find block with index = params.blockIndex + 1
+                                // For table cells: find cell paragraph with paraInCell = params.paraInCell + 1
+                                let targetSelector = ''
+                                if (params.tableIndex !== undefined && params.rowIndex !== undefined && params.colIndex !== undefined) {
+                                  // Table cell paragraph
+                                  const newParaInCell = (params.paraInCell || 0) + 1
+                                  targetSelector = `[data-block-index="${params.blockIndex}"] .cell-paragraph[data-para-in-cell="${newParaInCell}"]`
+                                } else {
+                                  // Regular paragraph
+                                  const newBlockIndex = params.blockIndex + 1
+                                  targetSelector = `[data-block-index="${newBlockIndex}"]`
+                                }
+
+                                const targetBlock = updatedEditor.querySelector(targetSelector)
+                                if (targetBlock) {
+                                  // Set cursor at start of new paragraph
+                                  const range = document.createRange()
+                                  const selection = window.getSelection()
+
+                                  // Find first text node or create range at start
+                                  const firstTextNode = Array.from(targetBlock.childNodes)
+                                    .find(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim().length > 0)
+
+                                  if (firstTextNode) {
+                                    range.setStart(firstTextNode, 0)
+                                    range.collapse(true)
+                                  } else {
+                                    // No text node found, set range at start of block
+                                    range.setStart(targetBlock, 0)
+                                    range.collapse(true)
+                                  }
+
+                                  selection.removeAllRanges()
+                                  selection.addRange(range)
+                                  console.log('[DEBUG] Set cursor to new paragraph:', targetSelector)
+                                } else {
+                                  console.log('[DEBUG] Could not find new paragraph with selector:', targetSelector)
+                                }
+                              }
+                            }, 0)  // Run in next tick after DOM update
 
                             setError('✅ Đã thêm dòng mới thành công!')
                             setTimeout(() => setError(null), 2000)
@@ -2297,10 +2497,7 @@ function App() {
                               )
 
                               // Update UI with new HTML preview
-                              setEditorHtml(result.html_preview)
-                              setFields(result.fields)
-                              setOriginalFields(result.fields)
-
+                              updateEditorHtmlWithPreservation(result.html_preview, result.fields)  // ✅ Uses helper
                               setError(`✅ Đã xóa ${result.deleted_count} dòng!`)
                               setTimeout(() => setError(null), 2000)
                             }
@@ -2364,10 +2561,7 @@ function App() {
                               params.paraInCell
                             )
 
-                            setEditorHtml(result.html_preview)
-                            setFields(result.fields)
-                            setOriginalFields(result.fields)
-
+                            updateEditorHtmlWithPreservation(result.html_preview, result.fields)  // ✅ Uses helper
                             setError('✅ Đã xóa dòng trống!')
                             setTimeout(() => setError(null), 2000)
 

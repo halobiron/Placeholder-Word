@@ -1467,6 +1467,62 @@ JSON:"""
         print(f"✗ No matching cell found")
         return False
 
+    def _extract_font_style_from_paragraph(self, para) -> str:
+        """
+        Extract font style from paragraph's runs for empty paragraphs.
+
+        Even when paragraph text is empty, the runs may contain font formatting
+        that should be preserved in HTML preview.
+
+        Args:
+            para: Paragraph object
+
+        Returns:
+            CSS style string with font properties
+        """
+        font_styles = []
+
+        # Try to get rPr from the first run in paragraph
+        for run in para.runs:
+            run_element = run._r
+            rPr = run_element.find(f"{self.w_ns}rPr")
+            if rPr is not None:
+                # Extract font family
+                rFonts = rPr.find(f"{self.w_ns}rFonts")
+                if rFonts is not None:
+                    ascii_font = rFonts.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}ascii")
+                    if ascii_font:
+                        font_styles.append(f"font-family: '{ascii_font}', Calibri, Arial, sans-serif")
+
+                # Extract font size
+                sz = rPr.find(f"{self.w_ns}sz")
+                if sz is not None:
+                    val = sz.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+                    if val:
+                        font_size_pt = int(val) / 2  # Word uses half-points
+                        font_styles.append(f"font-size: {font_size_pt}pt")
+
+                # Extract color
+                color = rPr.find(f"{self.w_ns}color")
+                if color is not None:
+                    val = color.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+                    if val and val != "auto" and len(val) == 6:
+                        font_styles.append(f"color: #{val}")
+
+                # Extract bold, italic, underline
+                if rPr.find(f"{self.w_ns}b") is not None:
+                    font_styles.append("font-weight: bold")
+                if rPr.find(f"{self.w_ns}i") is not None:
+                    font_styles.append("font-style: italic")
+                if rPr.find(f"{self.w_ns}u") is not None:
+                    font_styles.append("text-decoration: underline")
+
+                # Found formatting, stop here
+                if font_styles:
+                    break
+
+        return "; ".join(font_styles) + ";" if font_styles else ""
+
     def _get_run_style_text(self, rPr) -> str:
         """Map Word XML styles to CSS properties"""
         if rPr is None:
@@ -1812,7 +1868,7 @@ JSON:"""
         has_trailing_spaces = len(text_from_xml) > 0 and text_from_xml[-1] in ' \t'
 
         # Remove the hardcoded margin-right percentage calculation.
-        # Since we're using `white-space: pre-wrap` + `justify/left`, the spaces themselves 
+        # Since we're using `white-space: pre-wrap` + `justify/left`, the spaces themselves
         # naturally push the text accurately just like in standard document flow.
         margin_right = ""
 
@@ -1873,13 +1929,53 @@ JSON:"""
                     first_line_pt = int(first_line) / 20
                     para_styles.append(f"text-indent: {first_line_pt}pt")
 
+        # Check for page breaks in this paragraph
+        has_page_break = False
+        for br in para._p.findall(f".//{self.w_ns}br"):
+            br_type = br.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}type")
+            if br_type == "page":
+                has_page_break = True
+                break
+
         content = "".join(self._process_xml_element_to_html(child) for child in para._p)
         if is_empty or not content.strip():
             # Empty paragraph - preserve for visual layout, selectable for adding placeholders
+            # CRITICAL FIX: Extract font style from runs even when paragraph is empty
+            font_style = self._extract_font_style_from_paragraph(para)
+
             cursor_style = "cursor: crosshair;" if block_index >= 0 else "cursor: default;"
-            return '<p data-block-index="{0}" data-type="paragraph" data-empty="true" class="docx-empty-para" style="min-height: 1.2em; margin: 5px 0; {1}" title="Click để thêm placeholder">&nbsp;</p>'.format(
-                block_index, cursor_style
-            )
+
+            # Check if this empty paragraph has a page break
+            if has_page_break:
+                # Empty paragraph WITH page break - show visual indicator
+                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para page-break-para" style="min-height: 1.2em; margin: 5px 0; {2}{3}" title="Ngắt trang (Page Break)">&nbsp;</p>'.format(
+                    block_index, str(has_page_break).lower(), cursor_style, font_style
+                ) + '''
+                <div class="page-break-indicator" contenteditable="false" style="
+                    margin: 20px 0 !important;
+                    padding: 10px !important;
+                    border-top: 2px dashed #666 !important;
+                    border-bottom: 2px dashed #666 !important;
+                    text-align: center !important;
+                    color: #666 !important;
+                    font-size: 12px !important;
+                    font-style: italic !important;
+                    background-color: #f9f9f9 !important;
+                    user-select: none !important;
+                    -webkit-user-select: none !important;
+                    -moz-user-select: none !important;
+                    -ms-user-select: none !important;
+                    pointer-events: none !important;
+                    cursor: default !important;
+                " title="Ngắt trang (Page Break) - Không thể chỉnh sửa">
+                    📄 Ngắt trang
+                </div>
+                '''
+            else:
+                # Regular empty paragraph
+                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para" style="min-height: 1.2em; margin: 5px 0; {2}{3}" title="Click để thêm placeholder">&nbsp;</p>'.format(
+                    block_index, str(has_page_break).lower(), cursor_style, font_style
+                )
 
         align_style = f"text-align: {alignment};" if alignment != "left" else ""
         align_style += margin_right  # Add margin-right if calculated
@@ -1894,9 +1990,38 @@ JSON:"""
         text_content = re.sub(r'<[^>]+>', '', content)
         if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
             align_style += " white-space: pre-wrap;"
-        return '<{0} data-block-index="{1}" data-type="paragraph" style="{2}">{3}</{0}>'.format(
-            tag, block_index, align_style, content
+
+        # Build paragraph HTML
+        para_html = '<{0} data-block-index="{1}" data-type="paragraph" data-page-break="{2}" style="{3}">{4}</{0}>'.format(
+            tag, block_index, str(has_page_break).lower(), align_style, content
         )
+
+        # Add visual page break indicator if this paragraph has a page break
+        if has_page_break:
+            page_break_indicator = '''
+            <div class="page-break-indicator" contenteditable="false" style="
+                margin: 20px 0 !important;
+                padding: 10px !important;
+                border-top: 2px dashed #666 !important;
+                border-bottom: 2px dashed #666 !important;
+                text-align: center !important;
+                color: #666 !important;
+                font-size: 12px !important;
+                font-style: italic !important;
+                background-color: #f9f9f9 !important;
+                user-select: none !important;
+                -webkit-user-select: none !important;
+                -moz-user-select: none !important;
+                -ms-user-select: none !important;
+                pointer-events: none !important;
+                cursor: default !important;
+            " title="Ngắt trang (Page Break) - Không thể chỉnh sửa">
+                📄 Ngắt trang
+            </div>
+            '''
+            para_html += page_break_indicator
+
+        return para_html
 
     def _process_table_to_html(self, table, block_index: int, table_index: int) -> str:
         """Xử lý Table thành thẻ table html với block_index metadata cho từng ô

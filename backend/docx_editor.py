@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Twips
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.oxml.text.paragraph import CT_P
@@ -288,6 +288,60 @@ class DocxFullEditor:
 
     # ===== POSITION-BASED EDITING =====
 
+    def _extract_paragraph_full_text(self, paragraph: Paragraph) -> tuple:
+        """
+        Extract full text from paragraph including MERGEFIELD placeholders
+
+        Returns:
+            Tuple of (full_text, text_segments) where:
+            - full_text: Complete text with placeholders
+            - text_segments: List of dicts with keys:
+                - text: str (segment text)
+                - is_field: bool (True if MERGEFIELD)
+                - element: XML element (for editing)
+                - start_pos: int (start position in full_text)
+                - end_pos: int (end position in full_text)
+        """
+        text_segments = []
+        current_pos = 0
+
+        # Process paragraph element children in order
+        for child in paragraph._element:
+            tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
+
+            if tag_name == 'r':
+                # Regular run
+                run_text = "".join(t.text for t in child.findall(f"{self.w_ns}t") if t.text)
+                if run_text:
+                    text_segments.append({
+                        'text': run_text,
+                        'is_field': False,
+                        'element': child,
+                        'start_pos': current_pos,
+                        'end_pos': current_pos + len(run_text)
+                    })
+                    current_pos += len(run_text)
+
+            elif tag_name == 'fldSimple':
+                # MERGEFIELD field
+                instr = child.get(f"{self.w_ns}instr", "")
+                match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+                if match:
+                    field_name = match.group(1)
+                    field_text = f"«{field_name}»"
+                    text_segments.append({
+                        'text': field_text,
+                        'is_field': True,
+                        'element': child,
+                        'field_name': field_name,
+                        'start_pos': current_pos,
+                        'end_pos': current_pos + len(field_text)
+                    })
+                    current_pos += len(field_text)
+
+        full_text = "".join(seg['text'] for seg in text_segments)
+        return full_text, text_segments
+
     def replace_text_at_position(
         self,
         old_text: str,
@@ -297,6 +351,9 @@ class DocxFullEditor:
     ):
         """
         Replace text at a specific position only
+
+        CRITICAL FIX: Now properly handles MERGEFIELD placeholders to avoid duplication.
+        Preserves paragraph formatting during text replacement.
 
         Args:
             old_text: Text to find
@@ -381,11 +438,12 @@ class DocxFullEditor:
             if paragraph_index is not None and p_idx != paragraph_index:
                 continue
 
-            # Build normalized full text for search
-            full_text = "".join(run.text for run in paragraph.runs)
+            # CRITICAL FIX: Use new method to extract full text including MERGEFIELDs
+            full_text, text_segments = self._extract_paragraph_full_text(paragraph)
             full_text_normalized = self._normalize_text(full_text)
 
             print(f"[DEBUG] Checking paragraph {p_idx}: '{full_text_normalized}'")
+            print(f"[DEBUG] Text segments: {len(text_segments)}")
 
             if search_text_normalized not in full_text_normalized:
                 # Try partial match - use first significant words
@@ -400,125 +458,212 @@ class DocxFullEditor:
                 else:
                     continue
 
-            # Find which runs contain the text
-            # Use character-by-character comparison for accuracy
-            char_count = 0
-            target_runs = []
+            # Find position of text to replace
             start_idx = full_text_normalized.find(search_text_normalized)
-
             if start_idx == -1:
                 continue
 
             end_idx = start_idx + len(search_text_normalized)
 
-            # Map normalized position to original text position
-            # Build a mapping from normalized position to original position
-            norm_to_orig = []
-            norm_pos = 0  # ← CRITICAL FIX: Khai báo norm_pos
-            for orig_idx, char in enumerate(full_text):
-                # Check if this character contributes to normalized text
-                if not char.isspace():
-                    # Non-whitespace character - contributes to normalized text
-                    norm_to_orig.append((norm_pos, orig_idx))
-                    norm_pos += 1
+            print(f"[DEBUG] Found text at position {start_idx}-{end_idx}")
 
-            # Validate indices before accessing norm_to_orig
-            if not norm_to_orig:
-                # No non-whitespace characters found
+            # CRITICAL FIX: Find which segments contain the text to replace
+            target_segments = []
+            for seg in text_segments:
+                seg_start = seg['start_pos']
+                seg_end = seg['end_pos']
+
+                # Check if this segment overlaps with the text to replace
+                if seg_end > start_idx and seg_start < end_idx:
+                    target_segments.append(seg)
+
+            if not target_segments:
                 continue
 
-            # Find start position in original text
-            if start_idx >= len(norm_to_orig):
-                # start_idx is beyond the mapping - can't map
-                continue
+            print(f"[DEBUG] Target segments: {len(target_segments)}")
+            for i, seg in enumerate(target_segments):
+                print(f"[DEBUG]   Segment {i}: is_field={seg['is_field']}, text='{seg['text'][:30]}'")
 
-            orig_start_idx = norm_to_orig[start_idx][1]
+            # CRITICAL FIX: Handle MERGEFIELD properly during replacement
+            # We need to identify which parts of old_text are placeholders and which are regular text
+            has_field_in_target = any(seg['is_field'] for seg in target_segments)
 
-            # Find end position in original text
-            # end_idx in normalized text is exclusive, so we need end_idx - 1
-            if end_idx - 1 >= len(norm_to_orig):
-                # end_idx is beyond the mapping - use end of text
-                orig_end_idx = len(full_text)
-            else:
-                # Get the position AFTER the last character
-                last_char_idx = norm_to_orig[end_idx - 1][1]
-                orig_end_idx = last_char_idx + 1
+            if has_field_in_target:
+                # Parse old_text to separate regular text from placeholders
+                # Pattern: regular text + optional placeholder
+                import re
+                placeholder_pattern = r'«([^»]+)»'
+                placeholders_in_old = re.findall(placeholder_pattern, old_text)
 
-            print(f"[DEBUG] orig_start_idx={orig_start_idx}, orig_end_idx={orig_end_idx}")
+                if placeholders_in_old:
+                    print(f"[DEBUG] old_text contains {len(placeholders_in_old)} placeholder(s): {placeholders_in_old}")
 
-            # Fallback: if mapping failed, use simple search
-            if orig_start_idx is None:
-                orig_start_idx = full_text.find(old_text)
-                if orig_start_idx != -1:
-                    orig_end_idx = orig_start_idx + len(old_text)
+                    # Check if old_text is JUST text before a placeholder (most common case)
+                    # Example: "Nay tôi có nguyện vọng được ly hôn với «duoc_ly_hon_voi»"
+                    # User wants to change to: "Nay tôi KHÔNG có nguyện vọng được ly hôn với «duoc_ly_hon_voi»"
+                    # In this case, only replace the text BEFORE the placeholder
+
+                    # Split old_text at first placeholder
+                    parts = re.split(placeholder_pattern, old_text, 1)
+                    if len(parts) >= 2:
+                        text_before_placeholder = parts[0]
+                        placeholder_name = parts[1]
+
+                        # Check if new_text has the same placeholder at the end
+                        new_parts = re.split(placeholder_pattern, new_text, 1)
+                        if len(new_parts) >= 2 and new_parts[1] == placeholder_name:
+                            # This is the common case: editing text BEFORE placeholder
+                            new_text_before = new_parts[0]
+
+                            print(f"[DEBUG] Editing text before placeholder '{placeholder_name}'")
+                            print(f"[DEBUG]  Old: '{text_before_placeholder}'")
+                            print(f"[DEBUG]  New: '{new_text_before}'")
+
+                            # Find the first non-field segment (text before placeholder)
+                            for seg in target_segments:
+                                if not seg['is_field']:
+                                    # This is the text segment before the placeholder
+                                    element = seg['element']
+                                    if element.tag.split('}')[1] == 'r':
+                                        t_elements = element.findall(f"{self.w_ns}t")
+                                        if t_elements:
+                                            t_elem = t_elements[0]
+                                            # Replace the text
+                                            t_elem.text = new_text_before
+                                            print(f"[DEBUG] Replaced text before placeholder")
+                                            return True
+
+                            # If we get here, couldn't find non-field segment
+                            print(f"[DEBUG] Could not find non-field segment to replace")
+                            return False
+
+                # If we get here, it's a more complex case - try conservative approach
+                # Only replace in non-field segments
+                print(f"[DEBUG] Complex case with MERGEFIELD, using conservative approach")
+
+                # Find non-field segments and replace only those
+                replacement_done = False
+                for seg in target_segments:
+                    if not seg['is_field']:
+                        element = seg['element']
+                        if element.tag.split('}')[1] == 'r':
+                            t_elements = element.findall(f"{self.w_ns}t")
+                            if t_elements:
+                                t_elem = t_elements[0]
+
+                                # Calculate what portion of this segment to replace
+                                seg_start = seg['start_pos']
+                                seg_end = seg['end_pos']
+
+                                # Calculate overlap with replacement range
+                                overlap_start = max(start_idx, seg_start)
+                                overlap_end = min(end_idx, seg_end)
+
+                                if overlap_start < overlap_end:
+                                    # Calculate position within segment
+                                    pos_in_seg = overlap_start - seg_start
+                                    end_pos_in_seg = overlap_end - seg_start
+
+                                    # Get current text
+                                    current_text = t_elem.text if t_elem.text else ""
+
+                                    # Calculate the difference between old and new
+                                    # Remove the old part and add new text
+                                    # This is tricky - we need to figure out what portion to replace
+
+                                    # For now, simple approach: if the entire segment is in range, replace it
+                                    if start_idx <= seg_start and end_idx >= seg_end:
+                                        # Entire segment is being replaced
+                                        # Check if new_text is shorter (removing placeholder) or different
+                                        # For safety, only replace if new_text doesn't contain this placeholder
+                                        if f"«{seg.get('field_name', '')}»" not in new_text:
+                                            t_elem.text = new_text
+                                            replacement_done = True
+                                            print(f"[DEBUG] Replaced entire segment (conservative)")
+                                        else:
+                                            # Keep the placeholder, only replace surrounding text
+                                            # Extract text before and after placeholder
+                                            # This is complex - skip for now
+                                            print(f"[DEBUG] Keeping placeholder, skipping replacement")
+                                            return False
+
+                if replacement_done:
+                    return True
                 else:
-                    # Try finding first word as fallback
-                    first_word = old_text.split()[0] if old_text.split() else ""
-                    if first_word:
-                        orig_start_idx = full_text.find(first_word)
-                        if orig_start_idx != -1:
-                            # Find end by counting characters in original text
-                            orig_end_idx = orig_start_idx
-                            chars_found = 0
-                            target_chars = len([c for c in old_text if not c.isspace()])
-                            while orig_end_idx < len(full_text) and chars_found < target_chars:
-                                if not full_text[orig_end_idx].isspace():
-                                    chars_found += 1
-                                orig_end_idx += 1
+                    print(f"[DEBUG] Could not safely replace with MERGEFIELD present")
+                    return False
+
+            # Perform replacement
+            # Build new text by replacing only in non-field segments
+            new_full_text = full_text[:start_idx] + new_text + full_text[end_idx:]
+
+            # CRITICAL FIX: Reconstruct paragraph with new text, preserving MERGEFIELDs
+            # Strategy: Replace text segment by segment, preserving fields
+            replacement_done = False
+
+            if len(target_segments) == 1 and not target_segments[0]['is_field']:
+                # Simple case: single run, no field involved
+                seg = target_segments[0]
+                element = seg['element']
+
+                # Calculate position within the segment
+                seg_start = seg['start_pos']
+                pos_in_seg = start_idx - seg_start
+
+                # Find end position within segment
+                seg_end_pos = end_idx - seg_start
+                if seg_end_pos > len(seg['text']):
+                    seg_end_pos = len(seg['text'])
+
+                # Get the w:r element
+                r_element = element
+                if r_element.tag.split('}')[1] == 'r':
+                    # Find w:t elements and replace text
+                    t_elements = r_element.findall(f"{self.w_ns}t")
+                    if t_elements:
+                        # Simple case: replace in first w:t
+                        t_elem = t_elements[0]
+                        if t_elem.text:
+                            t_elem.text = t_elem.text[:pos_in_seg] + new_text + t_elem.text[seg_end_pos:]
+                            replacement_done = True
+                            print(f"[DEBUG] Replaced text in single run")
+            else:
+                # Complex case: multiple segments or includes fields
+                # Strategy: Clear target non-field segments and insert new text in first one
+                first_non_field_seg = None
+                for seg in target_segments:
+                    if not seg['is_field']:
+                        if first_non_field_seg is None:
+                            first_non_field_seg = seg
                         else:
-                            continue
-                    else:
-                        continue
+                            # Clear this segment
+                            element = seg['element']
+                            if element.tag.split('}')[1] == 'r':
+                                t_elements = element.findall(f"{self.w_ns}t")
+                                for t_elem in t_elements:
+                                    t_elem.text = ""
 
-            if orig_start_idx is None or orig_end_idx is None:
-                continue
+                if first_non_field_seg:
+                    # Insert new text in first non-field segment
+                    element = first_non_field_seg['element']
+                    if element.tag.split('}')[1] == 'r':
+                        t_elements = element.findall(f"{self.w_ns}t")
+                        if t_elements:
+                            t_elem = t_elements[0]
 
-            # Find which runs contain the text
-            char_count = 0
-            target_runs = []
+                            # Calculate position
+                            seg_start = first_non_field_seg['start_pos']
+                            pos_in_seg = start_idx - seg_start
+                            if pos_in_seg < 0:
+                                pos_in_seg = 0
 
-            for r_idx, run in enumerate(paragraph.runs):
-                run_start = char_count
-                run_end = char_count + len(run.text)
+                            # Replace with new text
+                            original_text = t_elem.text if t_elem.text else ""
+                            t_elem.text = original_text[:pos_in_seg] + new_text
+                            replacement_done = True
+                            print(f"[DEBUG] Replaced text across multiple segments")
 
-                if run_end > orig_start_idx and run_start < orig_end_idx:
-                    # If run_index is specified, only use that run
-                    if run_index is None or r_idx == run_index:
-                        target_runs.append((run, r_idx, run_start, run_end))
-
-                char_count += len(run.text)
-
-            # Replace text in target runs
-            if not target_runs:
-                continue
-
-            # Check if entire text is in one run
-            first_run, first_r_idx, run_start, run_end = target_runs[0]
-
-            # Calculate position within the run
-            if orig_start_idx >= run_start:
-                pos_in_run = orig_start_idx - run_start
-
-                # Check if the entire match fits in this run
-                if orig_end_idx <= run_end:
-                    # Extract the segment and verify
-                    original_segment = first_run.text[pos_in_run:orig_end_idx - run_start]
-
-                    # Verify with normalized comparison
-                    if self._normalize_text(original_segment) == search_text_normalized:
-                        # Exact match - replace
-                        first_run.text = first_run.text[:pos_in_run] + new_text + first_run.text[orig_end_idx - run_start:]
-                        return True
-
-            # Multi-run replacement - concatenate and replace using normalized comparison
-            full_run_text = "".join(r.text for r, _, _, _ in target_runs)
-
-            # Find the segment in the concatenated text
-            if search_text_normalized in self._normalize_text(full_run_text):
-                # Replace by clearing all target runs and putting new text in first run
-                target_runs[0][0].text = new_text
-                for run, _, _, _ in target_runs[1:]:
-                    run.text = ""
+            if replacement_done:
                 return True
 
         return False
@@ -1354,6 +1499,26 @@ class DocxFullEditor:
 
         return False
 
+    def apply_paragraph_format_by_text(self, text: str, **kwargs):
+        """
+        Apply paragraph formatting đến paragraph chứa text
+
+        Wrapper function đơn giản cho apply_paragraph_formatting
+        Tự động tìm paragraph index từ text content
+
+        Args:
+            text: Text content để tìm paragraph
+            **kwargs: Same params as apply_paragraph_formatting
+                    (alignment, line_spacing, space_before, space_after, first_line_indent)
+
+        Returns:
+            True nếu thành công, False nếu không tìm thấy paragraph
+        """
+        for idx, para in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if text in para.text:
+                return self.apply_paragraph_formatting(paragraph_index=idx, **kwargs)
+        return False
+
     # ===== TEXT EDITING (Giữ format) =====
 
     def replace_text_keep_format(self, old_text: str, new_text: str):
@@ -1547,44 +1712,6 @@ class DocxFullEditor:
                 # Use _apply_format_to_run for consistent formatting (supports hex highlight colors)
                 self._apply_format_to_run(run, bold, italic, underline, strikethrough, color, highlight, font_name, font_size)
 
-    def apply_paragraph_format(
-        self,
-        text: str,
-        alignment: str = None,
-        spacing_before: int = None,
-        spacing_after: int = None,
-        line_spacing: float = None
-    ):
-        """
-        Apply paragraph formatting cho đoạn chứa text
-
-        Args:
-            text: Text trong paragraph
-            alignment: "left", "center", "right", "justify"
-            spacing_before: Spacing trước (points)
-            spacing_after: Spacing sau (points)
-            line_spacing: Line spacing (1.0 = single, 2.0 = double)
-        """
-        alignment_map = {
-            "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
-            "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
-            "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
-            "justify": WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-        }
-
-        for paragraph in self._iterate_paragraphs():
-            if text not in paragraph.text:
-                continue
-
-            if alignment and alignment in alignment_map:
-                paragraph.alignment = alignment_map[alignment]
-            if spacing_before is not None:
-                paragraph.paragraph_format.space_before = Pt(spacing_before)
-            if spacing_after is not None:
-                paragraph.paragraph_format.space_after = Pt(spacing_after)
-            if line_spacing is not None:
-                paragraph.paragraph_format.line_spacing = line_spacing
-
     # ===== DELETE CONTENT =====
 
     def delete_text(self, text: str):
@@ -1630,35 +1757,47 @@ class DocxFullEditor:
                 return True
         return False
 
-    def add_paragraph_after(self, target_text: str, new_text: str, inherit_format: bool = True):
+    def _copy_run_formatting(self, source_run, target_run):
         """
-        Thêm paragraph mới sau paragraph chứa target text
+        Copy run-level formatting from source run to target run.
+
+        Copies: font name, size, bold, italic, underline, color, etc.
 
         Args:
-            target_text: Text đích
-            new_text: Nội dung paragraph mới
-            inherit_format: True = kế thừa format của paragraph trước
+            source_run: Run to copy formatting from
+            target_run: Run to apply formatting to
         """
-        for i, paragraph in enumerate(self.doc.paragraphs):
-            if target_text in paragraph.text:
-                if inherit_format:
-                    # Copy format from current paragraph
-                    new_para = paragraph.insert_paragraph_before(new_text)
-                    # Copy alignment
-                    new_para.alignment = paragraph.alignment
-                    # Copy paragraph format
-                    new_para.paragraph_format.space_before = paragraph.paragraph_format.space_before
-                    new_para.paragraph_format.space_after = paragraph.paragraph_format.space_after
-                    new_para.paragraph_format.line_spacing = paragraph.paragraph_format.line_spacing
-                else:
-                    # Add paragraph with default format
-                    if i < len(self.doc.paragraphs) - 1:
-                        new_para = self.doc.paragraphs[i + 1].insert_paragraph_before(new_text)
-                    else:
-                        new_para = self.doc.add_paragraph(new_text)
-                return True
+        try:
+            # Copy font properties
+            if source_run.font.name:
+                target_run.font.name = source_run.font.name
 
-        return False
+            if source_run.font.size:
+                target_run.font.size = source_run.font.size
+
+            target_run.font.bold = source_run.font.bold
+            target_run.font.italic = source_run.font.italic
+            target_run.font.underline = source_run.font.underline
+
+            if source_run.font.color and source_run.font.color.rgb:
+                target_run.font.color.rgb = source_run.font.color.rgb
+
+            if source_run.font.highlight_color:
+                target_run.font.highlight_color = source_run.font.highlight_color
+
+            # Copy other font properties
+            if source_run.font.strike:
+                target_run.font.strike = source_run.font.strike
+            if source_run.font.double_strike:
+                target_run.font.double_strike = source_run.font.double_strike
+            if source_run.font.subscript:
+                target_run.font.subscript = source_run.font.subscript
+            if source_run.font.superscript:
+                target_run.font.superscript = source_run.font.superscript
+
+            print(f"[DEBUG] Copied run formatting: font={source_run.font.name}, size={source_run.font.size}, bold={source_run.font.bold}")
+        except Exception as e:
+            print(f"[DEBUG] Error copying run formatting: {e}")
 
     def delete_paragraph(self, paragraph):
         """
@@ -1686,8 +1825,59 @@ class DocxFullEditor:
             return False
 
     def add_paragraph_at_end(self, text: str):
-        """Thêm paragraph ở cuối document"""
-        self.doc.add_paragraph(text)
+        """
+        Thêm paragraph ở cuối document
+        Tự động kế thừa formatting từ paragraph cuối cùng
+        """
+        print(f"[DEBUG] add_paragraph_at_end called: text={repr(text[:50])}")
+
+        # Get the last paragraph to copy formatting
+        last_para = None
+        for para in self.doc.paragraphs:
+            if para.text.strip():  # Find last non-empty paragraph
+                last_para = para
+
+        # Create new paragraph
+        new_para = self.doc.add_paragraph(text)
+        print(f"[DEBUG] New paragraph added at end")
+
+        # Inherit formatting from last paragraph if available
+        if last_para:
+            print(f"[DEBUG] Found last paragraph with formatting")
+
+            # Copy paragraph-level formatting
+            new_para.alignment = last_para.alignment
+            new_para.paragraph_format.space_before = last_para.paragraph_format.space_before
+            new_para.paragraph_format.space_after = last_para.paragraph_format.space_after
+            new_para.paragraph_format.line_spacing = last_para.paragraph_format.line_spacing
+            new_para.paragraph_format.first_line_indent = last_para.paragraph_format.first_line_indent
+
+            # Copy run-level formatting
+            if last_para.runs:
+                source_run = None
+                # Find the last non-empty run
+                for run in reversed(last_para.runs):
+                    if run.text and run.text.strip():
+                        source_run = run
+                        break
+
+                # If no non-empty run, use the first run
+                if not source_run and last_para.runs:
+                    source_run = last_para.runs[0]
+
+                if source_run:
+                    print(f"[DEBUG] Source run from last para: font={source_run.font.name}, size={source_run.font.size}")
+                    # Apply formatting to all runs in new paragraph
+                    for new_run in new_para.runs:
+                        self._copy_run_formatting(source_run, new_run)
+                else:
+                    print(f"[DEBUG] No source run found in last paragraph")
+            else:
+                print(f"[DEBUG] Last paragraph has no runs")
+        else:
+            print(f"[DEBUG] No last paragraph found for format inheritance")
+
+        return new_para
 
     def insert_paragraph_after(self, target_paragraph, text: str = ""):
         """
@@ -1700,6 +1890,7 @@ class DocxFullEditor:
         Returns:
             Paragraph object mới được tạo
         """
+        print(f"[DEBUG] insert_paragraph_after called: text={repr(text[:50])}")
 
         # Lấy paragraph element
         target_p_element = target_paragraph._p
@@ -1712,21 +1903,49 @@ class DocxFullEditor:
         pPr = target_p_element.find(f"{self.w_ns}pPr")
         if pPr is not None:
             new_p.append(copy.deepcopy(pPr))
+            print(f"[DEBUG] Copied paragraph properties from target")
 
-        # Tạo run với text nếu có
-        if text:
-            new_r = OxmlElement('w:r')
-            new_t = OxmlElement('w:t')
-            new_t.set(qn('xml:space'), 'preserve')
-            new_t.text = text
-            new_r.append(new_t)
-            new_p.append(new_r)
+        # Copy run properties (rPr) from target paragraph if it has runs
+        source_run_props = None
+        if target_paragraph.runs:
+            # Find the last non-empty run to copy formatting from
+            for run in reversed(target_paragraph.runs):
+                if run.text and run.text.strip():
+                    run_element = run._element
+                    rPr = run_element.find(f"{self.w_ns}rPr")
+                    if rPr is not None:
+                        source_run_props = rPr
+                        print(f"[DEBUG] Found source run properties: font={run.font.name}, size={run.font.size}")
+                    break
+
+        # TẠO RUN LUÔN - kể cả khi text rỗng (quan trọng!)
+        # Phải tạo run với formatting ngay từ đầu để khi thêm text sau sẽ kế thừa đúng
+        new_r = OxmlElement('w:r')
+
+        # Copy run properties if available
+        if source_run_props is not None:
+            new_r.append(copy.deepcopy(source_run_props))
+            print(f"[DEBUG] Copied run properties to new run")
+        else:
+            print(f"[DEBUG] No source run props found, using default")
+
+        # Tạo text element - có thể rỗng
+        new_t = OxmlElement('w:t')
+        new_t.set(qn('xml:space'), 'preserve')
+        new_t.text = text
+        new_r.append(new_t)
+        new_p.append(new_r)
 
         # Insert new paragraph sau target paragraph
         parent_index = list(parent).index(target_p_element)
         parent.insert(parent_index + 1, new_p)
 
-        return new_p
+        # Convert to Paragraph object
+        from docx.text.paragraph import Paragraph
+        new_para = Paragraph(new_p, self.doc)
+
+        print(f"[DEBUG] New paragraph inserted after target")
+        return new_para
 
     def add_paragraph_in_table_cell(
         self,
@@ -1749,6 +1968,8 @@ class DocxFullEditor:
         Returns:
             True nếu thành công, False nếu thất bại
         """
+        print(f"[DEBUG] add_paragraph_in_table_cell called: table={table_index}, row={row_index}, col={col_index}, text={repr(text[:50])}")
+
         if table_index >= len(self.doc.tables):
             return False
 
@@ -1778,24 +1999,73 @@ class DocxFullEditor:
                 if pPr is not None:
                     new_p.append(copy.deepcopy(pPr))
 
-                # Tạo run với text nếu có
-                if text:
-                    new_r = OxmlElement('w:r')
-                    new_t = OxmlElement('w:t')
-                    new_t.set(qn('xml:space'), 'preserve')
-                    new_t.text = text
-                    new_r.append(new_t)
-                    new_p.append(new_r)
+                # Copy run properties từ target paragraph
+                source_run_props = None
+                source_run_for_debug = None
+                if target_para.runs:
+                    for run in reversed(target_para.runs):
+                        if run.text and run.text.strip():
+                            run_element = run._element
+                            rPr = run_element.find(f"{self.w_ns}rPr")
+                            if rPr is not None:
+                                source_run_props = rPr
+                                source_run_for_debug = run
+                                print(f"[DEBUG] Found source run props in cell: font={run.font.name}, size={run.font.size}")
+                            break
+
+                # TẠO RUN LUÔN - kể cả khi text rỗng
+                new_r = OxmlElement('w:r')
+
+                # Copy run properties if available
+                if source_run_props is not None:
+                    new_r.append(copy.deepcopy(source_run_props))
+                    print(f"[DEBUG] Copied run props to new run in cell")
+                else:
+                    print(f"[DEBUG] No source run props in cell, using default")
+
+                # Tạo text element - có thể rỗng
+                new_t = OxmlElement('w:t')
+                new_t.set(qn('xml:space'), 'preserve')
+                new_t.text = text
+                new_r.append(new_t)
+                new_p.append(new_r)
 
                 # Insert new paragraph sau target paragraph
                 parent_index = list(parent).index(target_p_element)
                 parent.insert(parent_index + 1, new_p)
             else:
-                # Thêm vào cuối cell
+                # Thêm vào cuối cell - kế thừa format từ paragraph cuối cùng
+                last_para = None
+                for para in cell.paragraphs:
+                    if para.text.strip():
+                        last_para = para
+
                 if text:
                     new_para = cell.add_paragraph(text)
                 else:
                     new_para = cell.add_paragraph()
+
+                # Inherit formatting from last paragraph
+                if last_para:
+                    new_para.alignment = last_para.alignment
+                    new_para.paragraph_format.space_before = last_para.paragraph_format.space_before
+                    new_para.paragraph_format.space_after = last_para.paragraph_format.space_after
+                    new_para.paragraph_format.line_spacing = last_para.paragraph_format.line_spacing
+
+                    if last_para.runs:
+                        source_run = None
+                        for run in reversed(last_para.runs):
+                            if run.text and run.text.strip():
+                                source_run = run
+                                break
+
+                        if not source_run and last_para.runs:
+                            source_run = last_para.runs[0]
+
+                        if source_run:
+                            for new_run in new_para.runs:
+                                self._copy_run_formatting(source_run, new_run)
+                            print(f"[DEBUG] Copied formatting from last paragraph in cell")
 
             return True
 
@@ -1813,9 +2083,11 @@ class DocxFullEditor:
             after_text: Text đích (cho after/before)
         """
         placeholder_text = f" «{field_name}»"
+        print(f"[DEBUG] add_placeholder called: field_name={field_name}, position={position}")
 
         if position == "end":
-            self.doc.add_paragraph(placeholder_text)
+            # Use add_paragraph_at_end to inherit formatting
+            self.add_paragraph_at_end(placeholder_text)
         elif position.startswith("after:"):
             target_text = position.split("after:")[1].strip()
             self.add_text_after(target_text, placeholder_text, inherit_format=True)
@@ -2403,26 +2675,153 @@ class DocxFullEditor:
             run_element = run._element
             run_element.getparent().remove(run_element)
 
-    def add_page_break(self, position: str = "end", after_text: str = None):
+    def add_page_break_at_cursor(self, block_index: int, offset: int):
         """
-        Thêm ngắt trang
+        Thêm ngắt trang TẠI VỊ TRÍ CURSOR (split paragraph tại offset)
 
         Args:
-            position: "end", "after:text", "before:text"
-            after_text: Text đích
+            block_index: Block index từ HTML preview
+            offset: Character offset trong paragraph (đã loại placeholders)
+
+        Returns:
+            True nếu thành công, False nếu thất bại
         """
-        if position == "end":
-            self.doc.add_page_break()
-        elif position.startswith("after:"):
-            target_text = position.split("after:")[1].strip()
-            for i, paragraph in enumerate(self.doc.paragraphs):
-                if target_text in paragraph.text:
-                    if i < len(self.doc.paragraphs) - 1:
-                        self.doc.paragraphs[i + 1].add_page_break()
-                    else:
-                        self.doc.add_paragraph().add_page_break()
-                    return True
-        return False
+        print(f"[DEBUG] add_page_break_at_cursor called: block_index={block_index}, offset={offset}")
+
+        # Build block index map if not exists
+        self._build_block_index_map()
+
+        # Get paragraph from block index
+        if block_index not in self._block_to_para_index_map:
+            print(f"[ERROR] Block index {block_index} not found in map")
+            return False
+
+        block_info = self._block_to_para_index_map[block_index]
+        if block_info['type'] != 'paragraph':
+            print(f"[ERROR] Block {block_index} is not a paragraph")
+            return False
+
+        source_para = block_info['paragraph']
+        source_element = source_para._element
+
+        print(f"[DEBUG] Found paragraph: '{source_para.text[:50]}...'")
+
+        # Get plain text without placeholders for offset calculation
+        plain_text = source_para.text
+        print(f"[DEBUG] Plain text length: {len(plain_text)}, offset: {offset}")
+
+        # Validate offset
+        if offset < 0 or offset > len(plain_text):
+            print(f"[ERROR] Offset {offset} out of range [0, {len(plain_text)}]")
+            return False
+
+        # If offset is at beginning, insert page break before this paragraph
+        if offset == 0:
+            print(f"[DEBUG] Offset at beginning, inserting page break before paragraph")
+            break_para = self.doc.add_paragraph()
+            break_run = break_para.add_run()
+            break_run.add_break(WD_BREAK.PAGE)
+
+            # Move page break BEFORE this paragraph (not after!)
+            source_element.addprevious(break_para._element)
+
+            # CRITICAL FIX: Rebuild block index map after modifying document structure
+            self._block_to_para_index_map = None
+            self._build_block_index_map()
+
+            return True
+
+        # If offset is at end (after last character), insert page break after this paragraph
+        if offset >= len(plain_text):
+            print(f"[DEBUG] Offset at end ({offset} >= {len(plain_text)}), inserting page break at end of paragraph")
+            break_run = source_para.add_run()
+            break_run.add_break(WD_BREAK.PAGE)
+
+            # CRITICAL FIX: Rebuild block index map after modifying document structure
+            self._block_to_para_index_map = None
+            self._build_block_index_map()
+
+            return True
+
+        # Split paragraph at offset using lxml (minimax-docx best practice)
+        print(f"[DEBUG] Splitting paragraph at offset {offset}")
+
+        # Calculate position in runs
+        current_offset = 0
+        split_run_index = None
+        split_within_run = None
+
+        for i, run in enumerate(source_para.runs):
+            run_text = run.text if run.text else ""
+            run_length = len(run_text)
+
+            if current_offset + run_length >= offset:
+                split_run_index = i
+                split_within_run = offset - current_offset
+                break
+
+            current_offset += run_length
+
+        if split_run_index is None:
+            print(f"[ERROR] Could not find split position")
+            return False
+
+        print(f"[DEBUG] Split at run {split_run_index}, within run offset: {split_within_run}")
+
+        # Split the run at position
+        target_run = source_para.runs[split_run_index]
+        original_text = target_run.text
+
+        if original_text:
+            before_text = original_text[:split_within_run]
+            after_text = original_text[split_within_run:]
+
+            # Modify original run to contain only "before" part
+            target_run.text = before_text
+
+            # Create new paragraph for "after" part
+            after_para_element = copy.deepcopy(source_element)
+
+            # Clear runs in after paragraph and rebuild with "after" content
+            after_para = Paragraph(after_para_element, self.doc)
+            for run in after_para.runs:
+                run._element.getparent().remove(run._element)
+
+            # Add split run and remaining runs to after paragraph
+            if after_text:
+                new_run = after_para.add_run(after_text)
+                # Copy formatting from original run
+                self._copy_run_formatting(target_run, new_run)
+
+            # Add remaining runs from source paragraph
+            for i in range(split_run_index + 1, len(source_para.runs)):
+                original_run = source_para.runs[i]
+                new_run = after_para.add_run(original_run.text)
+                self._copy_run_formatting(original_run, new_run)
+
+            # Remove split and remaining runs from source paragraph
+            runs_to_remove = list(source_para.runs)[split_run_index + 1:]
+            for run in runs_to_remove:
+                run._element.getparent().remove(run._element)
+
+            # Insert page break run at end of source paragraph
+            break_run = source_para.add_run()
+            break_run.add_break(WD_BREAK.PAGE)
+
+            # Insert after paragraph after source paragraph
+            source_element.addnext(after_para_element)
+
+            print(f"[DEBUG] Paragraph split successfully")
+
+            # CRITICAL FIX: Rebuild block index map after modifying document structure
+            # This ensures subsequent operations use correct block → paragraph mapping
+            self._block_to_para_index_map = None  # Clear cached map
+            self._build_block_index_map()  # Rebuild with new structure
+
+            return True
+        else:
+            print(f"[ERROR] Target run has no text")
+            return False
 
     def add_image(self, image_path: str, position: str = "end", after_text: str = None, width: float = 4.0):
         """
@@ -2434,18 +2833,78 @@ class DocxFullEditor:
             after_text: Text đích
             width: Chiều rộng (inches)
         """
+        print(f"[DEBUG] add_image called: position={position}, width={width}")
+
         if position == "end":
-            self.doc.add_picture(image_path, width=Inches(width))
+            # Get last paragraph to inherit formatting
+            last_para = None
+            for para in self.doc.paragraphs:
+                if para.text.strip():
+                    last_para = para
+
+            # Create paragraph with image
+            image_para = self.doc.add_paragraph()
+            image_para.add_picture(image_path, width=Inches(width))
+
+            # Inherit formatting from last paragraph
+            if last_para:
+                image_para.alignment = last_para.alignment
+                image_para.paragraph_format.space_before = last_para.paragraph_format.space_before
+                image_para.paragraph_format.space_after = last_para.paragraph_format.space_after
+                image_para.paragraph_format.line_spacing = last_para.paragraph_format.line_spacing
+
+                if last_para.runs:
+                    source_run = None
+                    for run in reversed(last_para.runs):
+                        if run.text and run.text.strip():
+                            source_run = run
+                            break
+
+                    if not source_run and last_para.runs:
+                        source_run = last_para.runs[0]
+
+                    if source_run:
+                        for new_run in image_para.runs:
+                            self._copy_run_formatting(source_run, new_run)
+                        print(f"[DEBUG] Copied formatting for image paragraph")
+
         elif position.startswith("after:"):
             target_text = position.split("after:")[1].strip()
             for i, paragraph in enumerate(self.doc.paragraphs):
                 if target_text in paragraph.text:
+                    print(f"[DEBUG] Found target paragraph for image at index {i}")
+
                     if i < len(self.doc.paragraphs) - 1:
                         # Add to next paragraph
-                        self.doc.paragraphs[i + 1].add_picture(image_path, width=Inches(width))
+                        next_para = self.doc.paragraphs[i + 1]
+                        next_para.add_picture(image_path, width=Inches(width))
+                        print(f"[DEBUG] Added image to next paragraph")
                     else:
-                        # Add new paragraph with image
-                        self.doc.add_paragraph().add_picture(image_path, width=Inches(width))
+                        # Add new paragraph with image, inheriting from current
+                        new_para = self.doc.add_paragraph()
+                        new_para.add_picture(image_path, width=Inches(width))
+
+                        # Inherit formatting from current paragraph
+                        new_para.alignment = paragraph.alignment
+                        new_para.paragraph_format.space_before = paragraph.paragraph_format.space_before
+                        new_para.paragraph_format.space_after = paragraph.paragraph_format.space_after
+                        new_para.paragraph_format.line_spacing = paragraph.paragraph_format.line_spacing
+
+                        if paragraph.runs:
+                            source_run = None
+                            for run in reversed(paragraph.runs):
+                                if run.text and run.text.strip():
+                                    source_run = run
+                                    break
+
+                            if not source_run and paragraph.runs:
+                                source_run = paragraph.runs[0]
+
+                            if source_run:
+                                for new_run in new_para.runs:
+                                    self._copy_run_formatting(source_run, new_run)
+                                print(f"[DEBUG] Copied formatting for new image paragraph")
+
                     return True
         return False
 
@@ -2579,10 +3038,33 @@ class DocxFullEditor:
         # Create new paragraph for image (AFTER target paragraph)
         image_paragraph = self.doc.add_paragraph()
 
+        # Copy paragraph-level formatting from target paragraph
+        image_paragraph.alignment = target_para.alignment
+        image_paragraph.paragraph_format.space_before = target_para.paragraph_format.space_before
+        image_paragraph.paragraph_format.space_after = target_para.paragraph_format.space_after
+        image_paragraph.paragraph_format.line_spacing = target_para.paragraph_format.line_spacing
+
         # Add picture to the new paragraph
         try:
             image_run = image_paragraph.add_run()
             image_run.add_picture(image_path, width=Inches(width))
+
+            # Copy run formatting from target paragraph if available
+            if target_para.runs:
+                source_run = None
+                for run in reversed(target_para.runs):
+                    if run.text and run.text.strip():
+                        source_run = run
+                        break
+
+                if not source_run and target_para.runs:
+                    source_run = target_para.runs[0]
+
+                if source_run:
+                    # Find the run that contains the picture (it's the first run we just added)
+                    for run in image_paragraph.runs:
+                        if run != image_run:  # Don't copy to the image run itself
+                            self._copy_run_formatting(source_run, run)
         except Exception as e:
             # Clean up - remove the paragraph we just added
             image_p_element = image_paragraph._element
@@ -2597,6 +3079,13 @@ class DocxFullEditor:
         # Create new paragraph for text_after (AFTER image paragraph)
         if text_after.strip():
             text_paragraph = self.doc.add_paragraph()
+
+            # Copy paragraph-level formatting from target paragraph
+            text_paragraph.alignment = target_para.alignment
+            text_paragraph.paragraph_format.space_before = target_para.paragraph_format.space_before
+            text_paragraph.paragraph_format.space_after = target_para.paragraph_format.space_after
+            text_paragraph.paragraph_format.line_spacing = target_para.paragraph_format.line_spacing
+
             new_run = text_paragraph.add_run(text_after)
 
             # Copy formatting from original run
