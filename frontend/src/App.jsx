@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink } from './api'
+import { mergeTemplate, getPreview, updateTemplate, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
@@ -80,6 +80,134 @@ function App() {
       found.add(match[1].trim())
     }
     return Array.from(found)
+  }
+
+  // =============================================================================
+  // BATCH UPDATE HELPER: Build operations from changes
+  // =============================================================================
+
+  /**
+   * Smart helper to detect changes and build batch operations list
+   *
+   * Analyzes differences between old and new state to determine
+   * what operations are needed. Handles:
+   * - Placeholder operations: rename, delete
+   * - Text operations: update text content
+   * - Formatting operations: (can be added later)
+   *
+   * @param {string} oldHtml - Previous HTML content
+   * @param {string} newHtml - New HTML content after user edits
+   * @param {Array} oldFields - Previous placeholder fields
+   * @param {Array} newFields - New placeholder fields
+   * @param {Object} oldRenameMap - Previous rename mapping
+   * @returns {Array} List of operations to execute via batchUpdate
+   */
+  const buildOperationsFromChanges = (oldHtml, newHtml, oldFields, newFields, oldRenameMap) => {
+    const operations = []
+
+    // =======================================================================
+    // 1. DETECT PLACEHOLDER CHANGES
+    // =======================================================================
+
+    // Find deleted fields (fields in old but not in new)
+    const deletedFields = oldFields.filter(f => !newFields.includes(f))
+
+    // Find renamed fields (by comparing with renameMap)
+    // This handles cases where user clicked on placeholder to rename
+    const renamedFields = []
+    const currentFields = newFields
+
+    // Check renameMap to see if any fields were renamed
+    for (const [original, current] of Object.entries(oldRenameMap)) {
+      if (current && current !== original && !currentFields.includes(current)) {
+        // This field was renamed to something not in currentFields
+        // Check if the new name exists in currentFields
+        if (currentFields.includes(current)) {
+          renamedFields.push({ oldName: original, newName: current })
+        }
+      }
+    }
+
+    // Add delete operations for deleted placeholders
+    deletedFields.forEach(fieldName => {
+      operations.push({
+        type: 'delete_placeholder',
+        field_name: fieldName
+      })
+      console.log(`[BUILD OP] Delete placeholder: ${fieldName}`)
+    })
+
+    // Add rename operations
+    renamedFields.forEach(({ oldName, newName }) => {
+      operations.push({
+        type: 'rename_placeholder',
+        old_name: oldName,
+        new_name: newName
+      })
+      console.log(`[BUILD OP] Rename placeholder: ${oldName} → ${newName}`)
+    })
+
+    // =======================================================================
+    // 2. DETECT TEXT CHANGES
+    // =======================================================================
+
+    // Get all blocks from both HTMLs
+    const tempOld = document.createElement('div')
+    tempOld.innerHTML = oldHtml
+    const oldBlocks = tempOld.querySelectorAll('[data-block-index]')
+
+    const tempNew = document.createElement('div')
+    tempNew.innerHTML = newHtml
+    const newBlocks = tempNew.querySelectorAll('[data-block-index]')
+
+    // Convert to arrays for easier manipulation
+    const oldBlocksArray = Array.from(oldBlocks)
+    const newBlocksArray = Array.from(newBlocks)
+
+    // Find changed blocks
+    const maxBlockIndex = Math.max(
+      ...oldBlocksArray.map(b => parseInt(b.getAttribute('data-block-index'))),
+      ...newBlocksArray.map(b => parseInt(b.getAttribute('data-block-index')))
+    )
+
+    for (let i = 0; i <= maxBlockIndex; i++) {
+      const oldBlock = oldBlocksArray.find(b => parseInt(b.getAttribute('data-block-index')) === i)
+      const newBlock = newBlocksArray.find(b => parseInt(b.getAttribute('data-block-index')) === i)
+
+      if (!oldBlock && !newBlock) continue
+
+      const oldText = oldBlock ? getOriginalTextFromBlock(oldHtml, i) : ''
+      const newText = newBlock ? getOriginalTextFromBlock(newHtml, i) : ''
+
+      // Skip if text hasn't changed (and not just whitespace)
+      if (oldText.trim() === newText.trim() && oldText.replace(/\s/g, ' ') === newText.replace(/\s/g, ' ')) {
+        continue
+      }
+
+      // Check if there are placeholders in this block that were deleted
+      // If placeholders were deleted, don't add update_text operation
+      // (the delete_placeholder operation will handle it)
+      const oldPlaceholders = oldBlock ? oldBlock.querySelectorAll('.mail-merge-placeholder') : []
+      const newPlaceholders = newBlock ? newBlock.querySelectorAll('.mail-merge-placeholder') : []
+
+      const placeholderDeleted = oldPlaceholders.length > newPlaceholders.length
+
+      // Add text update operation only if:
+      // - Text actually changed
+      // - No placeholders were deleted (avoid conflict)
+      if (oldText !== newText && !placeholderDeleted) {
+        operations.push({
+          type: 'update_text',
+          block_index: i,
+          old_text: oldText,
+          new_text: newText
+        })
+        console.log(`[BUILD OP] Update text block ${i}: "${oldText.substring(0, 30)}..." → "${newText.substring(0, 30)}..."`)
+      }
+    }
+
+    console.log(`[BUILD OP] Total operations built: ${operations.length}`)
+    return operations
   }
 
   // Helper: Get original text from a specific block
@@ -759,13 +887,28 @@ function App() {
     }
   }, [editorHtml, isAddMode])
 
-  // Rename placeholder
+  // Rename placeholder using Batch Update API
   const renameField = async (oldName, newName) => {
-    const editor = document.getElementById('document-editor')
-    if (!editor) return
+    console.log('[renameField] ========== RENAME STARTED ==========')
+    console.log('[renameField] oldName:', oldName)
+    console.log('[renameField] newName:', newName)
+    console.log('[renameField] current fields:', fields)
 
-    // Get all current fields BEFORE UI update
-    const currentFields = extractFields(editor.innerHTML)
+    const editor = document.getElementById('document-editor')
+    if (!editor) {
+      console.error('[renameField] ❌ Editor not found')
+      return
+    }
+
+    // Store current state for rollback
+    const oldHtml = editorHtml
+    const oldFields = extractFields(editor.innerHTML)
+    const oldRenameMap = { ...renameMap }
+
+    console.log('[renameField] Stored state for rollback:', {
+      oldFieldsCount: oldFields.length,
+      oldRenameMap: oldRenameMap
+    })
 
     // Update renameMap: replace oldName with newName in all values
     const newMap = {}
@@ -777,99 +920,196 @@ function App() {
       }
     }
 
+    console.log('[renameField] Updated renameMap:', {
+      old: renameMap,
+      new: newMap
+    })
+
     // Update UI immediately
-    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
+    const placeholders = editor.querySelectorAll('.mail-merge-placeholder')
+    console.log('[renameField] Found placeholders in editor:', placeholders.length)
+
+    let updatedCount = 0
+    placeholders.forEach(span => {
       if (span.getAttribute('data-field') === oldName) {
+        console.log('[renameField] Updating placeholder:', {
+          oldField: span.getAttribute('data-field'),
+          oldText: span.textContent,
+          newField: newName
+        })
         span.setAttribute('data-field', newName)
         span.textContent = `«${newName}»`
+        updatedCount++
       }
     })
 
+    console.log('[renameField] Updated', updatedCount, 'placeholders in UI')
+
     const newHtml = editor.innerHTML
     setEditorHtml(newHtml)
-    setFields(extractFields(newHtml))
     setRenameMap(newMap)
 
     try {
-      // Create mapping from current field names to new field names
-      // This ensures ALL current fields are included, even if unchanged
-      const backendMap = {}
-      currentFields.forEach(field => {
-        if (field === oldName) {
-          backendMap[field] = newName
-        } else {
-          backendMap[field] = field
+      // Use batchUpdate for rename operation
+      const operations = [
+        {
+          type: 'rename_placeholder',
+          old_name: oldName,
+          new_name: newName
         }
+      ]
+
+      console.log('[renameField] Calling batchUpdate with operations:', operations)
+
+      const result = await batchUpdate(templateId, operations, false, true)
+
+      console.log('[renameField] Batch update result:', {
+        success: result.success,
+        total_operations: result.total_operations,
+        successful: result.successful,
+        failed: result.failed,
+        field_count: result.field_count,
+        fields: result.fields
       })
 
-      // Save to backend IMMEDIATELY to persist rename
-      await updateTemplate(templateId, backendMap)
-      setTemplateNeedsUpdate(false) // Reset flag since we just updated
+      // Update state from backend response
+      setFields(result.fields || extractFields(newHtml))
+      setTemplateNeedsUpdate(false)
       setError(`✅ Đã đổi tên «${oldName}» → «${newName}»`)
       setTimeout(() => setError(null), 2000)
+
+      console.log('[renameField] ✅ Rename completed successfully')
     } catch (err) {
-      console.error('Failed to rename placeholder:', err)
+      console.error('[renameField] ❌ RENAME FAILED:', err)
+      console.error('[renameField] Error details:', {
+        message: err.message,
+        response: err.response?.data,
+        status: err.response?.status
+      })
+
       setError('⚠️ Đổi tên thất bại: ' + (err.response?.data?.detail || err.message))
+
       // Rollback UI on failure
+      console.log('[renameField] Rolling back UI changes...')
       editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
         if (span.getAttribute('data-field') === newName) {
           span.setAttribute('data-field', oldName)
           span.textContent = `«${oldName}»`
         }
       })
-      setRenameMap(renameMap)
-      setEditorHtml(editorHtml)
-      setFields(extractFields(editorHtml))
+      setRenameMap(oldRenameMap)
+      setEditorHtml(oldHtml)
+      setFields(oldFields)
+      console.log('[renameField] Rollback completed')
+
       setTimeout(() => setError(null), 3000)
     }
+
+    console.log('[renameField] ========== RENAME FINISHED ==========')
   }
 
-  // Delete placeholder
+  // Delete placeholder using Batch Update API
   const deleteField = async (fieldName) => {
+    console.log('[deleteField] ========== DELETION STARTED ==========')
+    console.log('[deleteField] fieldName:', fieldName)
+    console.log('[deleteField] current fields:', fields)
+
     const editor = document.getElementById('document-editor')
-    if (!editor) return
+    if (!editor) {
+      console.error('[deleteField] ❌ Editor not found')
+      return
+    }
 
     // Store current state for rollback
     const oldHtml = editorHtml
     const oldFields = [...fields]
     const oldRenameMap = { ...renameMap }
 
+    console.log('[deleteField] Stored state for rollback:', {
+      oldFieldsCount: oldFields.length,
+      oldRenameMapKeys: Object.keys(oldRenameMap)
+    })
+
     try {
       // Replace each matching span with its original text
-      editor.querySelectorAll(`.mail-merge-placeholder[data-field="${fieldName}"]`).forEach(span => {
+      const placeholders = editor.querySelectorAll(`.mail-merge-placeholder[data-field="${fieldName}"]`)
+      console.log('[deleteField] Found placeholders to remove:', placeholders.length)
+
+      placeholders.forEach(span => {
         const originalText = span.getAttribute('data-original') || ''
+        console.log('[deleteField] Removing placeholder:', {
+          fieldName,
+          originalText: originalText.substring(0, 50)
+        })
         span.outerHTML = originalText
       })
 
-      const newMap = { ...renameMap }
-      for (const original in newMap) {
-        if (newMap[original] === fieldName) {
-          newMap[original] = null // marked as deleted
-        }
+      const newHtml = editor.innerHTML
+      const newFields = extractFields(newHtml)
+
+      console.log('[deleteField] Fields after removal:', {
+        before: oldFields,
+        after: newFields,
+        removed: oldFields.filter(f => !newFields.includes(f))
+      })
+
+      // Build operations list using batch update helper
+      const operations = buildOperationsFromChanges(oldHtml, newHtml, oldFields, newFields, oldRenameMap)
+
+      console.log('[deleteField] Built operations:', operations)
+
+      if (operations.length === 0) {
+        console.warn('[deleteField] ⚠️ No operations to execute')
+        return
       }
 
-      const newHtml = editor.innerHTML
+      console.log(`[deleteField] Calling batchUpdate with ${operations.length} operations`)
 
-      // IMPORTANT: Call updateTemplate FIRST before updating state
-      // This ensures deletion is saved to DOCX before UI changes
-      await updateTemplate(templateId, newMap)
+      // Execute batch update
+      const result = await batchUpdate(templateId, operations, false, true)
 
-      // Only update local state after successful server update
-      setRenameMap(newMap)
-      updateEditorHtmlWithPreservation(newHtml, extractFields(newHtml))  // ✅ Uses helper
-      setTemplateNeedsUpdate(false) // Reset flag since we just updated
+      console.log('[deleteField] Batch update result:', {
+        success: result.success,
+        total_operations: result.total_operations,
+        successful: result.successful,
+        failed: result.failed,
+        field_count: result.field_count
+      })
+
+      if (result.success) {
+        // Update local state after successful server update
+        setRenameMap(oldRenameMap) // Keep renameMap as-is (only placeholders deleted)
+        updateEditorHtmlWithPreservation(result.html_preview, result.fields)
+        setTemplateNeedsUpdate(false) // Reset flag since we just updated
+        setError(`✅ Đã xóa «${fieldName}»`)
+        setTimeout(() => setError(null), 2000)
+
+        console.log('[deleteField] ✅ Deletion completed successfully')
+      } else {
+        throw new Error(result.message || 'Batch update failed')
+      }
 
     } catch (err) {
-      console.error('Failed to update template after deletion:', err)
-      setError('Xóa placeholder thất bại. Thao tác đã được hoàn tác.')
+      console.error('[deleteField] ❌ DELETION FAILED:', err)
+      console.error('[deleteField] Error details:', {
+        message: err.message,
+        response: err.response?.data,
+        status: err.response?.status
+      })
+
+      setError('⚠️ Xóa placeholder thất bại: ' + (err.response?.data?.detail || err.message))
 
       // Rollback UI changes
+      console.log('[deleteField] Rolling back UI changes...')
       editor.innerHTML = oldHtml
-      updateEditorHtmlWithPreservation(oldHtml, oldFields)  // ✅ Uses helper
+      updateEditorHtmlWithPreservation(oldHtml, oldFields)
       setRenameMap(oldRenameMap)
+      console.log('[deleteField] Rollback completed')
 
       setTimeout(() => setError(null), 3000)
     }
+
+    console.log('[deleteField] ========== DELETION FINISHED ==========')
   }
 
   // Handle upload complete
@@ -1801,10 +2041,10 @@ function App() {
                                 onChange={(e) => setNewFieldPosition(e.target.value)}
                                 className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
                               >
-                              <option value="left">⬅️ Trước text</option>
-                              <option value="right">➡️ Sau text</option>
-                              <option value="new_line">⬇️ Xuống dòng</option>
-                            </select>
+                                <option value="left">⬅️ Trước text</option>
+                                <option value="right">➡️ Sau text</option>
+                                <option value="new_line">⬇️ Xuống dòng</option>
+                              </select>
                             </div>
                           )}
 
@@ -1859,8 +2099,8 @@ function App() {
                         <div
                           key={idx}
                           className={`p-2 border rounded transition-colors ${isSelected
-                              ? 'bg-purple-100 border-purple-400'
-                              : 'bg-gray-50 border-gray-200 hover:bg-gray-100'
+                            ? 'bg-purple-100 border-purple-400'
+                            : 'bg-gray-50 border-gray-200 hover:bg-gray-100'
                             }`}
                         >
                           <div className="flex items-start gap-2">
@@ -1895,13 +2135,12 @@ function App() {
                                   value={editedPosition}
                                   onChange={(e) => updateSuggestionEdit(s, 'position', e.target.value)}
                                   onClick={(e) => e.stopPropagation()}
-                                  className={`text-xs px-2 py-0.5 rounded border ${editedPosition !== s.position ? 'border-yellow-400 bg-yellow-50' : 'border-transparent bg-transparent'} ${
-                                    editedPosition === 'left'
+                                  className={`text-xs px-2 py-0.5 rounded border ${editedPosition !== s.position ? 'border-yellow-400 bg-yellow-50' : 'border-transparent bg-transparent'} ${editedPosition === 'left'
                                       ? 'bg-blue-100 text-blue-700'
                                       : editedPosition === 'right'
                                         ? 'bg-purple-100 text-purple-700'
                                         : 'bg-orange-100 text-orange-700'
-                                  }`}
+                                    }`}
                                 >
                                   <option value="left">⬅️ Trước text</option>
                                   <option value="right">➡️ Sau text</option>
@@ -1910,10 +2149,10 @@ function App() {
 
                                 {/* Confidence badge */}
                                 <span className={`px-2 py-0.5 rounded text-xs ${s.confidence === 'high'
-                                    ? 'bg-green-100 text-green-700'
-                                    : s.confidence === 'medium'
-                                      ? 'bg-yellow-100 text-yellow-700'
-                                      : 'bg-gray-100 text-gray-700'
+                                  ? 'bg-green-100 text-green-700'
+                                  : s.confidence === 'medium'
+                                    ? 'bg-yellow-100 text-yellow-700'
+                                    : 'bg-gray-100 text-gray-700'
                                   }`}>
                                   {s.confidence}
                                 </span>
@@ -2030,39 +2269,38 @@ function App() {
 
                           try {
                             // Get block index
-                          const element = selection.anchorNode.parentElement
-                          let blockIndex = null
-                          let currentElement = element
-                          while (currentElement && currentElement.id !== 'document-editor') {
-                            if (currentElement.hasAttribute && currentElement.hasAttribute('data-block-index')) {
-                              blockIndex = parseInt(currentElement.getAttribute('data-block-index'))
-                              break
+                            const element = selection.anchorNode.parentElement
+                            let blockIndex = null
+                            let currentElement = element
+                            while (currentElement && currentElement.id !== 'document-editor') {
+                              if (currentElement.hasAttribute && currentElement.hasAttribute('data-block-index')) {
+                                blockIndex = parseInt(currentElement.getAttribute('data-block-index'))
+                                break
+                              }
+                              currentElement = currentElement.parentElement
                             }
-                            currentElement = currentElement.parentElement
-                          }
 
-                          const formatData = {
-                            selectedText: selectedText,
-                            format: copiedFormat,
-                            type: 'format',
-                            blockIndex: blockIndex
-                          }
+                            const formatData = {
+                              selectedText: selectedText,
+                              format: copiedFormat,
+                              type: 'format',
+                              blockIndex: blockIndex
+                            }
 
-                          await handleFormatApplied(formatData)
-                          setError('✅ Đã paste định dạng!')
-                          setTimeout(() => setError(null), 2000)
-                        } catch (err) {
-                          console.error('Paste format failed:', err)
-                          setError('⚠️ Paste định dạng thất bại: ' + (err.message || err))
-                          setTimeout(() => setError(null), 3000)
-                        }
+                            await handleFormatApplied(formatData)
+                            setError('✅ Đã paste định dạng!')
+                            setTimeout(() => setError(null), 2000)
+                          } catch (err) {
+                            console.error('Paste format failed:', err)
+                            setError('⚠️ Paste định dạng thất bại: ' + (err.message || err))
+                            setTimeout(() => setError(null), 3000)
+                          }
                         }}
                         disabled={!copiedFormat}
-                        className={`px-3 py-1.5 text-white rounded-lg text-sm font-medium transition-colors ${
-                          copiedFormat
+                        className={`px-3 py-1.5 text-white rounded-lg text-sm font-medium transition-colors ${copiedFormat
                             ? 'bg-indigo-500 hover:bg-indigo-600'
                             : 'bg-gray-300 cursor-not-allowed'
-                        }`}
+                          }`}
                         title="Paste định dạng đã copy vào văn bản đang chọn"
                       >
                         🎨 Paste Format
@@ -2397,7 +2635,7 @@ function App() {
                           // If block is empty and cursor is at start/end
                           const isAtStart = range.startOffset === 0 && range.endOffset === 0
                           const isAtEnd = range.startOffset === (range.startContainer.length || 0) &&
-                                         range.endOffset === (range.endContainer.length || 0)
+                            range.endOffset === (range.endContainer.length || 0)
 
                           return currentText === '' && (isAtStart || isAtEnd)
                         }
@@ -2441,7 +2679,7 @@ function App() {
 
                                       // Calculate offset if selection is partial
                                       if (range.startContainer !== range.endContainer ||
-                                          range.startOffset !== range.endOffset) {
+                                        range.startOffset !== range.endOffset) {
                                         try {
                                           // Calculate start offset relative to block text
                                           const beforeRange = document.createRange()
@@ -2480,7 +2718,7 @@ function App() {
 
                                     // Calculate offset if selection is partial
                                     if (range.startContainer !== range.endContainer ||
-                                        range.startOffset !== range.endOffset) {
+                                      range.startOffset !== range.endOffset) {
                                       try {
                                         // Calculate start offset relative to block text
                                         const beforeRange = document.createRange()
@@ -2637,35 +2875,57 @@ function App() {
                   onInput={async (e) => {
                     const newHtml = e.target.innerHTML
                     const newFields = extractFields(newHtml)
-
-                    // Check if any placeholders were deleted
                     const deletedFields = fields.filter(f => !newFields.includes(f))
+                    let textChangeInfo = null // Track text changes for batch processing
 
-                    // DON'T update editorHtml on every keystroke - this causes cursor jumping!
-                    // contentEditable handles text changes natively
-                    // Only update fields state when placeholders change
+                    // Update fields state
                     if (newFields.length !== fields.length || JSON.stringify(newFields) !== JSON.stringify(fields)) {
                       setFields(newFields)
                     }
 
-                    // NEW: Detect text changes (not just placeholder deletions)
-                    const selection = window.getSelection()
-                    if (selection.rangeCount > 0) {
-                      const range = selection.getRangeAt(0)
+                    // Handle placeholder deletion via batch update
+                    if (deletedFields.length > 0) {
+                      try {
+                        const operations = deletedFields.map(fieldName => ({
+                          type: 'delete_placeholder',
+                          field_name: fieldName
+                        }))
 
-                      // Handle text nodes (startContainer might be text, not element)
+                        const result = await batchUpdate(templateId, operations, false, true)
+
+                        // Only update fields, preserve UI HTML (contentEditable already applied changes)
+                        setFields(result.fields || newFields)
+                        setTemplateNeedsUpdate(false)
+
+                        const deletedList = deletedFields.map(f => `«${f}»`).join(', ')
+                        setError(`✅ Đã xóa ${deletedFields.length} placeholder: ${deletedList}`)
+                        setTimeout(() => setError(null), 2000)
+                      } catch (err) {
+                        console.error('[DELETE] Failed:', err)
+                        setError('⚠️ Xóa placeholder thất bại: ' + (err.response?.data?.detail || err.message))
+                        setTimeout(() => setError(null), 3000)
+
+                        // Rollback: refresh from backend
+                        try {
+                          const previewData = await getPreview(templateId)
+                          setEditorHtml(previewData.html_preview)
+                          setFields(previewData.fields)
+                        } catch (rollbackErr) {
+                          console.error('[DELETE] Rollback failed:', rollbackErr)
+                        }
+                      }
+                    }
+
+                    // Handle regular text edits (debounced)
+                    const selection = window.getSelection()
+                    if (selection.rangeCount > 0 && deletedFields.length === 0) {
+                      const range = selection.getRangeAt(0)
                       const startElement = range.startContainer.nodeType === Node.TEXT_NODE
                         ? range.startContainer.parentElement
                         : range.startContainer
 
-                      // Check if editing within a table cell paragraph
                       const cellParagraph = startElement?.closest('.cell-paragraph')
                       const editedBlock = startElement?.closest('[data-block-index]')
-
-                      console.log('[DEBUG] ========== Text Edit Detection ==========')
-                      console.log('[DEBUG] startElement:', startElement)
-                      console.log('[DEBUG] cellParagraph:', cellParagraph)
-                      console.log('[DEBUG] editedBlock:', editedBlock)
 
                       if (cellParagraph) {
                         // Table cell paragraph editing - get block index from the containing cell
@@ -2806,24 +3066,22 @@ function App() {
                             const originalText = getTextFromCellParagraph(editorHtml, cellBlockIndex, paraInCell)
                             const newText = getTextFromCellParagraph(newHtml, cellBlockIndex, paraInCell)
 
-                            console.log('[DEBUG] Text comparison:', {
-                              originalText,
-                              newText,
-                              changed: originalText !== newText
+                            console.log('[TEXT + PLACEHOLDER] Table cell text comparison:', {
+                              originalText: originalText.substring(0, 50),
+                              newText: newText.substring(0, 50),
+                              changed: originalText !== newText,
+                              deletedFields: deletedFields.length
                             })
 
-                            // Only trigger update if text actually changed
-                            if (originalText !== newText && deletedFields.length === 0) {
-                              console.log('[DEBUG] Calling debouncedUpdateTextInCell with:', {
-                                cellBlockIndex,
-                                paraInCell,
+                            // Store text change info for batch processing with placeholder deletion
+                            if (originalText !== newText) {
+                              textChangeInfo = {
+                                blockIndex: cellBlockIndex,
                                 originalText,
-                                newText
-                              })
-                              // For table cells, we need to use the cell's block index and para_in_cell
-                              debouncedUpdateTextInCell(cellBlockIndex, paraInCell, originalText, newText)
-                            } else {
-                              console.log('[DEBUG] Skipping update - no change or placeholders deleted')
+                                newText,
+                                paraInCell
+                              }
+                              console.log('[TEXT + PLACEHOLDER] Stored table cell text change info for batch processing')
                             }
                           } else {
                             console.log('[DEBUG] Skipping text updates - batch structure update was done')
@@ -2842,40 +3100,147 @@ function App() {
                         const originalText = getOriginalTextFromBlock(editorHtml, blockIndex)
                         const newText = getTextFromBlock(newHtml, blockIndex)
 
-                        // Only trigger update if text actually changed (not just placeholder deletion)
-                        if (originalText !== newText && deletedFields.length === 0) {
-                          // Debounce to avoid excessive API calls
-                          debouncedUpdateText(blockIndex, originalText, newText)
+                        console.log('[TEXT + PLACEHOLDER] Text changed:', {
+                          originalText: originalText.substring(0, 50),
+                          newText: newText.substring(0, 50),
+                          changed: originalText !== newText,
+                          deletedFields: deletedFields
+                        })
+
+                        // Store text change info for batch processing with placeholder deletion
+                        if (originalText !== newText) {
+                          textChangeInfo = { blockIndex, originalText, newText }
+                          console.log('[TEXT + PLACEHOLDER] Stored text change info for batch processing')
                         }
                       }
                     }
 
-                    // Existing: Handle placeholder deletion
+                    // Handle placeholder deletion AND text changes using Batch Update API
                     if (deletedFields.length > 0) {
                       try {
-                        // Update renameMap to mark deleted fields
-                        const newMap = { ...renameMap }
+                        console.log('[DELETE PLACEHOLDERS] ========== DELETION STARTED ==========')
+                        console.log('[DELETE PLACEHOLDERS] deletedFields:', deletedFields)
+                        console.log('[DELETE PLACEHOLDERS] current fields:', fields)
+                        console.log('[DELETE PLACEHOLDERS] new fields:', newFields)
+                        console.log('[DELETE PLACEHOLDERS] textChangeInfo:', textChangeInfo)
+
+                        // Build operations: delete placeholders AND update text if changed
+                        const operations = []
+
+                        // Add text update operation first if text changed
+                        if (textChangeInfo) {
+                          console.log('[DELETE PLACEHOLDERS] Adding text update operation:', textChangeInfo)
+                          operations.push({
+                            type: 'update_text',
+                            block_index: textChangeInfo.blockIndex,
+                            old_text: textChangeInfo.originalText,
+                            new_text: textChangeInfo.newText,
+                            ...(textChangeInfo.paraInCell !== undefined && { para_in_cell: textChangeInfo.paraInCell })
+                          })
+                        }
+
+                        // Add delete operations for each deleted field
                         deletedFields.forEach(fieldName => {
-                          for (const original in newMap) {
-                            if (newMap[original] === fieldName) {
-                              newMap[original] = null // marked as deleted
-                            }
-                          }
+                          operations.push({
+                            type: 'delete_placeholder',
+                            field_name: fieldName
+                          })
                         })
 
-                        // Save to server
-                        await updateTemplate(templateId, newMap)
-                        setRenameMap(newMap)
+                        console.log('[DELETE PLACEHOLDERS] Combined operations:', operations)
+                        console.log('[DELETE PLACEHOLDERS] Calling batchUpdate with operations:', operations)
+                        console.log('[DELETE PLACEHOLDERS] templateId:', templateId)
+
+                        // Use batchUpdate for deletion + text update
+                        const result = await batchUpdate(templateId, operations, false, true)
+
+                        console.log('[DELETE PLACEHOLDERS] Batch update result:', result)
+                        console.log('[DELETE PLACEHOLDERS] Remaining fields:', result.fields)
+
+                        // CRITICAL: Do NOT update editorHtml from backend response!
+                        // UI already has text changes applied. Backend html_preview would override them.
+                        // Only update fields list to reflect deleted placeholders.
+                        console.log('[DELETE PLACEHOLDERS] Preserving UI editorHtml (text changes already applied)')
+
+                        // Update state from backend response
+                        setFields(result.fields || newFields)
                         setTemplateNeedsUpdate(false)
 
-                        // Show success message
-                        setError(`✅ Đã xóa ${deletedFields.length} placeholder`)
-                        setTimeout(() => setError(null), 2000)
-                      } catch (err) {
-                        console.error('Failed to update template after deletion:', err)
-                        setError('⚠️ Xóa placeholder thất bại. Thay đổi chưa được lưu.')
+                        // Show success message with field details
+                        const deletedList = deletedFields.map(f => `«${f}»`).join(', ')
+                        setError(`✅ Đã xóa ${deletedFields.length} placeholder: ${deletedList}`)
                         setTimeout(() => setError(null), 3000)
+
+                        console.log('[DELETE PLACEHOLDERS] ========== DELETION COMPLETED ==========')
+                      } catch (err) {
+                        console.error('[DELETE PLACEHOLDERS] ❌ FAILED:', err)
+                        console.error('[DELETE PLACEHOLDERS] Error details:', {
+                          message: err.message,
+                          response: err.response?.data,
+                          status: err.response?.status
+                        })
+                        setError('⚠️ Xóa placeholder thất bại: ' + (err.response?.data?.detail || err.message))
+                        setTimeout(() => setError(null), 4000)
+
+                        // Rollback - refresh template to restore state
+                        console.log('[DELETE PLACEHOLDERS] Rolling back - refreshing template...')
+                        try {
+                          const previewData = await getPreview(templateId)
+                          setEditorHtml(previewData.html_preview)
+                          setFields(previewData.fields)
+                          console.log('[DELETE PLACEHOLDERS] Rollback completed')
+                        } catch (rollbackErr) {
+                          console.error('[DELETE PLACEHOLDERS] Rollback failed:', rollbackErr)
+                        }
                       }
+                    }
+
+                    // Handle text-only changes (no placeholder deletion)
+                    if (deletedFields.length === 0 && textChangeInfo) {
+                      console.log('[TEXT UPDATE] Processing text-only change:', textChangeInfo)
+
+                      // Debounce text updates to avoid excessive API calls
+                      if (window.textUpdateTimeout) {
+                        clearTimeout(window.textUpdateTimeout)
+                      }
+
+                      window.textUpdateTimeout = setTimeout(async () => {
+                        try {
+                          console.log('[TEXT UPDATE] Sending to backend:', textChangeInfo)
+
+                          const formData = new FormData()
+                          formData.append('template_id', templateId)
+                          formData.append('block_index', textChangeInfo.blockIndex)
+                          formData.append('old_text', textChangeInfo.originalText)
+                          formData.append('new_text', textChangeInfo.newText)
+
+                          if (textChangeInfo.paraInCell !== undefined) {
+                            formData.append('para_in_cell', textChangeInfo.paraInCell)
+                          }
+
+                          const response = await axios.post(
+                            `${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`,
+                            formData
+                          )
+
+                          console.log('[TEXT UPDATE] Backend response:', response.data)
+
+                          // Update editor HTML from backend response to maintain consistency
+                          if (response.data.html_preview) {
+                            setEditorHtml(response.data.html_preview)
+                          }
+                          if (response.data.fields) {
+                            setFields(response.data.fields)
+                          }
+                          setTemplateNeedsUpdate(false)
+
+                          console.log('[TEXT UPDATE] Successfully synced text with backend')
+                        } catch (err) {
+                          console.error('[TEXT UPDATE] Failed:', err)
+                          // Don't show error for text updates - they happen frequently
+                          // Just log it and let user continue editing
+                        }
+                      }, 800) // 800ms debounce
                     }
                   }}
                   dangerouslySetInnerHTML={{ __html: editorHtml }}
@@ -3288,13 +3653,13 @@ function App() {
                   <input
                     type="color"
                     value={cellFormatOptions.background_color}
-                    onChange={(e) => setCellFormatOptions({...cellFormatOptions, background_color: e.target.value})}
+                    onChange={(e) => setCellFormatOptions({ ...cellFormatOptions, background_color: e.target.value })}
                     className="h-10 w-20 border border-gray-300 rounded cursor-pointer"
                   />
                   <input
                     type="text"
                     value={cellFormatOptions.background_color}
-                    onChange={(e) => setCellFormatOptions({...cellFormatOptions, background_color: e.target.value})}
+                    onChange={(e) => setCellFormatOptions({ ...cellFormatOptions, background_color: e.target.value })}
                     className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm"
                     placeholder="#ffffff"
                   />
@@ -3308,36 +3673,33 @@ function App() {
                   {/* Top row */}
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'left', vertical_align: 'top'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'top'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'left', vertical_align: 'top' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'top'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Trên-Trái"
                   >
                     ⬉ Top-Left
                   </button>
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'center', vertical_align: 'top'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'top'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'center', vertical_align: 'top' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'top'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Trên-Giữa"
                   >
                     ⬆ Top-Center
                   </button>
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'right', vertical_align: 'top'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'top'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'right', vertical_align: 'top' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'top'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Trên-Phải"
                   >
                     ⬈ Top-Right
@@ -3346,36 +3708,33 @@ function App() {
                   {/* Middle row */}
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'left', vertical_align: 'center'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'center'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'left', vertical_align: 'center' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'center'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Giữa-Trái"
                   >
                     ⬅ Mid-Left
                   </button>
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'center', vertical_align: 'center'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'center'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'center', vertical_align: 'center' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'center'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Giữa-Giữa"
                   >
                     ⌧ Mid-Center
                   </button>
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'right', vertical_align: 'center'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'center'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'right', vertical_align: 'center' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'center'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Giữa-Phải"
                   >
                     ➡ Mid-Right
@@ -3384,36 +3743,33 @@ function App() {
                   {/* Bottom row */}
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'left', vertical_align: 'bottom'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'bottom'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'left', vertical_align: 'bottom' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'bottom'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Dưới-Trái"
                   >
                     ⬋ Bot-Left
                   </button>
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'center', vertical_align: 'bottom'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'bottom'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'center', vertical_align: 'bottom' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'bottom'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Dưới-Giữa"
                   >
                     ⬇ Bot-Center
                   </button>
                   <button
                     type="button"
-                    onClick={() => setCellFormatOptions({...cellFormatOptions, horizontal_align: 'right', vertical_align: 'bottom'})}
-                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${
-                      cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'bottom'
+                    onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'right', vertical_align: 'bottom' })}
+                    className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'bottom'
                         ? 'bg-indigo-500 text-white border-indigo-600'
                         : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
-                    }`}
+                      }`}
                     title="Dưới-Phải"
                   >
                     ⬊ Bot-Right
@@ -3473,7 +3829,7 @@ function App() {
                 <input
                   type="url"
                   value={hyperlinkData.url}
-                  onChange={(e) => setHyperlinkData({...hyperlinkData, url: e.target.value})}
+                  onChange={(e) => setHyperlinkData({ ...hyperlinkData, url: e.target.value })}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
                   placeholder="https://example.com"
                   autoFocus

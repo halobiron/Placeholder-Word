@@ -1881,6 +1881,97 @@ class DocxFullEditor:
             print(f"Error deleting paragraph: {e}")
             return False
 
+    def delete_placeholder(self, field_name: str) -> bool:
+        """
+        Xóa hoàn toàn placeholder KHÔNG restore text gốc từ \z switch
+
+        Đây là TRUE DELETION - xóa cả field MERGEFIELD và wrapper runs,
+        không restore lại text gốc như update-template endpoint.
+
+        Args:
+            field_name: Tên placeholder cần xóa (ví dụ: "ho_ten", "dia_chi")
+
+        Returns:
+            True nếu xóa thành công, False nếu không tìm thấy placeholder
+        """
+        w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        deleted = False
+
+        try:
+            # Tìm tất cả MERGEFIELD với tên cần xóa
+            for fld in self.doc.element.iter(f"{w_ns}fldSimple"):
+                instr = fld.get(f"{w_ns}instr", "")
+
+                # Check nếu đây là MERGEFIELD với tên cần xóa
+                # Pattern: MERGEFIELD field_name \* MERGEFORMAT \z "original_text"
+                match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+                if match and match.group(1) == field_name:
+                    # Lấy parent element (paragraph hoặc table cell)
+                    parent = fld.getparent()
+
+                    if parent is not None:
+                        # Xóa hoàn toàn field (KHÔNG restore từ \z)
+                        parent.remove(fld)
+                        deleted = True
+                        print(f"[DELETE] Removed placeholder '{field_name}' completely")
+
+            if deleted:
+                # Clean up empty runs left behind after field deletion
+                # Điều này đảm bảo không có runs rỗng gây lỗi DOCX
+                for para in self.doc.paragraphs:
+                    self._remove_empty_runs(para)
+
+                print(f"[SUCCESS] Placeholder '{field_name}' deleted successfully")
+            else:
+                print(f"[WARNING] Placeholder '{field_name}' not found in document")
+
+            return deleted
+
+        except Exception as e:
+            print(f"[ERROR] Failed to delete placeholder '{field_name}': {e}")
+            return False
+
+    def rename_placeholder(self, old_name: str, new_name: str) -> bool:
+        """
+        Đổi tên placeholder (MERGEFIELD)
+
+        Args:
+            old_name: Tên placeholder cũ
+            new_name: Tên placeholder mới
+
+        Returns:
+            True nếu thành công, False nếu thất bại
+        """
+        w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        renamed = False
+
+        try:
+            for fld in self.doc.element.iter(f"{w_ns}fldSimple"):
+                instr = fld.get(f"{w_ns}instr", "")
+                match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+
+                if match and match.group(1) == old_name:
+                    # Giữ nguyên phần \z "original_text"
+                    z_match = re.search(r'\\z\s*"([^"]*)"', instr)
+                    z_part = f' \\z "{z_match.group(1)}"' if z_match else ""
+
+                    # Update instruction với tên mới
+                    new_instr = f' MERGEFIELD {new_name} \\* MERGEFORMAT{z_part} '
+                    fld.set(f"{w_ns}instr", new_instr)
+
+                    # Update display text
+                    for t in fld.iter(f"{w_ns}t"):
+                        t.text = f"«{new_name}»"
+
+                    renamed = True
+                    print(f"[RENAME] '{old_name}' → '{new_name}'")
+
+            return renamed
+
+        except Exception as e:
+            print(f"[ERROR] Failed to rename placeholder '{old_name}': {e}")
+            return False
+
     def insert_paragraph_after(self, target_paragraph, text: str = ""):
         """
         Thêm paragraph mới sau một paragraph cụ thể

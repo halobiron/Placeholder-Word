@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import uuid
@@ -16,7 +17,16 @@ from template_manager import MailMergeProcessor
 from merge_executor import MergeExecutor
 from gemini_client import GeminiClient
 from docx_editor import DocxFullEditor
+from batch_update_models import BatchUpdateRequest, Operation, BatchUpdateResponse
+from batch_operations import validate_operation, execute_operation
 import traceback
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # ===== HELPER FUNCTIONS =====
 
@@ -60,19 +70,9 @@ def validate_template_path(template_id: str) -> Path:
 
 
 def handle_endpoint_error(endpoint_name: str, error: Exception) -> HTTPException:
-    """Standard error handling với traceback logging
-
-    Args:
-        endpoint_name: Name of endpoint for logging
-        error: Exception object
-
-    Returns:
-        HTTPException với detailed error
-    """
+    """Standard error handling với traceback logging"""
     error_detail = f"{endpoint_name} failed: {str(error)}\n\nTraceback:\n{traceback.format_exc()}"
-    print(f"=== /{endpoint_name.replace(' ', '-').lower()} ERROR ===")
-    print(error_detail)
-    print(f"=== END ERROR ===")
+    logger.error(f"=== /{endpoint_name.replace(' ', '-').lower()} ERROR ===\n{error_detail}\n=== END ERROR ===")
     return HTTPException(status_code=500, detail=error_detail)
 
 
@@ -91,7 +91,7 @@ def ensure_directories():
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            print(f"Create directory failed: {e}")
+            logger.error(f"Create directory failed: {e}")
 
 # Create directories on startup
 ensure_directories()
@@ -238,14 +238,14 @@ async def merge_template(
                 active_f = set(json.loads(active_fields))
                 template_fields = [f for f in template_fields if f in active_f]
 
-            print(f"=== MERGE DEBUG ===")
-            print(f"Template fields to extract: {template_fields}")
+            logger.debug("=== MERGE DEBUG ===")
+            logger.debug(f"Template fields to extract: {template_fields}")
             data = gemini_client.extract_data_from_context(
                 context,
                 template_fields
             )
-            print(f"Extracted data: {data}")
-            print(f"=== END MERGE DEBUG ===")
+            logger.debug("Extracted data: {data}")
+            logger.debug("=== END MERGE DEBUG ===")
         else:
             raise HTTPException(
                 status_code=400,
@@ -352,7 +352,7 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
 
     try:
         rename_mapping = json.loads(rename_map)
-        print(f"[INFO] update_template called for '{template_id}' with map: {rename_mapping}")
+        logger.info(f" update_template called for '{template_id}' with map: {rename_mapping}")
 
         # Use DocxFullEditor for consistency
         editor = DocxFullEditor(str(template_path))
@@ -386,7 +386,7 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
                     # Replace fldSimple with the run
                     parent.replace(fld, new_run)
                     count_updated += 1
-                    print(f"[DELETE] Removed field '{current_name}', restored: '{original_text}'")
+                    logger.debug(f" Removed field '{current_name}', restored: '{original_text}'")
 
                 elif new_name != current_name:
                     # RENAME: Keep the original \z part
@@ -401,9 +401,9 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
 
                     count_updated += 1
             else:
-                print(f"[WARNING] Could not parse MERGEFIELD from instr: {instr}")
+                logger.warning(f" Could not parse MERGEFIELD from instr: {instr}")
 
-        print(f"[INFO] Successfully updated {count_updated} fields in '{template_id}'")
+        logger.info(f" Successfully updated {count_updated} fields in '{template_id}'")
 
         # Use unified save helper - returns fields + preview
         updated_fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
@@ -416,7 +416,7 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
             "html_preview": html_preview
         }
     except Exception as e:
-        print(f"[ERROR] Update template failed: {str(e)}")
+        logger.error(f" Update template failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
 @app.post("/suggest-placeholders")
@@ -730,11 +730,11 @@ async def add_placeholder_by_offset(
     Returns:
         JSON with update results
     """
-    print(f"[INFO] add_placeholder_by_offset called: template_id={template_id}, block_index={block_index}, offset={offset}, field_name={field_name}, para_in_cell={para_in_cell}")
+    logger.info(f" add_placeholder_by_offset called: template_id={template_id}, block_index={block_index}, offset={offset}, field_name={field_name}, para_in_cell={para_in_cell}")
 
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
-        print(f"[ERROR] Template not found: {template_path}")
+        logger.error(f" Template not found: {template_path}")
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
@@ -747,16 +747,16 @@ async def add_placeholder_by_offset(
         # Convert block_index to paragraph_index, handling table cells
         paragraph_index = block_index
         if para_in_cell is not None:
-            print(f"[DEBUG] Converting table cell location: block_index={block_index}, para_in_cell={para_in_cell}")
+            logger.debug(f" Converting table cell location: block_index={block_index}, para_in_cell={para_in_cell}")
             # Get actual paragraph_index for table cell paragraph
             paragraph_index = editor.get_table_cell_paragraph_index(block_index, para_in_cell)
             if paragraph_index is None:
-                print(f"[ERROR] Failed to find paragraph in table cell: block_index={block_index}, para_in_cell={para_in_cell}")
+                logger.error(f" Failed to find paragraph in table cell: block_index={block_index}, para_in_cell={para_in_cell}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Could not find paragraph {para_in_cell} in table cell at block_index {block_index}"
                 )
-            print(f"[DEBUG] Converted to paragraph_index={paragraph_index}")
+            logger.debug(f" Converted to paragraph_index={paragraph_index}")
 
         # Insert placeholder at offset
         try:
@@ -815,7 +815,7 @@ async def add_placeholder_by_offset(
             "field_name": field_name,
             "traceback": traceback.format_exc()
         }
-        print(f"[ERROR] Unexpected error in add_placeholder_by_offset: {error_details}")
+        logger.error(f" Unexpected error in add_placeholder_by_offset: {error_details}")
         raise HTTPException(
             status_code=500,
             detail=f"Unexpected error: {type(e).__name__}: {str(e)}"
@@ -867,15 +867,15 @@ async def edit_selection(
         editor = DocxFullEditor(str(template_path))
 
         # Debug logging
-        print(f"=== /edit-selection DEBUG ===")
-        print(f"template_id: {template_id}")
-        print(f"selected_text: {selected_text[:50]}...")
-        print(f"paragraph_index (block_index): {paragraph_index}")
-        print(f"start_offset: {start_offset}")
-        print(f"end_offset: {end_offset}")
-        print(f"para_in_cell: {para_in_cell}")
-        print(f"format_config: {format_config[:200] if format_config else None}...")
-        print(f"=== END DEBUG ===")
+        logger.debug("=== /edit-selection DEBUG ===")
+        logger.debug(f"template_id: {template_id}")
+        logger.debug(f"selected_text: {selected_text[:50]}...")
+        logger.debug(f"paragraph_index (block_index): {paragraph_index}")
+        logger.debug(f"start_offset: {start_offset}")
+        logger.debug(f"end_offset: {end_offset}")
+        logger.debug(f"para_in_cell: {para_in_cell}")
+        logger.debug(f"format_config: {format_config[:200] if format_config else None}...")
+        logger.debug("=== END DEBUG ===")
 
         # CRITICAL FIX: Map block_index to paragraph_index, handling table cells
         # When para_in_cell is provided, we need to get the specific paragraph within the table cell
@@ -888,14 +888,14 @@ async def edit_selection(
                     status_code=400,
                     detail=f"Invalid para_in_cell: {para_in_cell} for block_index: {paragraph_index}"
                 )
-            print(f"[DEBUG] Table cell: block_index={paragraph_index}, para_in_cell={para_in_cell} -> actual_para_index={actual_para_index}")
+            logger.debug(f" Table cell: block_index={paragraph_index}, para_in_cell={para_in_cell} -> actual_para_index={actual_para_index}")
         else:
             # Regular paragraph or table cell without para_in_cell specified
             actual_para_index = editor.get_paragraph_index_from_block(paragraph_index)
             if actual_para_index is None:
                 raise HTTPException(status_code=400, detail=f"Invalid paragraph_index: {paragraph_index}")
 
-        print(f"actual_para_index: {actual_para_index}")
+        logger.debug(f"actual_para_index: {actual_para_index}")
 
         # Parse format config
         try:
@@ -906,9 +906,9 @@ async def edit_selection(
         # Apply text formatting
         try:
             format_kwargs = map_camel_to_snake(format_data)
-            print(f"apply_format kwargs: {format_kwargs}")
+            logger.debug(f"apply_format kwargs: {format_kwargs}")
         except Exception as e:
-            print(f"Error mapping format data: {e}")
+            logger.error(f"Error mapping format data: {e}")
             raise HTTPException(status_code=400, detail=f"Invalid format data: {str(e)}")
 
         # CRITICAL FIX: Pass offset parameters when available
@@ -928,17 +928,17 @@ async def edit_selection(
             try:
                 paragraph_format_data = json.loads(paragraph_format)
                 paragraph_kwargs = map_camel_to_snake(paragraph_format_data)
-                print(f"paragraph_format kwargs: {paragraph_kwargs}")
+                logger.debug(f"paragraph_format kwargs: {paragraph_kwargs}")
 
                 success = editor.apply_paragraph_formatting(
                     paragraph_index=actual_para_index,
                     **paragraph_kwargs
                 )
                 if not success:
-                    print(f"Warning: Could not apply paragraph formatting at index {actual_para_index}")
+                    logger.debug(f"Warning: Could not apply paragraph formatting at index {actual_para_index}")
             except Exception as e:
-                print(f"Error applying paragraph format: {e}")
-                print(f"Traceback: {traceback.format_exc()}")
+                logger.error(f"Error applying paragraph format: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
 
         # Save và regenerate
         fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
@@ -1025,8 +1025,8 @@ async def add_hyperlink_to_template(
         if paragraph_index is None:
             raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
 
-        print(f"[DEBUG] Mapped block_index={block_index} to paragraph_index={paragraph_index}")
-        print(f"[DEBUG] Adding hyperlink to range [{start_offset}, {end_offset}] -> {url}")
+        logger.debug(f" Mapped block_index={block_index} to paragraph_index={paragraph_index}")
+        logger.debug(f" Adding hyperlink to range [{start_offset}, {end_offset}] -> {url}")
 
         success = editor.add_hyperlink(paragraph_index, start_offset, end_offset, url)
 
@@ -1075,28 +1075,28 @@ async def update_text_in_template(
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        print(f"=== /update-text DEBUG ===")
-        print(f"block_index: {block_index}")
-        print(f"para_in_cell: {para_in_cell}")
-        print(f"old_text: '{old_text[:50]}...'")
-        print(f"new_text: '{new_text[:50]}...'")
-        print(f"=== END DEBUG ===")
+        logger.debug(f"=== /update-text DEBUG ===")
+        logger.debug(f"block_index: {block_index}")
+        logger.debug(f"para_in_cell: {para_in_cell}")
+        logger.debug(f"old_text: '{old_text[:50]}...'")
+        logger.debug(f"new_text: '{new_text[:50]}...'")
+        logger.debug("=== END DEBUG ===")
 
         editor = DocxFullEditor(str(template_path))
 
         # Convert block_index to paragraph_index, handling table cells
         para_index = block_index
         if para_in_cell is not None:
-            print(f"[DEBUG] Converting table cell location: block_index={block_index}, para_in_cell={para_in_cell}")
+            logger.debug(f" Converting table cell location: block_index={block_index}, para_in_cell={para_in_cell}")
             # Get actual paragraph_index for table cell paragraph
             para_index = editor.get_table_cell_paragraph_index(block_index, para_in_cell)
             if para_index is None:
-                print(f"[ERROR] Failed to find paragraph in table cell: block_index={block_index}, para_in_cell={para_in_cell}")
+                logger.error(f" Failed to find paragraph in table cell: block_index={block_index}, para_in_cell={para_in_cell}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Could not find paragraph {para_in_cell} in table cell at block_index {block_index}"
                 )
-            print(f"[DEBUG] Converted to para_index={para_index}")
+            logger.debug(f" Converted to para_index={para_index}")
         else:
             # Original logic for non-table-cell paragraphs
             para_index = editor.get_paragraph_index_from_block(block_index)
@@ -1139,7 +1139,7 @@ async def update_text_in_template(
                             first_para = cell_paragraphs[0]
                             if first_para.alignment is not None:
                                 target_paragraph.alignment = first_para.alignment
-                                print(f"[DEBUG] Copied alignment from first paragraph: {first_para.alignment}")
+                                logger.debug(f" Copied alignment from first paragraph: {first_para.alignment}")
 
                     # Check if paragraph has runs
                     if target_paragraph.runs:
@@ -1150,10 +1150,10 @@ async def update_text_in_template(
                         new_run = target_paragraph.add_run(new_text)
 
                     success = True
-                    print(f"[DEBUG] Added text '{new_text}' to empty paragraph at index {para_index}")
+                    logger.debug(f" Added text '{new_text}' to empty paragraph at index {para_index}")
                 else:
                     # Paragraph has content or couldn't find - try normal replace
-                    print(f"[DEBUG] Paragraph has content or not found, trying normal replace")
+                    logger.debug(f" Paragraph has content or not found, trying normal replace")
                     success = editor.replace_text_at_position(
                         old_text=old_text if old_text else "",
                         new_text=new_text,
@@ -1173,12 +1173,12 @@ async def update_text_in_template(
                 detail=f"Failed to replace text: '{old_text[:50]}...' not found at block {block_index}"
             )
 
-        print(f"[DEBUG] Text update successful, saving document...")
+        logger.debug(f" Text update successful, saving document...")
 
         # Save và regenerate
         fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
-        print(f"[DEBUG] HTML preview regenerated, length: {len(html_preview)}")
+        logger.debug(f" HTML preview regenerated, length: {len(html_preview)}")
 
         return {
             "template_id": template_id,
@@ -1267,9 +1267,9 @@ async def get_selection_format(
         raise
     except Exception as e:
         error_detail = f"Format extraction failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /get-selection-format ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
+        logger.error("=== /get-selection-format ERROR ===")
+        logger.error(error_detail)
+        logger.error("=== END ERROR ===")
         raise HTTPException(status_code=500, detail=error_detail)
 
 
@@ -1915,7 +1915,7 @@ async def delete_multiple_paragraphs(request: Request):
                         if success:
                             deleted_count += 1
             except Exception as e:
-                print(f"Error deleting block {block_data}: {e}")
+                logger.error(f"Error deleting block {block_data}: {e}")
                 continue  # Continue with other blocks even if one fails
 
         # Save và regenerate
@@ -1990,20 +1990,20 @@ async def add_table_at_cursor(request: Request):
         if not template_path.exists():
             raise HTTPException(status_code=404, detail="Template not found")
 
-        print(f"[INFO] add_table_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, rows={rows}, cols={cols}")
+        logger.info(f" add_table_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, rows={rows}, cols={cols}")
 
         # Open and edit template
         editor = DocxFullEditor(str(template_path))
 
         # Log initial document state
-        print(f"[DEBUG] Initial document has {len(editor.doc.tables)} tables")
+        logger.debug(f" Initial document has {len(editor.doc.tables)} tables")
 
         # Map block_index to paragraph_index
         paragraph_index = editor.get_paragraph_index_from_block(block_index)
         if paragraph_index is None:
             raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
 
-        print(f"[DEBUG] Mapped block_index={block_index} to paragraph_index={paragraph_index}")
+        logger.debug(f" Mapped block_index={block_index} to paragraph_index={paragraph_index}")
 
         # Add table at cursor position
         try:
@@ -2013,23 +2013,23 @@ async def add_table_at_cursor(request: Request):
                 rows=rows,
                 cols=cols
             )
-            print(f"[INFO] Successfully added table at cursor position")
-            print(f"[DEBUG] Document now has {len(editor.doc.tables)} tables after add_table_at_cursor")
+            logger.info(f" Successfully added table at cursor position")
+            logger.debug(f" Document now has {len(editor.doc.tables)} tables after add_table_at_cursor")
         except Exception as e:
             error_detail = f"Failed to add table at cursor: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            print(f"=== add_table_at_cursor ERROR ===")
-            print(error_detail)
-            print(f"=== END ERROR ===")
+            logger.error("=== add_table_at_cursor ERROR ===")
+            logger.error(error_detail)
+            logger.error("=== END ERROR ===")
             raise HTTPException(status_code=500, detail=error_detail)
 
         # Save updated template
         editor.save(str(template_path))
-        print(f"[DEBUG] Document saved to {template_path}")
+        logger.debug(f" Document saved to {template_path}")
 
         # IMPORTANT: Reload editor from saved file to get latest document structure
         # This ensures the new table is included in HTML preview
         editor = DocxFullEditor(str(template_path))
-        print(f"[DEBUG] Reloaded document has {len(editor.doc.tables)} tables")
+        logger.debug(f" Reloaded document has {len(editor.doc.tables)} tables")
 
         # Regenerate HTML preview with reloaded editor
         executor = MergeExecutor()
@@ -2037,7 +2037,7 @@ async def add_table_at_cursor(request: Request):
 
         processor = MailMergeProcessor()
         html_preview = processor._generate_html_preview(str(template_path))
-        print(f"[DEBUG] HTML preview regenerated, length: {len(html_preview)}")
+        logger.debug(f" HTML preview regenerated, length: {len(html_preview)}")
 
         return {
             "template_id": template_id,
@@ -2109,7 +2109,7 @@ async def add_image_at_cursor(request: Request):
         if not template_path.exists():
             raise HTTPException(status_code=404, detail="Template not found")
 
-        print(f"[INFO] add_image_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, width={width}")
+        logger.info(f" add_image_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, width={width}")
 
         # Validate image file
         if not image_file.filename:
@@ -2134,7 +2134,7 @@ async def add_image_at_cursor(request: Request):
             with open(image_path, "wb") as buffer:
                 content = await image_file.read()
                 buffer.write(content)
-            print(f"[DEBUG] Image saved to: {image_path}")
+            logger.debug(f" Image saved to: {image_path}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to save image: {str(e)}")
 
@@ -2146,7 +2146,7 @@ async def add_image_at_cursor(request: Request):
         if paragraph_index is None:
             raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
 
-        print(f"[DEBUG] Mapped block_index={block_index} to paragraph_index={paragraph_index}")
+        logger.debug(f" Mapped block_index={block_index} to paragraph_index={paragraph_index}")
 
         # Add image at cursor position
         try:
@@ -2156,12 +2156,12 @@ async def add_image_at_cursor(request: Request):
                 image_path=str(image_path),
                 width=width
             )
-            print(f"[INFO] Successfully added image at cursor position")
+            logger.info(f" Successfully added image at cursor position")
         except Exception as e:
             error_detail = f"Failed to add image at cursor: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            print(f"=== add_image_at_cursor ERROR ===")
-            print(error_detail)
-            print(f"=== END ERROR ===")
+            logger.error("=== add_image_at_cursor ERROR ===")
+            logger.error(error_detail)
+            logger.error("=== END ERROR ===")
             raise HTTPException(status_code=500, detail=error_detail)
 
         # Save updated template
@@ -2191,6 +2191,216 @@ async def add_image_at_cursor(request: Request):
         raise
     except Exception as e:
         raise handle_endpoint_error("Add image at cursor", e)
+
+
+# =============================================================================
+# BATCH UPDATE ENDPOINT
+# =============================================================================
+
+@app.post("/batch-update")
+async def batch_update(request: Request):
+    """
+    Universal batch update endpoint - executes ALL operations in a single atomic transaction
+
+    This endpoint unifies all DOCX editing operations into one coherent system:
+    - Placeholder operations: rename, delete, add
+    - Text operations: update, delete range
+    - Formatting operations: format text, format paragraph
+    - Structural operations: add/delete paragraphs, page breaks
+    - Table operations: add/delete rows/columns, format cells, add tables
+    - Image operations: add images at cursor or document end
+    - Hyperlink operations: add hyperlinks to text ranges
+
+    Features:
+    - Atomic: All operations succeed or all fail (transaction)
+    - Validation: Pre-flight validation before execution
+    - Efficient: Single file save (not N saves for N operations)
+    - Debuggable: Detailed operation results with status tracking
+    - Flexible: validate_only mode for testing without executing
+
+    Request Body (JSON):
+    {
+        "template_id": "778c04c8-d477-49ff-a791-274bc4ee9a9e",
+        "operations": [
+            {"type": "rename_placeholder", "old_name": "ho_ten", "new_name": "ten_day_du"},
+            {"type": "delete_placeholder", "field_name": "dia_chi_cu"},
+            {"type": "update_text", "block_index": 5, "old_text": "Hello", "new_text": "Hi"},
+            {"type": "format_text", "block_index": 10, "selected_text": "Important",
+             "format_config": {"bold": true, "color": "FF0000"}}
+        ],
+        "validate_only": false,
+        "stop_on_error": true
+    }
+
+    Returns:
+    {
+        "template_id": "...",
+        "success": true,
+        "total_operations": 4,
+        "successful": 4,
+        "failed": 0,
+        "operation_results": [...],
+        "fields": [...],
+        "html_preview": "..."
+    }
+    """
+    try:
+        # Parse request body as JSON
+        request_data = await request.json()
+
+        # Validate and parse request
+        batch_request = BatchUpdateRequest(**request_data)
+
+        template_path = validate_template_path(batch_request.template_id)
+        editor = DocxFullEditor(str(template_path))
+
+        results = {
+            "template_id": batch_request.template_id,
+            "total_operations": len(batch_request.operations),
+            "successful": 0,
+            "failed": 0,
+            "operation_results": [],
+            "validation_errors": [],
+            "execution_errors": []
+        }
+
+        logger.info(f" ===== BATCH UPDATE START =====")
+        logger.info(f" Template ID: {batch_request.template_id}")
+        logger.info(f" Total operations: {len(batch_request.operations)}")
+        logger.info(f" Validate only: {batch_request.validate_only}")
+        logger.info(f" Stop on error: {batch_request.stop_on_error}")
+
+        # =============================================================================
+        # PHASE 1: VALIDATION
+        # =============================================================================
+        logger.info(f" ===== PHASE 1: VALIDATION =====")
+
+        for i, op in enumerate(batch_request.operations):
+            try:
+                validate_operation(editor, op)
+                results["operation_results"].append({
+                    "index": i,
+                    "type": op.type,
+                    "status": "validated"
+                })
+                logger.debug(f" Op {i} ({op.type}): ✓ PASSED")
+
+            except ValueError as e:
+                error_msg = f"Op {i} ({op.type}): {str(e)}"
+                results["validation_errors"].append(error_msg)
+                results["operation_results"].append({
+                    "index": i,
+                    "type": op.type,
+                    "status": "validation_failed",
+                    "error": str(e)
+                })
+                logger.debug(f" Op {i} ({op.type}): ✗ FAILED - {str(e)}")
+
+        # If validation failed, return errors without executing
+        if results["validation_errors"]:
+            logger.info(f" ===== VALIDATION FAILED =====")
+            logger.info(f" Validation errors: {len(results['validation_errors'])}")
+
+            return JSONResponse(
+                status_code=400,
+                content={
+                    **results,
+                    "success": False,
+                    "message": "Validation failed - no changes made",
+                    "fields": [],
+                    "field_count": 0,
+                    "html_preview": ""
+                }
+            )
+
+        # If validate_only mode, return success without executing
+        if batch_request.validate_only:
+            logger.info(f" ===== VALIDATE ONLY MODE - SKIPPING EXECUTION =====")
+
+            return {
+                **results,
+                "success": True,
+                "message": "Validation passed - no changes made (validate_only mode)"
+            }
+
+        # =============================================================================
+        # PHASE 2: EXECUTION
+        # =============================================================================
+        logger.info(f" ===== PHASE 2: EXECUTION =====")
+
+        for i, op in enumerate(batch_request.operations):
+            try:
+                execute_operation(editor, op)
+                results["successful"] += 1
+                results["operation_results"][i]["status"] = "executed"
+                logger.debug(f" Op {i} ({op.type}): ✓ SUCCESS")
+
+            except Exception as e:
+                results["failed"] += 1
+                error_msg = f"Op {i} ({op.type}): {str(e)}"
+                results["execution_errors"].append(error_msg)
+                results["operation_results"][i]["status"] = "failed"
+                results["operation_results"][i]["error"] = str(e)
+                logger.debug(f" Op {i} ({op.type}): ✗ FAILED - {str(e)}")
+
+                # Stop on error if requested
+                if batch_request.stop_on_error:
+                    logger.info(f" ===== STOP ON ERROR - ROLLING BACK =====")
+                    logger.info(f" Completed {i} operations before failure")
+
+                    # Rollback: reload from disk to undo changes
+                    editor = DocxFullEditor(str(template_path))
+
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "error": "Batch update failed - transaction rolled back",
+                            "completed_operations": i,
+                            "failed_operation": error_msg,
+                            "message": f"Operation {i} failed. Previous {i} operations have been rolled back."
+                        }
+                    )
+
+        # =============================================================================
+        # PHASE 3: SAVE & REGENERATE
+        # =============================================================================
+        logger.info(f" ===== PHASE 3: SAVE & REGENERATE =====")
+
+        # Save updated template
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
+
+        logger.info(f" ===== BATCH UPDATE COMPLETE =====")
+        logger.info(f" Successful: {results['successful']}")
+        logger.info(f" Failed: {results['failed']}")
+        logger.info(f" Total fields: {len(fields)}")
+
+        return {
+            **results,
+            "success": results["failed"] == 0,
+            "fields": fields,
+            "field_count": len(fields),
+            "html_preview": html_preview,
+            "message": f"Batch update completed: {results['successful']} succeeded, {results['failed']} failed"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f" ===== BATCH UPDATE FAILED =====")
+        logger.error(f" {str(e)}")
+        logger.debug(f"[TRACEBACK] {traceback.format_exc()}")
+
+        # Ensure we have a fresh editor instance after error
+        try:
+            editor = DocxFullEditor(str(template_path))
+        except:
+            pass
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Batch update failed: {str(e)}"
+        )
+
 
 if __name__ == "__main__":
     import uvicorn

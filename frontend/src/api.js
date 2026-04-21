@@ -460,3 +460,63 @@ export const addHyperlink = async (templateId, blockIndex, startOffset, endOffse
   })
   return response.data
 }
+
+/**
+ * Batch Update API - Execute multiple operations in a single atomic transaction
+
+ * This universal endpoint handles ALL DOCX editing operations:
+ * - Placeholder operations: rename, delete, add
+ * - Text operations: update, delete range
+ * - Formatting operations: format text, format paragraph
+ * - Structural operations: add/delete paragraphs, page breaks
+ * - Table operations: add/delete rows/columns, format cells, add tables
+ * - Image operations: add images
+ * - Hyperlink operations: add hyperlinks
+ *
+ * @param {string} templateId - Template identifier
+ * @param {Array} operations - List of operations to execute
+ * @param {boolean} validateOnly - If true, only validate without executing
+ * @param {boolean} stopOnError - If true, stop on first error; if false, continue
+ * @returns {Promise<Object>} Batch update result with fields and HTML preview
+ *
+ * @example
+ * // Rename and delete placeholders
+ * const result = await batchUpdate(templateId, [
+ *   { type: 'rename_placeholder', old_name: 'ho_ten', new_name: 'ten_day_du' },
+ *   { type: 'delete_placeholder', field_name: 'dia_chi_cu' }
+ * ])
+ *
+ * @example
+ * // Update text and format
+ * const result = await batchUpdate(templateId, [
+ *   { type: 'update_text', block_index: 5, old_text: 'Hello', new_text: 'Hi' },
+ *   { type: 'format_text', block_index: 5, selected_text: 'Important',
+ *     format_config: { bold: true, color: 'FF0000' } }
+ * ])
+ *
+ * @example
+ * // Add table row and format cell
+ * const result = await batchUpdate(templateId, [
+ *   { type: 'add_table_row', table_index: 0, row_index: 2, position: 'below' },
+ *   { type: 'format_table_cell', table_index: 0, row_index: 1, col_index: 2,
+ *     format_options: { background_color: 'FFFF00', horizontal_align: 'center' } }
+ * ])
+ */
+export const batchUpdate = async (
+  templateId,
+  operations,
+  validateOnly = false,
+  stopOnError = true
+) => {
+  const response = await axios.post(`${API_BASE}/batch-update`, {
+    template_id: templateId,
+    operations: operations,
+    validate_only: validateOnly,
+    stop_on_error: stopOnError
+  }, {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  })
+  return response.data
+}
