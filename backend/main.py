@@ -325,8 +325,27 @@ async def preview_result(result_id: str):
 
 
 @app.post("/update-template")
-async def update_template(template_id: str = Form(...), rename_map: str = Form(...), editor_html: str = Form(None)):
-    """Update template fields directly in DOCX using XPath for efficiency"""
+async def update_template(template_id: str = Form(...), rename_map: str = Form(...)):
+    """Update template placeholder names (rename/delete MERGEFIELD fields only)
+
+    This endpoint ONLY handles placeholder renaming and deletion:
+    - Rename: Map old field name to new field name
+    - Delete: Map field name to null to remove placeholder (restores original text)
+
+    For other operations, use:
+    - /update-text: Update text content while preserving formatting
+    - /delete-paragraph: Delete entire paragraphs
+    - /delete-multiple-paragraphs: Delete multiple paragraphs or text ranges
+    - /edit-selection: Apply formatting to selected text
+
+    Args:
+        template_id: Template identifier
+        rename_map: JSON string mapping old_field_name -> new_field_name or null
+                  Example: {"old_name": "new_name", "field_to_delete": null}
+
+    Returns:
+        Updated template with fields renamed/deleted and HTML preview
+    """
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
         raise HTTPException(status_code=404, detail="Template not found")
@@ -334,10 +353,11 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
     try:
         rename_mapping = json.loads(rename_map)
         print(f"[INFO] update_template called for '{template_id}' with map: {rename_mapping}")
-        
-        doc = Document(str(template_path))
+
+        # Use DocxFullEditor for consistency
+        editor = DocxFullEditor(str(template_path))
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-        flds = [f for f in doc.element.iter(f"{w_ns}fldSimple") if "MERGEFIELD" in f.get(f"{w_ns}instr", "")]
+        flds = [f for f in editor.doc.element.iter(f"{w_ns}fldSimple") if "MERGEFIELD" in f.get(f"{w_ns}instr", "")]
 
         count_updated = 0
 
@@ -357,7 +377,6 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
                     parent = fld.getparent()
 
                     # Create a new run element with original text
-
                     new_run = OxmlElement('w:r')
                     new_t = OxmlElement('w:t')
                     new_t.set(qn('xml:space'), 'preserve')
@@ -384,13 +403,17 @@ async def update_template(template_id: str = Form(...), rename_map: str = Form(.
             else:
                 print(f"[WARNING] Could not parse MERGEFIELD from instr: {instr}")
 
-        doc.save(str(template_path))
         print(f"[INFO] Successfully updated {count_updated} fields in '{template_id}'")
 
+        # Use unified save helper - returns fields + preview
+        updated_fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
+
         return {
-            "template_id": template_id, 
+            "template_id": template_id,
             "updated": True,
-            "fields_updated": count_updated
+            "fields_updated": count_updated,
+            "updated_fields": updated_fields,
+            "html_preview": html_preview
         }
     except Exception as e:
         print(f"[ERROR] Update template failed: {str(e)}")
@@ -917,11 +940,6 @@ async def edit_selection(
                 print(f"Error applying paragraph format: {e}")
                 print(f"Traceback: {traceback.format_exc()}")
 
-        # Save and return updated preview
-        editor.save(str(template_path))
-
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
         # Save và regenerate
         fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
@@ -1157,17 +1175,8 @@ async def update_text_in_template(
 
         print(f"[DEBUG] Text update successful, saving document...")
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        print(f"[DEBUG] Document saved, regenerating HTML preview...")
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         print(f"[DEBUG] HTML preview regenerated, length: {len(html_preview)}")
 
@@ -1751,13 +1760,17 @@ async def delete_paragraph(request: Request):
 
 @app.post("/delete-multiple-paragraphs")
 async def delete_multiple_paragraphs(request: Request):
-    """Xóa nhiều paragraphs cùng lúc khỏi template
+    """Xóa nhiều paragraphs hoặc một phần của text khỏi template
 
     Args:
         template_id: Template ID
         blocks: JSON string của danh sách blocks cần xóa
               Format: [{"block_index": int, "table_index": int|None, "row_index": int|None,
-                       "col_index": int|None, "para_in_cell": int|None}]
+                       "col_index": int|None, "para_in_cell": int|None,
+                       "start_offset": int|None, "end_offset": int|None}]
+
+              - Nếu CÓ start_offset và end_offset: Xóa một phần của text trong paragraph
+              - Nếu KHÔNG CÓ offset: Xóa toàn bộ paragraph
 
     Returns:
         Updated template sau khi xóa và HTML preview
@@ -1798,6 +1811,8 @@ async def delete_multiple_paragraphs(request: Request):
             row_index = block_data.get("row_index")
             col_index = block_data.get("col_index")
             para_in_cell = block_data.get("para_in_cell")
+            start_offset = block_data.get("start_offset")
+            end_offset = block_data.get("end_offset")
 
             # Convert to int
             try:
@@ -1806,6 +1821,8 @@ async def delete_multiple_paragraphs(request: Request):
                 row_index = int(row_index) if row_index is not None else None
                 col_index = int(col_index) if col_index is not None else None
                 para_in_cell = int(para_in_cell) if para_in_cell is not None else None
+                start_offset = int(start_offset) if start_offset is not None else None
+                end_offset = int(end_offset) if end_offset is not None else None
             except ValueError:
                 continue  # Skip invalid blocks
 
@@ -1820,6 +1837,8 @@ async def delete_multiple_paragraphs(request: Request):
                     "row_index": row_index,
                     "col_index": col_index,
                     "para_in_cell": para_in_cell,
+                    "start_offset": start_offset,
+                    "end_offset": end_offset,
                     "is_table": True
                 })
             else:
@@ -1831,6 +1850,8 @@ async def delete_multiple_paragraphs(request: Request):
                         "sort_key": sort_key,
                         "block_index": block_index,
                         "para_index": para_index,
+                        "start_offset": start_offset,
+                        "end_offset": end_offset,
                         "is_table": False
                     })
 
@@ -1841,8 +1862,14 @@ async def delete_multiple_paragraphs(request: Request):
         deleted_count = 0
         for block_data in blocks_with_indices:
             try:
+                start_offset = block_data.get("start_offset")
+                end_offset = block_data.get("end_offset")
+
+                # Check if this is a partial deletion (has offset) or full deletion
+                is_partial = (start_offset is not None and end_offset is not None)
+
                 if block_data["is_table"]:
-                    # Delete table cell paragraph
+                    # Table cell paragraph
                     table_index = block_data["table_index"]
                     row_index = block_data["row_index"]
                     col_index = block_data["col_index"]
@@ -1855,12 +1882,19 @@ async def delete_multiple_paragraphs(request: Request):
                         cell = editor.doc.tables[table_index].rows[row_index].cells[col_index]
 
                         if para_in_cell is not None and para_in_cell < len(cell.paragraphs):
-                            para_to_delete = cell.paragraphs[para_in_cell]
-                            success = editor.delete_paragraph(para_to_delete)
+                            target_paragraph = cell.paragraphs[para_in_cell]
+
+                            if is_partial:
+                                # Partial deletion: delete text range
+                                success = editor.delete_text_range(target_paragraph, start_offset, end_offset)
+                            else:
+                                # Full deletion: delete entire paragraph
+                                success = editor.delete_paragraph(target_paragraph)
+
                             if success:
                                 deleted_count += 1
                 else:
-                    # Delete regular paragraph
+                    # Regular paragraph
                     para_index = block_data["para_index"]
 
                     # Find the paragraph at this index
@@ -1871,7 +1905,13 @@ async def delete_multiple_paragraphs(request: Request):
                             break
 
                     if target_paragraph:
-                        success = editor.delete_paragraph(target_paragraph)
+                        if is_partial:
+                            # Partial deletion: delete text range
+                            success = editor.delete_text_range(target_paragraph, start_offset, end_offset)
+                        else:
+                            # Full deletion: delete entire paragraph
+                            success = editor.delete_paragraph(target_paragraph)
+
                         if success:
                             deleted_count += 1
             except Exception as e:

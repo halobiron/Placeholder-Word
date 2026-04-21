@@ -803,7 +803,7 @@ function App() {
       })
 
       // Save to backend IMMEDIATELY to persist rename
-      await updateTemplate(templateId, backendMap, newHtml)
+      await updateTemplate(templateId, backendMap)
       setTemplateNeedsUpdate(false) // Reset flag since we just updated
       setError(`✅ Đã đổi tên «${oldName}» → «${newName}»`)
       setTimeout(() => setError(null), 2000)
@@ -852,7 +852,7 @@ function App() {
 
       // IMPORTANT: Call updateTemplate FIRST before updating state
       // This ensures deletion is saved to DOCX before UI changes
-      await updateTemplate(templateId, newMap, newHtml)
+      await updateTemplate(templateId, newMap)
 
       // Only update local state after successful server update
       setRenameMap(newMap)
@@ -906,7 +906,7 @@ function App() {
       // Update template if fields were modified (renamed/added/deleted)
       if (templateNeedsUpdate) {
         console.log('Updating template with modified fields...')
-        await updateTemplate(templateId, renameMap, editorHtml)
+        await updateTemplate(templateId, renameMap)
         console.log('Template updated successfully')
         setTemplateNeedsUpdate(false)
       }
@@ -2428,23 +2428,85 @@ function App() {
                                     // Table cell paragraph
                                     const cellBlock = block.closest('[data-block-index]')
                                     if (cellBlock) {
-                                      blocks.push({
+                                      const blockText = block.textContent || ''
+                                      const blockInfo = {
                                         type: 'table_cell',
                                         blockIndex: parseInt(cellBlock.getAttribute('data-block-index')),
                                         paraInCell: parseInt(block.getAttribute('data-para-in-cell')),
                                         tableIndex: parseInt(cellBlock.getAttribute('data-table-index') || '0'),
                                         rowIndex: parseInt(cellBlock.getAttribute('data-row')),
                                         colIndex: parseInt(cellBlock.getAttribute('data-col')),
-                                        text: block.textContent?.trim() || ''
-                                      })
+                                        text: blockText?.trim() || ''
+                                      }
+
+                                      // Calculate offset if selection is partial
+                                      if (range.startContainer !== range.endContainer ||
+                                          range.startOffset !== range.endOffset) {
+                                        try {
+                                          // Calculate start offset relative to block text
+                                          const beforeRange = document.createRange()
+                                          beforeRange.setStartBefore(block.firstChild || block)
+                                          beforeRange.setEnd(range.startContainer, range.startOffset)
+
+                                          const startOffset = beforeRange.toString().length
+
+                                          // Calculate end offset
+                                          const afterRange = document.createRange()
+                                          afterRange.setStartBefore(block.firstChild || block)
+                                          afterRange.setEnd(range.endContainer, range.endOffset)
+
+                                          const endOffset = afterRange.toString().length
+
+                                          // Check if selection is partial (not the entire block)
+                                          if (startOffset > 0 || endOffset < blockText.length) {
+                                            blockInfo.startOffset = startOffset
+                                            blockInfo.endOffset = endOffset
+                                          }
+                                        } catch (e) {
+                                          console.warn('Could not calculate offset for block:', e)
+                                        }
+                                      }
+
+                                      blocks.push(blockInfo)
                                     }
                                   } else if (block.hasAttribute('data-block-index')) {
                                     // Regular paragraph block
-                                    blocks.push({
+                                    const blockText = block.textContent || ''
+                                    const blockInfo = {
                                       type: 'paragraph',
                                       blockIndex: parseInt(block.getAttribute('data-block-index')),
-                                      text: block.textContent?.trim() || ''
-                                    })
+                                      text: blockText?.trim() || ''
+                                    }
+
+                                    // Calculate offset if selection is partial
+                                    if (range.startContainer !== range.endContainer ||
+                                        range.startOffset !== range.endOffset) {
+                                      try {
+                                        // Calculate start offset relative to block text
+                                        const beforeRange = document.createRange()
+                                        beforeRange.setStartBefore(block.firstChild || block)
+                                        beforeRange.setEnd(range.startContainer, range.startOffset)
+
+                                        const startOffset = beforeRange.toString().length
+
+                                        // Calculate end offset
+                                        const afterRange = document.createRange()
+                                        afterRange.setStartBefore(block.firstChild || block)
+                                        afterRange.setEnd(range.endContainer, range.endOffset)
+
+                                        const endOffset = afterRange.toString().length
+
+                                        // Check if selection is partial (not the entire block)
+                                        if (startOffset > 0 || endOffset < blockText.length) {
+                                          blockInfo.startOffset = startOffset
+                                          blockInfo.endOffset = endOffset
+                                        }
+                                      } catch (e) {
+                                        console.warn('Could not calculate offset for block:', e)
+                                      }
+                                    }
+
+                                    blocks.push(blockInfo)
                                   }
                                 }
                               })
@@ -2458,17 +2520,29 @@ function App() {
                               // Prepare blocks data for API
                               const blocksData = selectedBlocks.map(block => {
                                 if (block.type === 'table_cell') {
-                                  return {
+                                  const data = {
                                     block_index: block.blockIndex,
                                     table_index: block.tableIndex,
                                     row_index: block.rowIndex,
                                     col_index: block.colIndex,
                                     para_in_cell: block.paraInCell
                                   }
+                                  // Add offset if it's a partial deletion
+                                  if (block.startOffset !== undefined && block.endOffset !== undefined) {
+                                    data.start_offset = block.startOffset
+                                    data.end_offset = block.endOffset
+                                  }
+                                  return data
                                 } else {
-                                  return {
+                                  const data = {
                                     block_index: block.blockIndex
                                   }
+                                  // Add offset if it's a partial deletion
+                                  if (block.startOffset !== undefined && block.endOffset !== undefined) {
+                                    data.start_offset = block.startOffset
+                                    data.end_offset = block.endOffset
+                                  }
+                                  return data
                                 }
                               })
 
@@ -2790,7 +2864,7 @@ function App() {
                         })
 
                         // Save to server
-                        await updateTemplate(templateId, newMap, newHtml)
+                        await updateTemplate(templateId, newMap)
                         setRenameMap(newMap)
                         setTemplateNeedsUpdate(false)
 

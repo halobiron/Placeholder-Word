@@ -72,11 +72,26 @@ export const getPreview = async (resultId) => {
   return response.data
 }
 
-export const updateTemplate = async (templateId, renameMap, editorHtml) => {
+/**
+ * Update template placeholder names (rename/delete MERGEFIELD fields only)
+ *
+ * This function ONLY handles placeholder renaming and deletion:
+ * - Rename: Map old field name to new field name
+ * - Delete: Map field name to null to remove placeholder
+ *
+ * For other operations, use:
+ * - updateTextInTemplate(): Update text content
+ * - deleteParagraph() or deleteMultipleParagraphs(): Delete paragraphs
+ * - editSelection(): Apply formatting
+ *
+ * @param {string} templateId - Template identifier
+ * @param {Object} renameMap - Map old_field_name -> new_field_name or null
+ * @returns {Promise<Object>} Updated template with HTML preview
+ */
+export const updateTemplate = async (templateId, renameMap) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
   formData.append('rename_map', JSON.stringify(renameMap))
-  formData.append('editor_html', editorHtml)
 
   const response = await axios.post(`${API_BASE}/update-template`, formData, {
     headers: {

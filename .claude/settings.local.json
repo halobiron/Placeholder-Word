@@ -72,9 +72,13 @@
       "mcp__code-review-graph__get_review_context_tool",
       "Bash(git restore:*)",
       "Bash(pip list:*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "mcp__plugin_everything-claude-code_sequential-thinking__sequentialthinking"
     ]
   },
+  "enabledMcpjsonServers": [
+    "code-review-graph"
+  ],
   "hooks": {
     "PostToolUse": [
       {

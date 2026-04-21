@@ -113,35 +113,21 @@ class DocxFullEditor:
                             for t in para._p.findall(f".//{self.w_ns}t"):
                                 if t.text:
                                     cell_text += t.text
+                        is_empty = not cell_text.strip()
 
-                        cell_text = cell_text.strip()
+                        # Determine paragraph and empty status
+                        para = cell.paragraphs[0] if cell.paragraphs else None
 
                         # Map ALL cells (including empty ones) to match HTML preview
-                        # HTML preview increments block_index for every cell, regardless of content
-                        if cell.paragraphs:
-                            # Use first paragraph in cell (even if empty)
-                            para = cell.paragraphs[0]
-                            self._block_to_para_index_map[block_index] = {
-                                'type': 'table_cell',
-                                'paragraph': para,  # Store paragraph object directly
-                                'table_context': f"Row {row_idx}, Col {cell_idx}",
-                                'row': row_idx,
-                                'col': cell_idx,
-                                'is_empty': not cell_text  # Track if cell is empty
-                            }
-                            block_index += 1
-                        else:
-                            # Cell has no paragraphs - create placeholder entry
-                            # This shouldn't happen with properly formatted cells, but handle it
-                            self._block_to_para_index_map[block_index] = {
-                                'type': 'table_cell',
-                                'paragraph': None,  # No paragraph exists
-                                'table_context': f"Row {row_idx}, Col {cell_idx}",
-                                'row': row_idx,
-                                'col': cell_idx,
-                                'is_empty': True
-                            }
-                            block_index += 1
+                        self._block_to_para_index_map[block_index] = {
+                            'type': 'table_cell',
+                            'paragraph': para,
+                            'table_context': f"Row {row_idx}, Col {cell_idx}",
+                            'row': row_idx,
+                            'col': cell_idx,
+                            'is_empty': is_empty if para else True
+                        }
+                        block_index += 1
 
     def get_table_cell_paragraph_index(self, block_index: int, para_in_cell: int) -> int:
         """
@@ -342,6 +328,44 @@ class DocxFullEditor:
         full_text = "".join(seg['text'] for seg in text_segments)
         return full_text, text_segments
 
+    def _handle_empty_replacement(
+        self,
+        new_text: str,
+        paragraph_index: int,
+        reason: str
+    ) -> bool:
+        """
+        Handle replacement when old_text is empty/whitespace-only.
+
+        Args:
+            new_text: Text to insert (or empty/None to clear)
+            paragraph_index: Target paragraph index
+            reason: Debug reason string
+
+        Returns:
+            True if handled, False otherwise
+        """
+        print(f"[DEBUG] {reason}")
+
+        if paragraph_index is None:
+            return False
+
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if p_idx == paragraph_index:
+                if new_text and new_text.strip():
+                    if paragraph.runs:
+                        paragraph.runs[0].text = new_text
+                    else:
+                        paragraph.add_run(new_text)
+                    print(f"[DEBUG] Inserted new_text into paragraph {paragraph_index}: '{new_text}'")
+                else:
+                    for run in paragraph.runs:
+                        run.text = ""
+                    print(f"[DEBUG] Cleared paragraph {paragraph_index}")
+                return True
+
+        return False
+
     def replace_text_at_position(
         self,
         old_text: str,
@@ -367,53 +391,21 @@ class DocxFullEditor:
         # Special case: Deleting empty paragraph (old_text is empty or whitespace-only)
         # CRITICAL FIX: Check old_text BEFORE normalization to handle &nbsp; and spaces correctly
         if old_text is None or (isinstance(old_text, str) and not old_text.strip()):
-            print(f"[DEBUG] Handling empty/whitespace old_text: repr={repr(old_text)}")
-            if paragraph_index is not None:
-                # Find the target paragraph and replace/add text
-                for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
-                    if p_idx == paragraph_index:
-                        # CRITICAL FIX: Insert new_text if provided (e.g., adding text to new paragraph)
-                        if new_text and new_text.strip():
-                            if paragraph.runs:
-                                paragraph.runs[0].text = new_text
-                            else:
-                                paragraph.add_run(new_text)
-                            print(f"[DEBUG] Inserted new_text into paragraph {paragraph_index}: '{new_text}'")
-                        else:
-                            # Clear all runs if deleting
-                            for run in paragraph.runs:
-                                run.text = ""
-                            print(f"[DEBUG] Cleared paragraph {paragraph_index}")
-                        return True
-            return False
+            return self._handle_empty_replacement(
+                new_text, paragraph_index,
+                f"Handling empty/whitespace old_text: repr(old_text)={repr(old_text)}"
+            )
 
         # Check if normalized text is empty (happens with &nbsp;, multiple spaces, etc.)
         search_text_normalized = self._normalize_text(old_text)
         if not search_text_normalized:
-            print(f"[DEBUG] Normalized text is empty, treating as deletion: repr(old_text)={repr(old_text)}")
-            if paragraph_index is not None:
-                # Find the target paragraph and replace/add text
-                for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
-                    if p_idx == paragraph_index:
-                        # CRITICAL FIX: Insert new_text if provided (e.g., adding text to new paragraph)
-                        if new_text and new_text.strip():
-                            if paragraph.runs:
-                                paragraph.runs[0].text = new_text
-                            else:
-                                paragraph.add_run(new_text)
-                            print(f"[DEBUG] Inserted new_text into paragraph {paragraph_index} (normalized was empty): '{new_text}'")
-                        else:
-                            # Clear all runs if deleting
-                            for run in paragraph.runs:
-                                run.text = ""
-                            print(f"[DEBUG] Cleared paragraph {paragraph_index} (normalized was empty)")
-                        return True
-            return False
+            return self._handle_empty_replacement(
+                new_text, paragraph_index,
+                f"Normalized text is empty, treating as deletion: repr(old_text)={repr(old_text)}"
+            )
 
         # Debug: Show what we're looking for
-        print(f"[DEBUG] Looking for: '{old_text}'")
-        print(f"[DEBUG] Normalized to: '{search_text_normalized}'")
-        print(f"[DEBUG] Paragraph index: {paragraph_index}")
+        print(f"[REPLACE] Searching: '{search_text_normalized}' in paragraph {paragraph_index}")
 
         # When paragraph_index is specified, concatenate adjacent paragraphs
         # to handle text that spans multiple paragraphs
@@ -431,20 +423,15 @@ class DocxFullEditor:
                 para_text = "".join(run.text for run in paragraph.runs)
                 combined_text += para_text
                 combined_paragraphs.append((p_idx, paragraph, para_text))
-                print(f"[DEBUG] Paragraph {p_idx} content: '{para_text}'")
 
             combined_text_normalized = self._normalize_text(combined_text)
-            print(f"[DEBUG] Combined text: '{combined_text}'")
-            print(f"[DEBUG] Combined normalized: '{combined_text_normalized}'")
-            print(f"[DEBUG] Search text in combined: {search_text_normalized in combined_text_normalized}")
 
             if search_text_normalized in combined_text_normalized:
-                print(f"[DEBUG] Found in combined paragraphs!")
+                print(f"[REPLACE] Found across paragraphs {paragraph_index}-{paragraph_index + 3}")
                 # Find which paragraph contains the start of the text
                 for p_idx, paragraph, para_text in combined_paragraphs:
                     para_text_normalized = self._normalize_text(para_text)
                     if search_text_normalized[:50] in para_text_normalized:  # First 50 chars
-                        print(f"[DEBUG] Starting from paragraph {p_idx}")
                         paragraph_index = p_idx
                         break
 
@@ -458,16 +445,13 @@ class DocxFullEditor:
             full_text, text_segments = self._extract_paragraph_full_text(paragraph)
             full_text_normalized = self._normalize_text(full_text)
 
-            print(f"[DEBUG] Checking paragraph {p_idx}: '{full_text_normalized}'")
-            print(f"[DEBUG] Text segments: {len(text_segments)}")
-
             if search_text_normalized not in full_text_normalized:
                 # Try partial match - use first significant words
                 search_words = search_text_normalized.split()
                 if len(search_words) >= 3:
                     first_part = ' '.join(search_words[:3])  # First 3 words
                     if first_part in full_text_normalized:
-                        print(f"[DEBUG] Using partial match: '{first_part}'")
+                        print(f"[REPLACE] Using partial match: '{first_part}'")
                         search_text_normalized = first_part
                     else:
                         continue
@@ -481,8 +465,7 @@ class DocxFullEditor:
 
             end_idx = start_idx + len(search_text_normalized)
 
-            print(f"[DEBUG] Found text at position {start_idx}-{end_idx}")
-
+            print(f"[REPLACE] Found at position {start_idx}-{end_idx}")
             # CRITICAL FIX: Find which segments contain the text to replace
             target_segments = []
             for seg in text_segments:
@@ -496,9 +479,9 @@ class DocxFullEditor:
             if not target_segments:
                 continue
 
-            print(f"[DEBUG] Target segments: {len(target_segments)}")
-            for i, seg in enumerate(target_segments):
-                print(f"[DEBUG]   Segment {i}: is_field={seg['is_field']}, text='{seg['text'][:30]}'")
+            # Count field vs non-field segments
+            field_count = sum(1 for seg in target_segments if seg['is_field'])
+            print(f"[REPLACE] Target: {len(target_segments)} segments ({field_count} fields)")
 
             # CRITICAL FIX: Handle MERGEFIELD properly during replacement
             # We need to identify which parts of old_text are placeholders and which are regular text
@@ -512,8 +495,7 @@ class DocxFullEditor:
                 placeholders_in_old = re.findall(placeholder_pattern, old_text)
 
                 if placeholders_in_old:
-                    print(f"[DEBUG] old_text contains {len(placeholders_in_old)} placeholder(s): {placeholders_in_old}")
-
+                    print(f"[REPLACE] Placeholders in old_text: {placeholders_in_old}")
                     # Check if old_text is JUST text before a placeholder (most common case)
                     # Example: "Nay tôi có nguyện vọng được ly hôn với «duoc_ly_hon_voi»"
                     # User wants to change to: "Nay tôi KHÔNG có nguyện vọng được ly hôn với «duoc_ly_hon_voi»"
@@ -531,9 +513,7 @@ class DocxFullEditor:
                             # This is the common case: editing text BEFORE placeholder
                             new_text_before = new_parts[0]
 
-                            print(f"[DEBUG] Editing text before placeholder '{placeholder_name}'")
-                            print(f"[DEBUG]  Old: '{text_before_placeholder}'")
-                            print(f"[DEBUG]  New: '{new_text_before}'")
+                            print(f"[REPLACE] Edit before '{placeholder_name}': '{text_before_placeholder}' -> '{new_text_before}'")
 
                             # Find the first non-field segment (text before placeholder)
                             for seg in target_segments:
@@ -546,68 +526,54 @@ class DocxFullEditor:
                                             t_elem = t_elements[0]
                                             # Replace the text
                                             t_elem.text = new_text_before
-                                            print(f"[DEBUG] Replaced text before placeholder")
+                                            print(f"[REPLACE] ✓ Success (before placeholder)")
                                             return True
 
                             # If we get here, couldn't find non-field segment
-                            print(f"[DEBUG] Could not find non-field segment to replace")
+                            print(f"[REPLACE] ✗ Failed: no non-field segment")
                             return False
 
-                # If we get here, it's a more complex case - try conservative approach
-                # Only replace in non-field segments
-                print(f"[DEBUG] Complex case with MERGEFIELD, using conservative approach")
+                # FALL-THROUGH: User wants to remove/change placeholder
+                # Use minimax pattern: replace in first non-field run, clear others
+                print(f"[REPLACE] Placeholder change detected, using minimax pattern")
 
-                # Find non-field segments and replace only those
-                replacement_done = False
+                # Step 1: Find first non-field segment
+                first_non_field_seg = None
                 for seg in target_segments:
                     if not seg['is_field']:
+                        first_non_field_seg = seg
+                        break
+
+                if not first_non_field_seg:
+                    print(f"[REPLACE] ✗ Failed: no non-field segment found")
+                    return False
+
+                # Step 2: Clear all non-field segments except first
+                for seg in target_segments:
+                    if not seg['is_field'] and seg != first_non_field_seg:
                         element = seg['element']
                         if element.tag.split('}')[1] == 'r':
                             t_elements = element.findall(f"{self.w_ns}t")
-                            if t_elements:
-                                t_elem = t_elements[0]
+                            for t_elem in t_elements:
+                                t_elem.text = ""
 
-                                # Calculate what portion of this segment to replace
-                                seg_start = seg['start_pos']
-                                seg_end = seg['end_pos']
+                # Step 3: Replace text in first non-field segment (preserve its formatting)
+                element = first_non_field_seg['element']
+                if element.tag.split('}')[1] == 'r':
+                    t_elements = element.findall(f"{self.w_ns}t")
+                    if t_elements:
+                        t_elem = t_elements[0]
+                        seg_start = first_non_field_seg['start_pos']
+                        pos_in_seg = max(0, start_idx - seg_start)
 
-                                # Calculate overlap with replacement range
-                                overlap_start = max(start_idx, seg_start)
-                                overlap_end = min(end_idx, seg_end)
+                        original_text = t_elem.text if t_elem.text else ""
+                        t_elem.text = original_text[:pos_in_seg] + new_text
 
-                                if overlap_start < overlap_end:
-                                    # Calculate position within segment
-                                    pos_in_seg = overlap_start - seg_start
-                                    end_pos_in_seg = overlap_end - seg_start
+                        print(f"[REPLACE] ✓ Success (placeholder changed)")
+                        return True
 
-                                    # Get current text
-                                    current_text = t_elem.text if t_elem.text else ""
-
-                                    # Calculate the difference between old and new
-                                    # Remove the old part and add new text
-                                    # This is tricky - we need to figure out what portion to replace
-
-                                    # For now, simple approach: if the entire segment is in range, replace it
-                                    if start_idx <= seg_start and end_idx >= seg_end:
-                                        # Entire segment is being replaced
-                                        # Check if new_text is shorter (removing placeholder) or different
-                                        # For safety, only replace if new_text doesn't contain this placeholder
-                                        if f"«{seg.get('field_name', '')}»" not in new_text:
-                                            t_elem.text = new_text
-                                            replacement_done = True
-                                            print(f"[DEBUG] Replaced entire segment (conservative)")
-                                        else:
-                                            # Keep the placeholder, only replace surrounding text
-                                            # Extract text before and after placeholder
-                                            # This is complex - skip for now
-                                            print(f"[DEBUG] Keeping placeholder, skipping replacement")
-                                            return False
-
-                if replacement_done:
-                    return True
-                else:
-                    print(f"[DEBUG] Could not safely replace with MERGEFIELD present")
-                    return False
+                print(f"[REPLACE] ✗ Failed: could not modify first segment")
+                return False
 
             # Perform replacement
             # Build new text by replacing only in non-field segments
@@ -642,7 +608,7 @@ class DocxFullEditor:
                         if t_elem.text:
                             t_elem.text = t_elem.text[:pos_in_seg] + new_text + t_elem.text[seg_end_pos:]
                             replacement_done = True
-                            print(f"[DEBUG] Replaced text in single run")
+                            print(f"[REPLACE] ✓ Success (single run)")
             else:
                 # Complex case: multiple segments or includes fields
                 # Strategy: Clear target non-field segments and insert new text in first one
@@ -677,7 +643,7 @@ class DocxFullEditor:
                             original_text = t_elem.text if t_elem.text else ""
                             t_elem.text = original_text[:pos_in_seg] + new_text
                             replacement_done = True
-                            print(f"[DEBUG] Replaced text across multiple segments")
+                            print(f"[REPLACE] ✓ Success (multiple segments)")
 
             if replacement_done:
                 return True
@@ -1814,6 +1780,81 @@ class DocxFullEditor:
             print(f"[DEBUG] Copied run formatting: font={source_run.font.name}, size={source_run.font.size}, bold={source_run.font.bold}")
         except Exception as e:
             print(f"[DEBUG] Error copying run formatting: {e}")
+
+    def delete_text_range(self, paragraph, start_offset: int, end_offset: int):
+        """
+        Xóa một phần của text trong paragraph dựa trên offset
+
+        Args:
+            paragraph: Paragraph object cần xóa text
+            start_offset: Vị trí bắt đầu (character offset)
+            end_offset: Vị trí kết thúc (character offset)
+
+        Returns:
+            True nếu thành công, False nếu thất bại
+        """
+        try:
+            # Get all runs in paragraph
+            runs = list(paragraph.runs)
+            if not runs:
+                return False
+
+            # Calculate character positions for each run
+            char_positions = []
+            current_pos = 0
+            for run in runs:
+                run_length = len(run.text)
+                char_positions.append({
+                    'run': run,
+                    'start': current_pos,
+                    'end': current_pos + run_length
+                })
+                current_pos += run_length
+
+            # Find which runs contain the text to delete
+            runs_to_modify = []
+            for pos in char_positions:
+                # Check if this run intersects with delete range
+                if pos['end'] > start_offset and pos['start'] < end_offset:
+                    runs_to_modify.append(pos)
+
+            if not runs_to_modify:
+                return False
+
+            # Modify runs
+            first_run = runs_to_modify[0]
+            last_run = runs_to_modify[-1]
+
+            # Calculate offsets relative to each run
+            first_run_start = max(0, start_offset - first_run['start'])
+            first_run_end = first_run['end']
+            last_run_start = last_run['start']
+            last_run_end = min(last_run['end'], end_offset)
+
+            # Delete text in first run
+            if first_run == last_run:
+                # All text to delete is in one run
+                first_run['run'].text = (
+                    first_run['run'].text[:first_run_start] +
+                    first_run['run'].text[last_run_end - first_run['start']:]
+                )
+            else:
+                # Text spans multiple runs
+                # Keep text before deletion in first run
+                first_run['run'].text = first_run['run'].text[:first_run_start]
+
+                # Keep text after deletion in last run
+                last_run['run'].text = last_run['run'].text[last_run_end - last_run['start']:]
+
+                # Clear text in middle runs
+                for run_info in runs_to_modify[1:-1]:
+                    run_info['run'].text = ""
+
+            return True
+
+        except Exception as e:
+            print(f"Error deleting text range: {e}")
+            return False
 
     def delete_paragraph(self, paragraph):
         """
