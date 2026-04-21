@@ -1840,61 +1840,6 @@ class DocxFullEditor:
             print(f"Error deleting paragraph: {e}")
             return False
 
-    def add_paragraph_at_end(self, text: str):
-        """
-        Thêm paragraph ở cuối document
-        Tự động kế thừa formatting từ paragraph cuối cùng
-        """
-        print(f"[DEBUG] add_paragraph_at_end called: text={repr(text[:50])}")
-
-        # Get the last paragraph to copy formatting
-        last_para = None
-        for para in self.doc.paragraphs:
-            if para.text.strip():  # Find last non-empty paragraph
-                last_para = para
-
-        # Create new paragraph
-        new_para = self.doc.add_paragraph(text)
-        print(f"[DEBUG] New paragraph added at end")
-
-        # Inherit formatting from last paragraph if available
-        if last_para:
-            print(f"[DEBUG] Found last paragraph with formatting")
-
-            # Copy paragraph-level formatting
-            new_para.alignment = last_para.alignment
-            new_para.paragraph_format.space_before = last_para.paragraph_format.space_before
-            new_para.paragraph_format.space_after = last_para.paragraph_format.space_after
-            new_para.paragraph_format.line_spacing = last_para.paragraph_format.line_spacing
-            new_para.paragraph_format.first_line_indent = last_para.paragraph_format.first_line_indent
-
-            # Copy run-level formatting
-            if last_para.runs:
-                source_run = None
-                # Find the last non-empty run
-                for run in reversed(last_para.runs):
-                    if run.text and run.text.strip():
-                        source_run = run
-                        break
-
-                # If no non-empty run, use the first run
-                if not source_run and last_para.runs:
-                    source_run = last_para.runs[0]
-
-                if source_run:
-                    print(f"[DEBUG] Source run from last para: font={source_run.font.name}, size={source_run.font.size}")
-                    # Apply formatting to all runs in new paragraph
-                    for new_run in new_para.runs:
-                        self._copy_run_formatting(source_run, new_run)
-                else:
-                    print(f"[DEBUG] No source run found in last paragraph")
-            else:
-                print(f"[DEBUG] Last paragraph has no runs")
-        else:
-            print(f"[DEBUG] No last paragraph found for format inheritance")
-
-        return new_para
-
     def insert_paragraph_after(self, target_paragraph, text: str = ""):
         """
         Thêm paragraph mới sau một paragraph cụ thể
@@ -1961,6 +1906,74 @@ class DocxFullEditor:
         new_para = Paragraph(new_p, self.doc)
 
         print(f"[DEBUG] New paragraph inserted after target")
+        return new_para
+
+    def insert_paragraph_before(self, target_paragraph, text: str = ""):
+        """
+        Thêm paragraph mới trước một paragraph cụ thể
+
+        Args:
+            target_paragraph: Paragraph object để thêm mới trước nó
+            text: Nội dung text cho paragraph mới
+
+        Returns:
+            Paragraph object mới được tạo
+        """
+        print(f"[DEBUG] insert_paragraph_before called: text={repr(text[:50])}")
+
+        # Lấy paragraph element
+        target_p_element = target_paragraph._p
+        parent = target_p_element.getparent()
+
+        # Tạo new paragraph element
+        new_p = OxmlElement('w:p')
+
+        # Copy paragraph properties từ target paragraph (indentation, alignment, etc.)
+        pPr = target_p_element.find(f"{self.w_ns}pPr")
+        if pPr is not None:
+            new_p.append(copy.deepcopy(pPr))
+            print(f"[DEBUG] Copied paragraph properties from target")
+
+        # Copy run properties (rPr) from target paragraph if it has runs
+        source_run_props = None
+        if target_paragraph.runs:
+            # Find the last non-empty run to copy formatting from
+            for run in reversed(target_paragraph.runs):
+                if run.text and run.text.strip():
+                    run_element = run._element
+                    rPr = run_element.find(f"{self.w_ns}rPr")
+                    if rPr is not None:
+                        source_run_props = rPr
+                        print(f"[DEBUG] Found source run properties: font={run.font.name}, size={run.font.size}")
+                    break
+
+        # TẠO RUN LUÔN - kể cả khi text rỗng (quan trọng!)
+        # Phải tạo run với formatting ngay từ đầu để khi thêm text sau sẽ kế thừa đúng
+        new_r = OxmlElement('w:r')
+
+        # Copy run properties if available
+        if source_run_props is not None:
+            new_r.append(copy.deepcopy(source_run_props))
+            print(f"[DEBUG] Copied run properties to new run")
+        else:
+            print(f"[DEBUG] No source run props found, using default")
+
+        # Tạo text element - có thể rỗng
+        new_t = OxmlElement('w:t')
+        new_t.set(qn('xml:space'), 'preserve')
+        new_t.text = text
+        new_r.append(new_t)
+        new_p.append(new_r)
+
+        # Insert new paragraph TRƯỚC target paragraph (không +1)
+        parent_index = list(parent).index(target_p_element)
+        parent.insert(parent_index, new_p)
+
+        # Convert to Paragraph object
+        from docx.text.paragraph import Paragraph
+        new_para = Paragraph(new_p, self.doc)
+
+        print(f"[DEBUG] New paragraph inserted before target")
         return new_para
 
     def add_paragraph_in_table_cell(

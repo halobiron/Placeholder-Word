@@ -1581,8 +1581,8 @@ async def add_paragraph(request: Request):
         # Validate
         if not template_id:
             raise HTTPException(status_code=400, detail="template_id is required")
-        if position not in ["after", "end"]:
-            raise HTTPException(status_code=400, detail="position must be 'after' or 'end'")
+        if position not in ["after", "before", "end"]:
+            raise HTTPException(status_code=400, detail="position must be 'after', 'before', or 'end'")
 
         # Convert to int
         try:
@@ -1622,9 +1622,24 @@ async def add_paragraph(request: Request):
                     success = True
             else:
                 raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
-        # Case 3: Add at end
+        # Case 3: Add before specific block
+        elif block_index is not None and position == "before":
+            para_index = editor.get_paragraph_index_from_block(block_index)
+            if para_index is not None:
+                target_paragraph = None
+                for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
+                    if idx == para_index:
+                        target_paragraph = para
+                        break
+                if target_paragraph:
+                    editor.insert_paragraph_before(target_paragraph, text)
+                    success = True
+            else:
+                raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
+        # Case 4: Add at end
         elif position == "end":
-            editor.add_paragraph_at_end(text)
+            last_para = list(editor.doc.paragraphs)[-1]
+            editor.insert_paragraph_after(last_para, text)
             success = True
 
         if not success:

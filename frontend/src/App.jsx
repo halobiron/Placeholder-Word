@@ -67,6 +67,9 @@ function App() {
     selectedText: ''
   })
 
+  // Warning message for mid-paragraph clicks
+  const [paragraphWarning, setParagraphWarning] = useState(null)
+
   // Extract placeholders from HTML
   const extractFields = (html) => {
     if (!html) return []
@@ -183,6 +186,37 @@ function App() {
     } catch (error) {
       console.error('[ERROR] calculateCursorOffset failed:', error)
       return null
+    }
+  }
+
+  // Helper: Detect cursor position within paragraph (start, middle, end)
+  const getCursorPositionInParagraph = (range, blockElement) => {
+    try {
+      const plainText = blockElement.textContent.replace(/«[^»]+»/g, '') // Remove placeholders
+      const plainTextTrimmed = plainText.trim()
+
+      // Empty paragraph
+      if (plainTextTrimmed.length === 0) {
+        return 'empty'
+      }
+
+      // Calculate cursor offset in plain text
+      const preCaretRange = range.cloneRange()
+      preCaretRange.selectNodeContents(blockElement)
+      preCaretRange.setEnd(range.startContainer, range.startOffset)
+      const textBeforeCaret = preCaretRange.toString().replace(/«[^»]+»/g, '')
+      const cursorOffset = textBeforeCaret.length
+
+      // Check positions
+      const isAtStart = cursorOffset === 0 || (textBeforeCaret.trim().length === 0 && cursorOffset > 0)
+      const isAtEnd = cursorOffset >= plainTextTrimmed.length
+
+      if (isAtStart) return 'start'
+      if (isAtEnd) return 'end'
+      return 'middle'
+    } catch (error) {
+      console.error('[ERROR] getCursorPositionInParagraph failed:', error)
+      return 'unknown'
     }
   }
 
@@ -2164,9 +2198,22 @@ function App() {
                           e.preventDefault()
 
                           try {
+                            // NEW: Detect cursor position to show warning or determine 'before'/'after'
+                            const currentBlockElement = cellParagraph || editedBlock
+                            const cursorPosition = getCursorPositionInParagraph(range, currentBlockElement)
+
+                            console.log('[DEBUG] Cursor position in paragraph:', cursorPosition)
+
+                            // Show warning if cursor is in middle of non-empty paragraph
+                            if (cursorPosition === 'middle') {
+                              setParagraphWarning('⚠️ Không thể tạo đoạn mới từ giữa văn bản!\n\nWorkaround: (1) Click vào đầu hoặc cuối đoạn, nhấn Enter để thêm đoạn mới, (2) Cut nội dung muốn tách, (3) Paste vào đoạn mới.')
+                              setTimeout(() => setParagraphWarning(null), 8000)
+                              return // Stop processing
+                            }
+
                             // Determine parameters for addParagraph API
                             let params = {
-                              position: 'after',
+                              position: cursorPosition === 'start' ? 'before' : 'after',
                               text: ''
                             }
 
@@ -2811,6 +2858,17 @@ function App() {
                 {error && (
                   <div className="mt-3 p-3 bg-red-50 text-red-700 rounded-lg text-sm">
                     {error}
+                  </div>
+                )}
+                {paragraphWarning && (
+                  <div className="mt-3 p-3 bg-yellow-50 text-yellow-800 border border-yellow-200 rounded-lg text-sm animate-pulse">
+                    <div className="flex items-start gap-2">
+                      <span className="text-lg">⚠️</span>
+                      <div>
+                        <div className="font-semibold">Hướng dẫn:</div>
+                        <div>{paragraphWarning}</div>
+                      </div>
+                    </div>
                   </div>
                 )}
                 <div className="flex gap-3 mt-4">

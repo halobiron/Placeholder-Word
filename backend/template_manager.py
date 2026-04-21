@@ -1945,11 +1945,16 @@ JSON:"""
 
             cursor_style = "cursor: crosshair;" if block_index >= 0 else "cursor: default;"
 
+            # FIX: Use empty content with CSS min-height instead of &nbsp;
+            # This prevents non-breaking space from appearing when users type in empty paragraphs
+            # The min-height: 1.2em + display: block ensures the paragraph is visible and clickable
+            empty_content = ""
+
             # Check if this empty paragraph has a page break
             if has_page_break:
                 # Empty paragraph WITH page break - show visual indicator
-                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para page-break-para" style="min-height: 1.2em; margin: 5px 0; {2}{3}" title="Ngắt trang (Page Break)">&nbsp;</p>'.format(
-                    block_index, str(has_page_break).lower(), cursor_style, font_style
+                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para page-break-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}{3}" title="Ngắt trang (Page Break)">{4}</p>'.format(
+                    block_index, str(has_page_break).lower(), cursor_style, font_style, empty_content
                 ) + '''
                 <div class="page-break-indicator" contenteditable="false" style="
                     margin: 20px 0 !important;
@@ -1972,9 +1977,9 @@ JSON:"""
                 </div>
                 '''
             else:
-                # Regular empty paragraph
-                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para" style="min-height: 1.2em; margin: 5px 0; {2}{3}" title="Click để thêm placeholder">&nbsp;</p>'.format(
-                    block_index, str(has_page_break).lower(), cursor_style, font_style
+                # Regular empty paragraph - NO &nbsp; to prevent spacing issues when typing
+                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}{3}" title="Click để thêm placeholder">{4}</p>'.format(
+                    block_index, str(has_page_break).lower(), cursor_style, font_style, empty_content
                 )
 
         align_style = f"text-align: {alignment};" if alignment != "left" else ""
