@@ -18,6 +18,64 @@ from gemini_client import GeminiClient
 from docx_editor import DocxFullEditor
 import traceback
 
+# ===== HELPER FUNCTIONS =====
+
+def save_and_regenerate_preview(editor: DocxFullEditor, template_path: str) -> tuple[list, str]:
+    """Save template và regenerate HTML preview
+
+    Args:
+        editor: DocxFullEditor instance
+        template_path: Path to save template
+
+    Returns:
+        Tuple of (fields, html_preview)
+    """
+    editor.save(str(template_path))
+
+    executor = MergeExecutor()
+    fields = executor.get_template_fields(str(template_path))
+
+    processor = MailMergeProcessor()
+    html_preview = processor._generate_html_preview(str(template_path))
+
+    return fields, html_preview
+
+
+def validate_template_path(template_id: str) -> Path:
+    """Validate template exists và return path
+
+    Args:
+        template_id: Template identifier
+
+    Returns:
+        Path object to template
+
+    Raises:
+        HTTPException: If template not found
+    """
+    template_path = TEMPLATE_DIR / f"{template_id}.docx"
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Template not found")
+    return template_path
+
+
+def handle_endpoint_error(endpoint_name: str, error: Exception) -> HTTPException:
+    """Standard error handling với traceback logging
+
+    Args:
+        endpoint_name: Name of endpoint for logging
+        error: Exception object
+
+    Returns:
+        HTTPException với detailed error
+    """
+    error_detail = f"{endpoint_name} failed: {str(error)}\n\nTraceback:\n{traceback.format_exc()}"
+    print(f"=== /{endpoint_name.replace(' ', '-').lower()} ERROR ===")
+    print(error_detail)
+    print(f"=== END ERROR ===")
+    return HTTPException(status_code=500, detail=error_detail)
+
+
 # Setup paths
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -704,14 +762,8 @@ async def add_placeholder_by_offset(
                 detail=f"Unexpected error during insertion: {type(e).__name__}: {str(e)}"
             )
 
-        # Save document
-        editor.save(str(template_path))
-
-        # Get updated field list and HTML preview
-        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
-        executor = MergeExecutor()
-        updated_fields = executor.get_template_fields(str(template_path))
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        updated_fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -870,8 +922,8 @@ async def edit_selection(
 
         executor = MergeExecutor()
         fields = executor.get_template_fields(str(template_path))
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -883,21 +935,12 @@ async def edit_selection(
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Edit failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /edit-selection ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Edit selection", e)
 
 
 @app.post("/add-page-break-at-cursor")
 async def add_page_break_at_cursor_endpoint(request: Request):
-    """
-    Add page break at cursor position (split paragraph at offset)
-
-    This is the CORRECT way to insert page breaks - at the exact cursor position,
-    not after/before entire paragraphs.
-    """
+    """Add page break at cursor position (split paragraph at offset)"""
     try:
         data = await request.json()
         template_id = data.get('template_id')
@@ -907,26 +950,16 @@ async def add_page_break_at_cursor_endpoint(request: Request):
         if not template_id or block_index is None or offset is None:
             raise HTTPException(status_code=400, detail="Missing required fields: template_id, block_index, offset")
 
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Add page break at cursor position
+        # Create editor
+        template_path = validate_template_path(template_id)
         editor = DocxFullEditor(str(template_path))
-        success = editor.add_page_break_at_cursor(int(block_index), int(offset))
 
-        if not success:
+        # Execute operation
+        if not editor.add_page_break_at_cursor(int(block_index), int(offset)):
             raise HTTPException(status_code=500, detail="Failed to add page break at cursor position")
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Get updated fields and preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -939,7 +972,7 @@ async def add_page_break_at_cursor_endpoint(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Add page break at cursor failed: {str(e)}")
+        raise handle_endpoint_error("Add page break at cursor", e)
 
 @app.post("/add-hyperlink")
 async def add_hyperlink_to_template(
@@ -982,15 +1015,8 @@ async def add_hyperlink_to_template(
         if not success:
             raise HTTPException(status_code=500, detail="Failed to add hyperlink")
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Get updated fields and preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -1001,7 +1027,7 @@ async def add_hyperlink_to_template(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Add hyperlink failed: {str(e)}")
+        raise handle_endpoint_error("Add hyperlink", e)
 
 @app.post("/update-text")
 async def update_text_in_template(
@@ -1157,10 +1183,7 @@ async def update_text_in_template(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Text update failed: {str(e)}\n{traceback.format_exc()}"
-        )
+        raise handle_endpoint_error("Text update", e)
 
 
 @app.post("/get-selection-format")
@@ -1206,22 +1229,7 @@ async def get_selection_format(
         format_info = editor.get_format_at_position(
             text=selected_text,
             paragraph_index=actual_para_index
-        )
-
-        if not format_info:
-            # Return default format if not found
-            format_info = {
-                'bold': False,
-                'italic': False,
-                'underline': 'none',
-                'strikethrough': False,
-                'subscript': False,
-                'superscript': False,
-                'color': '000000',
-                'highlight': None,
-                'fontSize': 12,
-                'fontName': 'Times New Roman'
-            }
+        ) or {}
 
         # Convert to frontend format
         frontend_format = {
@@ -1262,59 +1270,41 @@ async def get_selection_format(
 async def add_table_row(request: Request):
     """Thêm row mới vào bảng"""
     try:
-        # Parse form data
         form = await request.form()
         template_id = form.get("template_id")
         table_index = form.get("table_index")
-        row_index = form.get("row_index")  # Optional: insert at specific position
-        position = form.get("position", "below")  # "above" or "below"
+        row_index = form.get("row_index")
+        position = form.get("position", "below")
 
-        # Validate required parameters
+        # Validate
         if not template_id:
             raise HTTPException(status_code=400, detail="template_id is required")
         if not table_index:
             raise HTTPException(status_code=400, detail="table_index is required")
+        if position not in ["above", "below"]:
+            raise HTTPException(status_code=400, detail="position must be 'above' or 'below'")
 
-        # Convert to integers
+        # Convert to int
         try:
             table_index = int(table_index)
             row_index = int(row_index) if row_index else None
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid table_index or row_index")
 
-        # Validate position
-        if position not in ["above", "below"]:
-            raise HTTPException(status_code=400, detail="position must be 'above' or 'below'")
-
-        # Check template exists
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Open and edit template
+        # Create editor
+        template_path = validate_template_path(template_id)
         editor = DocxFullEditor(str(template_path))
 
-        # Calculate insertion index based on position
-        insert_index = row_index if row_index is not None else len(editor.doc.tables[table_index].rows)
+        # Execute operation
+        insert_index = row_index or len(editor.doc.tables[table_index].rows)
+        if position == "below":
+            insert_index += 1
 
-        if position == "below" and insert_index is not None:
-            insert_index = insert_index + 1
-
-        # Insert row
-        success = editor.insert_table_row(table_index, insert_index)
-
-        if not success:
+        if not editor.insert_table_row(table_index, insert_index):
             raise HTTPException(status_code=400, detail="Failed to add table row")
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -1329,24 +1319,19 @@ async def add_table_row(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Add table row failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /add-table-row ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Add table row", e)
 
 
 @app.post("/delete-table-row")
 async def delete_table_row(request: Request):
     """Xóa row khỏi bảng"""
     try:
-        # Parse form data
         form = await request.form()
         template_id = form.get("template_id")
         table_index = form.get("table_index")
         row_index = form.get("row_index")
 
-        # Validate required parameters
+        # Validate
         if not template_id:
             raise HTTPException(status_code=400, detail="template_id is required")
         if not table_index:
@@ -1354,39 +1339,26 @@ async def delete_table_row(request: Request):
         if not row_index:
             raise HTTPException(status_code=400, detail="row_index is required")
 
-        # Convert to integers
+        # Convert to int
         try:
             table_index = int(table_index)
             row_index = int(row_index)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid table_index or row_index")
 
-        # Check template exists
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Open and edit template
+        # Create editor
+        template_path = validate_template_path(template_id)
         editor = DocxFullEditor(str(template_path))
 
-        # Delete row
-        success = editor.delete_table_row(table_index, row_index)
-
-        if not success:
+        # Execute operation
+        if not editor.delete_table_row(table_index, row_index):
             raise HTTPException(
                 status_code=400,
                 detail="Failed to delete table row. Check if row index is valid or if it's the last row."
             )
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -1401,70 +1373,48 @@ async def delete_table_row(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Delete table row failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /delete-table-row ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Delete table row", e)
 
 
 @app.post("/add-table-column")
 async def add_table_column(request: Request):
     """Thêm column mới vào bảng"""
     try:
-        # Parse form data
         form = await request.form()
         template_id = form.get("template_id")
         table_index = form.get("table_index")
-        col_index = form.get("col_index")  # Optional: insert at specific position
-        position = form.get("position", "right")  # "left" or "right"
+        col_index = form.get("col_index")
+        position = form.get("position", "right")
 
-        # Validate required parameters
+        # Validate required
         if not template_id:
             raise HTTPException(status_code=400, detail="template_id is required")
         if not table_index:
             raise HTTPException(status_code=400, detail="table_index is required")
+        if position not in ["left", "right"]:
+            raise HTTPException(status_code=400, detail="position must be 'left' or 'right'")
 
-        # Convert to integers
+        # Convert to int
         try:
             table_index = int(table_index)
             col_index = int(col_index) if col_index else None
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid table_index or col_index")
 
-        # Validate position
-        if position not in ["left", "right"]:
-            raise HTTPException(status_code=400, detail="position must be 'left' or 'right'")
-
-        # Check template exists
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Open and edit template
+        # Validate template và create editor
+        template_path = validate_template_path(template_id)
         editor = DocxFullEditor(str(template_path))
 
-        # Calculate insertion index based on position
-        insert_index = col_index if col_index is not None else len(editor.doc.tables[table_index].rows[0].cells)
+        # Execute operation
+        insert_index = col_index or len(editor.doc.tables[table_index].rows[0].cells)
+        if position == "right":
+            insert_index += 1
 
-        if position == "right" and insert_index is not None:
-            insert_index = insert_index + 1
-
-        # Insert column
-        success = editor.insert_table_column(table_index, insert_index)
-
-        if not success:
+        if not editor.insert_table_column(table_index, insert_index):
             raise HTTPException(status_code=400, detail="Failed to add table column")
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -1479,24 +1429,19 @@ async def add_table_column(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Add table column failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /add-table-column ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Add table column", e)
 
 
 @app.post("/delete-table-column")
 async def delete_table_column(request: Request):
     """Xóa column khỏi bảng"""
     try:
-        # Parse form data
         form = await request.form()
         template_id = form.get("template_id")
         table_index = form.get("table_index")
         col_index = form.get("col_index")
 
-        # Validate required parameters
+        # Validate
         if not template_id:
             raise HTTPException(status_code=400, detail="template_id is required")
         if not table_index:
@@ -1504,39 +1449,26 @@ async def delete_table_column(request: Request):
         if not col_index:
             raise HTTPException(status_code=400, detail="col_index is required")
 
-        # Convert to integers
+        # Convert to int
         try:
             table_index = int(table_index)
             col_index = int(col_index)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid table_index or col_index")
 
-        # Check template exists
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Open and edit template
+        # Create editor
+        template_path = validate_template_path(template_id)
         editor = DocxFullEditor(str(template_path))
 
-        # Delete column
-        success = editor.delete_table_column(table_index, col_index)
-
-        if not success:
+        # Execute operation
+        if not editor.delete_table_column(table_index, col_index):
             raise HTTPException(
                 status_code=400,
                 detail="Failed to delete table column. Check if column index is valid or if it's the last column."
             )
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -1551,11 +1483,7 @@ async def delete_table_column(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Delete table column failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /delete-table-column ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Delete table column", e)
 
 
 @app.post("/format-table-cell")
@@ -1574,7 +1502,6 @@ async def format_table_cell(request: Request):
     }
     """
     try:
-        # Parse form data
         form = await request.form()
         template_id = form.get("template_id")
         table_index = form.get("table_index")
@@ -1582,7 +1509,7 @@ async def format_table_cell(request: Request):
         col_index = form.get("col_index")
         format_options_str = form.get("format_options")
 
-        # Validate required parameters
+        # Validate
         if not template_id:
             raise HTTPException(status_code=400, detail="template_id is required")
         if not table_index:
@@ -1594,7 +1521,7 @@ async def format_table_cell(request: Request):
         if not format_options_str:
             raise HTTPException(status_code=400, detail="format_options is required")
 
-        # Convert to integers
+        # Convert to int
         try:
             table_index = int(table_index)
             row_index = int(row_index)
@@ -1602,35 +1529,22 @@ async def format_table_cell(request: Request):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid table_index, row_index, or col_index")
 
-        # Parse format options JSON
+        # Parse JSON
         try:
             format_options = json.loads(format_options_str)
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid format_options JSON: {str(e)}")
 
-        # Check template exists
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Open and edit template
+        # Create editor
+        template_path = validate_template_path(template_id)
         editor = DocxFullEditor(str(template_path))
 
-        # Format cell
-        success = editor.format_table_cell(table_index, row_index, col_index, format_options)
-
-        if not success:
+        # Execute operation
+        if not editor.format_table_cell(table_index, row_index, col_index, format_options):
             raise HTTPException(status_code=400, detail="Failed to format table cell")
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -1647,32 +1561,13 @@ async def format_table_cell(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Format table cell failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /format-table-cell ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Format table cell", e)
 
 
 @app.post("/add-paragraph")
 async def add_paragraph(request: Request):
-    """Thêm paragraph mới vào template
-
-    Args:
-        template_id: Template ID
-        block_index: Block index của paragraph phía trên (sẽ thêm paragraph mới sau đó)
-        position: "after" (thêm sau block), "end" (thêm cuối document)
-        text: Nội dung text cho paragraph mới (optional)
-        table_index: Index của table (nếu thêm paragraph trong table cell)
-        row_index: Row index của table cell
-        col_index: Column index của table cell
-        para_in_cell: Paragraph index trong cell (nếu thêm sau một paragraph cụ thể trong cell)
-
-    Returns:
-        Updated template với new paragraph và HTML preview
-    """
+    """Thêm paragraph mới vào template"""
     try:
-        # Parse form data
         form = await request.form()
         template_id = form.get("template_id")
         block_index = form.get("block_index")
@@ -1683,11 +1578,13 @@ async def add_paragraph(request: Request):
         col_index = form.get("col_index")
         para_in_cell = form.get("para_in_cell")
 
-        # Validate required parameters
+        # Validate
         if not template_id:
             raise HTTPException(status_code=400, detail="template_id is required")
+        if position not in ["after", "end"]:
+            raise HTTPException(status_code=400, detail="position must be 'after' or 'end'")
 
-        # Convert parameters to appropriate types
+        # Convert to int
         try:
             if block_index:
                 block_index = int(block_index)
@@ -1702,47 +1599,30 @@ async def add_paragraph(request: Request):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid numeric parameters")
 
-        # Validate position
-        if position not in ["after", "end"]:
-            raise HTTPException(status_code=400, detail="position must be 'after' or 'end'")
-
-        # Check template exists
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Open and edit template
+        # Create editor
+        template_path = validate_template_path(template_id)
         editor = DocxFullEditor(str(template_path))
 
         success = False
 
-        # Case 1: Add paragraph within a table cell
-        if table_index is not None and row_index is not None and col_index is not None:
-            # Add paragraph in table cell
-            success = editor.add_paragraph_in_table_cell(
-                table_index, row_index, col_index,
-                text, para_in_cell
-            )
-        # Case 2: Add paragraph after a specific block
+        # Case 1: Add paragraph within table cell
+        if all(v is not None for v in [table_index, row_index, col_index]):
+            success = editor.add_paragraph_in_table_cell(table_index, row_index, col_index, text, para_in_cell)
+        # Case 2: Add after specific block
         elif block_index is not None and position == "after":
-            # Get paragraph index from block index
             para_index = editor.get_paragraph_index_from_block(block_index)
-
             if para_index is not None:
-                # Find target paragraph
                 target_paragraph = None
                 for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
                     if idx == para_index:
                         target_paragraph = para
                         break
-
                 if target_paragraph:
-                    # Insert new paragraph after target
                     editor.insert_paragraph_after(target_paragraph, text)
                     success = True
             else:
                 raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
-        # Case 3: Add paragraph at end of document
+        # Case 3: Add at end
         elif position == "end":
             editor.add_paragraph_at_end(text)
             success = True
@@ -1750,15 +1630,8 @@ async def add_paragraph(request: Request):
         if not success:
             raise HTTPException(status_code=400, detail="Failed to add paragraph")
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -1775,30 +1648,13 @@ async def add_paragraph(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Add paragraph failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /add-paragraph ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Add paragraph", e)
 
 
 @app.post("/delete-paragraph")
 async def delete_paragraph(request: Request):
-    """Xóa paragraph khỏi template
-
-    Args:
-        template_id: Template ID
-        block_index: Block index của paragraph cần xóa
-        table_index: Index của table (nếu xóa paragraph trong table cell)
-        row_index: Row index của table cell
-        col_index: Column index của table cell
-        para_in_cell: Paragraph index trong cell (nếu xóa paragraph cụ thể trong cell)
-
-    Returns:
-        Updated template sau khi xóa và HTML preview
-    """
+    """Xóa paragraph khỏi template"""
     try:
-        # Parse form data
         form = await request.form()
         template_id = form.get("template_id")
         block_index = form.get("block_index")
@@ -1807,13 +1663,13 @@ async def delete_paragraph(request: Request):
         col_index = form.get("col_index")
         para_in_cell = form.get("para_in_cell")
 
-        # Validate required parameters
+        # Validate
         if not template_id:
             raise HTTPException(status_code=400, detail="template_id is required")
         if block_index is None:
             raise HTTPException(status_code=400, detail="block_index is required")
 
-        # Convert parameters to appropriate types
+        # Convert to int
         try:
             block_index = int(block_index)
             if table_index:
@@ -1827,59 +1683,40 @@ async def delete_paragraph(request: Request):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid numeric parameters")
 
-        # Check template exists
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Open and edit template
+        # Create editor
+        template_path = validate_template_path(template_id)
         editor = DocxFullEditor(str(template_path))
 
         success = False
 
-        # Case 1: Delete paragraph within a table cell
-        if table_index is not None and row_index is not None and col_index is not None:
-            # Get the cell
+        # Case 1: Delete in table cell
+        if all(v is not None for v in [table_index, row_index, col_index]):
             if table_index < len(editor.doc.tables):
                 table = editor.doc.tables[table_index]
                 if row_index < len(table.rows):
                     row = table.rows[row_index]
                     if col_index < len(row.cells):
                         cell = row.cells[col_index]
-
-                        # Delete paragraph at index
                         if para_in_cell is not None and para_in_cell < len(cell.paragraphs):
                             para_to_delete = cell.paragraphs[para_in_cell]
                             success = editor.delete_paragraph(para_to_delete)
         # Case 2: Delete regular paragraph
         else:
-            # Get paragraph index from block index
             para_index = editor.get_paragraph_index_from_block(block_index)
-
             if para_index is not None:
-                # Find target paragraph
                 target_paragraph = None
                 for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
                     if idx == para_index:
                         target_paragraph = para
                         break
-
                 if target_paragraph:
-                    # Delete the paragraph
                     success = editor.delete_paragraph(target_paragraph)
 
         if not success:
             raise HTTPException(status_code=400, detail="Failed to delete paragraph")
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -1894,11 +1731,7 @@ async def delete_paragraph(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Delete paragraph failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /delete-paragraph ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Delete paragraph", e)
 
 
 @app.post("/delete-multiple-paragraphs")
@@ -2030,15 +1863,8 @@ async def delete_multiple_paragraphs(request: Request):
                 print(f"Error deleting block {block_data}: {e}")
                 continue  # Continue with other blocks even if one fails
 
-        # Save updated template
-        editor.save(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
+        # Save và regenerate
+        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
         return {
             "template_id": template_id,
@@ -2053,11 +1879,7 @@ async def delete_multiple_paragraphs(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Delete multiple paragraphs failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /delete-multiple-paragraphs ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Delete multiple paragraphs", e)
 
 
 @app.post("/add-table-at-cursor")
@@ -2175,11 +1997,7 @@ async def add_table_at_cursor(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Add table at cursor failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /add-table-at-cursor ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Add table at cursor", e)
 
 
 @app.post("/add-image-at-cursor")
@@ -2317,11 +2135,7 @@ async def add_image_at_cursor(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        error_detail = f"Add image at cursor failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"=== /add-image-at-cursor ERROR ===")
-        print(error_detail)
-        print(f"=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise handle_endpoint_error("Add image at cursor", e)
 
 if __name__ == "__main__":
     import uvicorn
