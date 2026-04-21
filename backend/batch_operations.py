@@ -99,15 +99,32 @@ def validate_operation(editor: DocxFullEditor, op: Operation) -> None:
 
 def _validate_placeholder_op(editor: DocxFullEditor, op: Operation,
                              current_fields: List[str]) -> None:
-    """Validate placeholder operations"""
+    """Validate placeholder operations with fuzzy matching"""
+    # Helper: try exact match first, then try without numeric suffix
+    def find_field(name: str) -> str | None:
+        if name in current_fields:
+            return name
+        # Try removing _2, _3, etc. suffixes
+        base_name = re.sub(r'_\d+$', '', name)
+        if base_name in current_fields:
+            return base_name
+        return None
+
     if op.type == "rename_placeholder":
-        if op.old_name not in current_fields:
+        old_match = find_field(op.old_name)
+        if not old_match:
             raise ValueError(f"Field '{op.old_name}' không tồn tại")
         if op.new_name in current_fields and op.new_name != op.old_name:
             raise ValueError(f"Field '{op.new_name}' đã tồn tại")
+
     elif op.type == "delete_placeholder":
-        if op.field_name not in current_fields:
+        field_match = find_field(op.field_name)
+        if not field_match:
             raise ValueError(f"Field '{op.field_name}' không tồn tại")
+        # Log mapping for debugging (actual fix happens in execute)
+        if field_match != op.field_name:
+            logger.info(f"Field name mapping: {op.field_name} -> {field_match}")
+
     elif op.type in ("add_placeholder", "add_placeholder_by_offset"):
         if op.block_index >= len(list(editor.doc.paragraphs)):
             raise ValueError(f"Invalid block_index: {op.block_index}")
@@ -173,13 +190,28 @@ def _validate_table_op(editor: DocxFullEditor, op: Operation) -> None:
 # =============================================================================
 
 def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
-    """Execute placeholder operations"""
+    """Execute placeholder operations with fuzzy matching"""
+    current_fields = get_current_fields(editor)
+
+    # Helper for fuzzy matching
+    def find_actual_name(requested_name: str) -> str:
+        if requested_name in current_fields:
+            return requested_name
+        base_name = re.sub(r'_\d+$', '', requested_name)
+        return base_name if base_name in current_fields else requested_name
+
     if op.type == "rename_placeholder":
-        if not editor.rename_placeholder(op.old_name, op.new_name):
-            raise ValueError(f"Failed to rename '{op.old_name}'")
+        old_actual = find_actual_name(op.old_name)
+        if not editor.rename_placeholder(old_actual, op.new_name):
+            raise ValueError(f"Failed to rename '{old_actual}'")
+
     elif op.type == "delete_placeholder":
-        if not editor.delete_placeholder(op.field_name):
-            raise ValueError(f"Failed to delete '{op.field_name}'")
+        actual_name = find_actual_name(op.field_name)
+        if actual_name != op.field_name:
+            logger.info(f"Deleting actual field: {actual_name} (requested: {op.field_name})")
+        if not editor.delete_placeholder(actual_name):
+            raise ValueError(f"Failed to delete '{actual_name}'")
+
     elif op.type == "add_placeholder":
         from template_manager import MailMergeProcessor
         processor = MailMergeProcessor()
@@ -188,6 +220,7 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
             "", [], [], op.position, None, None
         ):
             raise ValueError(f"Failed to add '{op.field_name}'")
+
     elif op.type == "add_placeholder_by_offset":
         editor.insert_placeholder_at_offset(
             paragraph_index=op.block_index,

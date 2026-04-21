@@ -405,7 +405,11 @@ class DocxFullEditor:
             )
 
         # Debug: Show what we're looking for
-        print(f"[REPLACE] Searching: '{search_text_normalized}' in paragraph {paragraph_index}")
+        print(f"[REPLACE] ===== TEXT REPLACE START =====")
+        print(f"[REPLACE] Paragraph: {paragraph_index}")
+        print(f"[REPLACE] Old text (request): '{old_text[:100]}{'...' if len(old_text) > 100 else ''}'")
+        print(f"[REPLACE] New text (request): '{new_text[:100]}{'...' if len(new_text) > 100 else ''}'")
+        print(f"[REPLACE] Searching for: '{search_text_normalized[:100]}{'...' if len(search_text_normalized) > 100 else ''}'")
 
         # When paragraph_index is specified, concatenate adjacent paragraphs
         # to handle text that spans multiple paragraphs
@@ -445,27 +449,40 @@ class DocxFullEditor:
             full_text, text_segments = self._extract_paragraph_full_text(paragraph)
             full_text_normalized = self._normalize_text(full_text)
 
+            # Log what's in the paragraph
+            print(f"[REPLACE] Paragraph content: '{full_text_normalized[:100]}{'...' if len(full_text_normalized) > 100 else ''}'")
+
             if search_text_normalized not in full_text_normalized:
-                # Try partial match - use first significant words
-                search_words = search_text_normalized.split()
-                if len(search_words) >= 3:
-                    first_part = ' '.join(search_words[:3])  # First 3 words
-                    if first_part in full_text_normalized:
-                        print(f"[REPLACE] Using partial match: '{first_part}'")
-                        search_text_normalized = first_part
-                    else:
-                        continue
+                # CRITICAL FIX: Partial match causes text injection bug!
+                # MUST match exact text to avoid corrupting document
+                # Try fuzzy match with placeholders removed
+                import re
+                # Remove placeholders for comparison
+                old_no_fields = re.sub(r'«[^»]+»', '', search_text_normalized).strip()
+                full_no_fields = re.sub(r'«[^»]+»', '', full_text_normalized).strip()
+
+                print(f"[REPLACE] Not found - trying without placeholders")
+                print(f"[REPLACE]   Old (no fields): '{old_no_fields[:100]}{'...' if len(old_no_fields) > 100 else ''}'")
+                print(f"[REPLACE]   Full (no fields): '{full_no_fields[:100]}{'...' if len(full_no_fields) > 100 else ''}'")
+
+                if old_no_fields and old_no_fields in full_no_fields:
+                    # Found match without placeholders - use this
+                    search_text_normalized = old_no_fields
+                    print(f"[REPLACE] ✓ Match found without placeholders: '{search_text_normalized[:100]}{'...' if len(search_text_normalized) > 100 else ''}'")
                 else:
+                    # No match at all - skip this paragraph
+                    print(f"[REPLACE] ✗ NO MATCH - skipping paragraph {p_idx}")
                     continue
 
             # Find position of text to replace
             start_idx = full_text_normalized.find(search_text_normalized)
             if start_idx == -1:
+                print(f"[REPLACE] ✗ Could not find position in normalized text")
                 continue
 
             end_idx = start_idx + len(search_text_normalized)
 
-            print(f"[REPLACE] Found at position {start_idx}-{end_idx}")
+            print(f"[REPLACE] ✓ Found at position {start_idx}-{end_idx} (length: {len(search_text_normalized)})")
             # CRITICAL FIX: Find which segments contain the text to replace
             target_segments = []
             for seg in text_segments:
@@ -477,11 +494,12 @@ class DocxFullEditor:
                     target_segments.append(seg)
 
             if not target_segments:
+                print(f"[REPLACE] ✗ No target segments found")
                 continue
 
             # Count field vs non-field segments
             field_count = sum(1 for seg in target_segments if seg['is_field'])
-            print(f"[REPLACE] Target: {len(target_segments)} segments ({field_count} fields)")
+            print(f"[REPLACE] Target: {len(target_segments)} segments ({field_count} fields, {len(target_segments) - field_count} text)")
 
             # CRITICAL FIX: Handle MERGEFIELD properly during replacement
             # We need to identify which parts of old_text are placeholders and which are regular text
@@ -567,7 +585,9 @@ class DocxFullEditor:
                         pos_in_seg = max(0, start_idx - seg_start)
 
                         original_text = t_elem.text if t_elem.text else ""
-                        t_elem.text = original_text[:pos_in_seg] + new_text
+                        # CRITICAL FIX: Preserve text after replaced position
+                        seg_end_pos = end_idx - seg_start
+                        t_elem.text = original_text[:pos_in_seg] + new_text + (original_text[seg_end_pos:] if seg_end_pos <= len(original_text) else "")
 
                         print(f"[REPLACE] ✓ Success (placeholder changed)")
                         return True
@@ -609,6 +629,8 @@ class DocxFullEditor:
                             t_elem.text = t_elem.text[:pos_in_seg] + new_text + t_elem.text[seg_end_pos:]
                             replacement_done = True
                             print(f"[REPLACE] ✓ Success (single run)")
+                            print(f"[REPLACE] ===== TEXT REPLACE END (SUCCESS) =====")
+                            return True  # ✅ CRITICAL FIX: Return immediately!
             else:
                 # Complex case: multiple segments or includes fields
                 # Strategy: Clear target non-field segments and insert new text in first one
@@ -641,13 +663,20 @@ class DocxFullEditor:
 
                             # Replace with new text
                             original_text = t_elem.text if t_elem.text else ""
-                            t_elem.text = original_text[:pos_in_seg] + new_text
+                            # CRITICAL FIX: Calculate seg_end_pos to preserve text after
+                            seg_end_pos = end_idx - seg_start
+                            t_elem.text = original_text[:pos_in_seg] + new_text + (original_text[seg_end_pos:] if seg_end_pos <= len(original_text) else "")
                             replacement_done = True
                             print(f"[REPLACE] ✓ Success (multiple segments)")
+                            print(f"[REPLACE] ===== TEXT REPLACE END (SUCCESS) =====")
+                            return True
 
-            if replacement_done:
-                return True
+            print(f"[REPLACE] ✗ No replacement done - replacement_done=False")
+            print(f"[REPLACE] ===== TEXT REPLACE END (FAILED) =====")
+            return False
 
+        print(f"[REPLACE] ✗ No matching paragraph found")
+        print(f"[REPLACE] ===== TEXT REPLACE END (NOT FOUND) =====")
         return False
 
     def _extract_all_text_runs(self, paragraph: Paragraph) -> list:
@@ -1785,6 +1814,9 @@ class DocxFullEditor:
         """
         Xóa một phần của text trong paragraph dựa trên offset
 
+        CRITICAL FIX: Now properly handles MERGEFIELD placeholders (fldSimple elements).
+        When a placeholder is fully or partially within the delete range, it will be removed.
+
         Args:
             paragraph: Paragraph object cần xóa text
             start_offset: Vị trí bắt đầu (character offset)
@@ -1794,66 +1826,105 @@ class DocxFullEditor:
             True nếu thành công, False nếu thất bại
         """
         try:
-            # Get all runs in paragraph
-            runs = list(paragraph.runs)
-            if not runs:
-                return False
+            w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
-            # Calculate character positions for each run
-            char_positions = []
+            # Extract full text and segments (similar to _extract_paragraph_full_text)
+            text_segments = []
             current_pos = 0
-            for run in runs:
-                run_length = len(run.text)
-                char_positions.append({
-                    'run': run,
-                    'start': current_pos,
-                    'end': current_pos + run_length
-                })
-                current_pos += run_length
 
-            # Find which runs contain the text to delete
-            runs_to_modify = []
-            for pos in char_positions:
-                # Check if this run intersects with delete range
-                if pos['end'] > start_offset and pos['start'] < end_offset:
-                    runs_to_modify.append(pos)
+            # Process paragraph element children in order
+            for child in paragraph._element:
+                tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
 
-            if not runs_to_modify:
+                if tag_name == 'r':
+                    # Regular run
+                    run_text = "".join(t.text for t in child.findall(f"{w_ns}t") if t.text)
+                    if run_text:
+                        text_segments.append({
+                            'text': run_text,
+                            'is_field': False,
+                            'element': child,
+                            'start_pos': current_pos,
+                            'end_pos': current_pos + len(run_text)
+                        })
+                        current_pos += len(run_text)
+
+                elif tag_name == 'fldSimple':
+                    # MERGEFIELD field
+                    instr = child.get(f"{w_ns}instr", "")
+                    match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+                    if match:
+                        field_name = match.group(1)
+                        field_text = f"«{field_name}»"
+                        text_segments.append({
+                            'text': field_text,
+                            'is_field': True,
+                            'element': child,
+                            'field_name': field_name,
+                            'start_pos': current_pos,
+                            'end_pos': current_pos + len(field_text)
+                        })
+                        current_pos += len(field_text)
+
+            # Find which segments intersect with delete range
+            segments_to_delete = []
+            for seg in text_segments:
+                # Check if this segment intersects with delete range
+                if seg['end_pos'] > start_offset and seg['start_pos'] < end_offset:
+                    segments_to_delete.append(seg)
+
+            if not segments_to_delete:
                 return False
 
-            # Modify runs
-            first_run = runs_to_modify[0]
-            last_run = runs_to_modify[-1]
+            # Process segments to delete
+            deleted_any = False
 
-            # Calculate offsets relative to each run
-            first_run_start = max(0, start_offset - first_run['start'])
-            first_run_end = first_run['end']
-            last_run_start = last_run['start']
-            last_run_end = min(last_run['end'], end_offset)
+            for seg in segments_to_delete:
+                if seg['is_field']:
+                    # This is a MERGEFIELD placeholder - remove it completely
+                    # We can't partially delete a placeholder, so if any part of it is in range, remove all
+                    element = seg['element']
+                    parent = element.getparent()
+                    if parent is not None:
+                        parent.remove(element)
+                        deleted_any = True
+                        print(f"[DELETE_TEXT_RANGE] Removed placeholder '{seg['field_name']}' at offset {seg['start_pos']}-{seg['end_pos']}")
+                else:
+                    # This is a regular run - modify its text
+                    element = seg['element']
+                    run_text = seg['text']
 
-            # Delete text in first run
-            if first_run == last_run:
-                # All text to delete is in one run
-                first_run['run'].text = (
-                    first_run['run'].text[:first_run_start] +
-                    first_run['run'].text[last_run_end - first_run['start']:]
-                )
-            else:
-                # Text spans multiple runs
-                # Keep text before deletion in first run
-                first_run['run'].text = first_run['run'].text[:first_run_start]
+                    # Calculate intersection with delete range
+                    seg_start = seg['start_pos']
+                    seg_end = seg['end_pos']
 
-                # Keep text after deletion in last run
-                last_run['run'].text = last_run['run'].text[last_run_end - last_run['start']:]
+                    # Calculate how much to delete from this run
+                    delete_start = max(start_offset - seg_start, 0)
+                    delete_end = min(end_offset - seg_start, len(run_text))
 
-                # Clear text in middle runs
-                for run_info in runs_to_modify[1:-1]:
-                    run_info['run'].text = ""
+                    if delete_end <= delete_start:
+                        # No overlap (shouldn't happen given our intersection check)
+                        continue
 
-            return True
+                    # Modify run text: keep text before and after the deletion
+                    new_text = run_text[:delete_start] + run_text[delete_end:]
+
+                    # Find all w:t elements in this run and update the first one
+                    t_elements = element.findall(f"{w_ns}t")
+                    if t_elements:
+                        t_elements[0].text = new_text
+                        deleted_any = True
+
+            # Clean up empty runs after deletion
+            if deleted_any:
+                self._remove_empty_runs(paragraph)
+
+            return deleted_any
 
         except Exception as e:
             print(f"Error deleting text range: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def delete_paragraph(self, paragraph):

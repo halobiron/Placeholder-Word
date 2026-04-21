@@ -295,29 +295,48 @@ async def download_file(file_id: str):
     raise HTTPException(status_code=404, detail="File not found")
 
 
-@app.get("/preview/{result_id}")
-async def preview_result(result_id: str):
-    """Get HTML preview of merged result
+@app.get("/preview/{file_id}")
+async def preview_file(file_id: str):
+    """Get HTML preview of template or result
 
     Args:
-        result_id: ID of result file
+        file_id: ID of template or result file
 
     Returns:
-        JSON with html_preview
+        JSON with html_preview and file_type
     """
-    # Find result file
-    result_path = RESULT_DIR / f"{result_id}.docx"
-    if not result_path.exists():
-        raise HTTPException(status_code=404, detail=f"Result not found: {result_id}")
+    # Try RESULT_DIR first, then TEMPLATE_DIR
+    result_path = RESULT_DIR / f"{file_id}.docx"
+    template_path = TEMPLATE_DIR / f"{file_id}.docx"
+
+    file_path = None
+    file_type = None
+
+    if result_path.exists():
+        file_path = result_path
+        file_type = "result"
+    elif template_path.exists():
+        file_path = template_path
+        file_type = "template"
+    else:
+        raise HTTPException(status_code=404, detail=f"File not found: {file_id}")
 
     try:
         # Generate HTML preview
         processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(result_path))
+        html_preview = processor._generate_html_preview(str(file_path))
+
+        # Get fields if it's a template
+        fields = []
+        if file_type == "template":
+            executor = MergeExecutor()
+            fields = executor.get_template_fields(str(file_path))
 
         return JSONResponse(content={
-            "result_id": result_id,
-            "html_preview": html_preview
+            "file_id": file_id,
+            "file_type": file_type,
+            "html_preview": html_preview,
+            "fields": fields
         })
 
     except Exception as e:

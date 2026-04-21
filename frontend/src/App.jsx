@@ -3225,16 +3225,38 @@ function App() {
 
                           console.log('[TEXT UPDATE] Backend response:', response.data)
 
-                          // Update editor HTML from backend response to maintain consistency
+                          // CRITICAL FIX: Update editorHtml to sync with file
+                          // But preserve cursor position to avoid disrupting user typing
                           if (response.data.html_preview) {
+                            // Save cursor position
+                            const selection = window.getSelection()
+                            const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null
+
+                            // Get the current block element
+                            const currentBlock = document.querySelector(`[data-block-index="${textChangeInfo.blockIndex}"]`)
+
+                            // Update editorHtml
                             setEditorHtml(response.data.html_preview)
+
+                            // Restore cursor after DOM update
+                            setTimeout(() => {
+                              if (range && currentBlock) {
+                                try {
+                                  selection.removeAllRanges()
+                                  selection.addRange(range)
+                                } catch (e) {
+                                  console.log('[TEXT UPDATE] Could not restore cursor:', e)
+                                }
+                              }
+                            }, 0)
                           }
+
                           if (response.data.fields) {
                             setFields(response.data.fields)
                           }
                           setTemplateNeedsUpdate(false)
 
-                          console.log('[TEXT UPDATE] Successfully synced text with backend')
+                          console.log('[TEXT UPDATE] Successfully synced with cursor preserved')
                         } catch (err) {
                           console.error('[TEXT UPDATE] Failed:', err)
                           // Don't show error for text updates - they happen frequently
