@@ -1254,7 +1254,7 @@ function App() {
 
       // Update UI with new data
       setEditorHtml(result.html_preview)
-      setFields(result.updated_fields)
+      setFields(result.fields || result.updated_fields || [])
       
       // Reset add mode
       setIsAddMode(false)
@@ -1319,21 +1319,51 @@ function App() {
     const selection = window.getSelection()
     const selectedText = selection.toString().trim()
 
-    // Only show format popup for regular text (not placeholders)
-    if (selectedText && !isAddMode && !selectedText.includes('«')) {
-      const element = selection.anchorNode.parentElement
+    // Show format popup for any text selection (including text with placeholders)
+    if (selectedText && !isAddMode) {
+      // Get the element containing the selection
+      // Handle both text nodes and element nodes
+      let element = selection.anchorNode
+      if (element.nodeType === Node.TEXT_NODE) {
+        element = element.parentElement
+      }
 
       // Find block_index from parent elements
       let blockIndex = null
       let currentElement = element
       let blockElement = null
+
+      // Walk up the DOM tree to find data-block-index
       while (currentElement && currentElement.id !== 'document-editor') {
-        if (currentElement.hasAttribute && currentElement.hasAttribute('data-block-index')) {
+        // Check if element has data-block-index attribute
+        if (currentElement instanceof Element && currentElement.hasAttribute('data-block-index')) {
           blockIndex = parseInt(currentElement.getAttribute('data-block-index'))
           blockElement = currentElement
           break
         }
         currentElement = currentElement.parentElement
+      }
+
+      // If still not found, try looking for data-cell-block-index (for table cells)
+      if (blockIndex === null) {
+        currentElement = element
+        while (currentElement && currentElement.id !== 'document-editor') {
+          if (currentElement instanceof Element && currentElement.hasAttribute('data-cell-block-index')) {
+            blockIndex = parseInt(currentElement.getAttribute('data-cell-block-index'))
+            blockElement = currentElement
+            break
+          }
+          currentElement = currentElement.parentElement
+        }
+      }
+
+      // If still not found, log error and don't show popup
+      if (blockIndex === null) {
+        console.warn('[handleTextSelection] Could not find block-index for selection:', {
+          selectedText,
+          element: element.outerHTML || element.textContent
+        })
+        return
       }
 
       // CRITICAL FIX: For table cells, calculate offset relative to the paragraph, not the cell
@@ -1424,7 +1454,7 @@ function App() {
         }
       }
 
-      // Get accurate format from DOCX backend (not from HTML computed style)
+      // Get format from backend (extracted from DOCX, always returns hex colors)
       let format = {
         bold: false,
         italic: false,
@@ -1437,26 +1467,15 @@ function App() {
         fontName: 'Times New Roman'
       }
 
-      try {
-        if (templateId) {
+      if (templateId) {
+        try {
           const response = await getSelectionFormat(templateId, selectedText, blockIndex)
           if (response?.format) {
             format = response.format
           }
-        }
-      } catch (error) {
-        console.error('Failed to get selection format from backend:', error)
-        // Fall back to computed style if backend fails
-        const computedStyle = window.getComputedStyle(element)
-        const textDecorationLine = computedStyle.textDecorationLine || ''
-        format = {
-          bold: computedStyle.fontWeight === '700' || computedStyle.fontWeight === 'bold',
-          italic: computedStyle.fontStyle === 'italic',
-          underline: textDecorationLine.includes('underline'),
-          strikethrough: textDecorationLine.includes('line-through'),
-          color: computedStyle.color,
-          fontSize: parseInt(computedStyle.fontSize) || 12,
-          fontName: computedStyle.fontFamily.split(',')[0].replace(/['"]/g, '').trim()
+        } catch (error) {
+          console.error('Failed to get selection format from backend:', error)
+          // Keep default format if backend fails
         }
       }
 
@@ -2196,16 +2215,12 @@ function App() {
                           }
 
                           try {
-                            // Get block index
-                            const element = selection.anchorNode.parentElement
-                            let blockIndex = null
-                            let currentElement = element
-                            while (currentElement && currentElement.id !== 'document-editor') {
-                              if (currentElement.hasAttribute && currentElement.hasAttribute('data-block-index')) {
-                                blockIndex = parseInt(currentElement.getAttribute('data-block-index'))
-                                break
-                              }
-                              currentElement = currentElement.parentElement
+                            // Get block index using the same method as other operations
+                            const blockIndex = getCurrentBlockIndex()
+                            if (blockIndex === null) {
+                              setError('⚠️ Không tìm thấy block index. Đảm bảo cursor nằm trong paragraph!')
+                              setTimeout(() => setError(null), 2000)
+                              return
                             }
 
                             const formatData = {
@@ -3315,7 +3330,6 @@ function App() {
             color: #1e3a5f;
             border: 2px solid #4a90d9;
             cursor: pointer;
-            user-select: none;
             display: inline-block;
           }
           .mail-merge-placeholder:hover {

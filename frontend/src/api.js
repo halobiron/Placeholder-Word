@@ -73,43 +73,23 @@ export const getPreview = async (resultId) => {
 }
 
 export const addPlaceholderByPosition = async (templateId, blockIndex, fieldName, position = 'right', cellIndex = null, paraInCell = null) => {
-  const formData = new FormData()
-  formData.append('template_id', templateId)
-  formData.append('block_index', blockIndex)
-  formData.append('field_name', fieldName)
-  formData.append('position', position)
-  if (cellIndex !== null) {
-    formData.append('cell_index', cellIndex)
-  }
-  if (paraInCell !== null) {
-    formData.append('para_in_cell', paraInCell)
-  }
-
-  const response = await axios.post(`${API_BASE}/add-placeholder-by-position`, formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-  })
-  return response.data
+  return await batchUpdate(templateId, [{
+    type: 'add_placeholder',
+    block_index: blockIndex,
+    field_name: fieldName,
+    position: position,
+    inherit_format: true
+  }])
 }
 
 export const addPlaceholderByOffset = async (templateId, blockIndex, offset, fieldName, inheritFormat = true, paraInCell = null) => {
-  const formData = new FormData()
-  formData.append('template_id', templateId)
-  formData.append('block_index', blockIndex)
-  formData.append('offset', offset)
-  formData.append('field_name', fieldName)
-  formData.append('inherit_format', inheritFormat)
-  if (paraInCell !== null) {
-    formData.append('para_in_cell', paraInCell)
-  }
-
-  const response = await axios.post(`${API_BASE}/add-placeholder-by-offset`, formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-  })
-  return response.data
+  return await batchUpdate(templateId, [{
+    type: 'add_placeholder_by_offset',
+    block_index: blockIndex,
+    offset: offset,
+    field_name: fieldName,
+    inherit_format: inheritFormat
+  }])
 }
 
 export const suggestFieldName = async (templateId, blockIndex, paraInCell = null) => {
