@@ -2,21 +2,18 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, updateTemplate, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate } from './api'
+import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result, download
   const [templateId, setTemplateId] = useState(null)
   const [editorHtml, setEditorHtml] = useState(null)
   const [fields, setFields] = useState([])
-  const [originalFields, setOriginalFields] = useState([]) // Track original fields from template
   const [fieldValues, setFieldValues] = useState({}) // Direct value editing
   const [context, setContext] = useState('')
   const [resultId, setResultId] = useState(null)
   const [previewHtml, setPreviewHtml] = useState(null) // Preview of merged result
   const [merging, setMerging] = useState(false)
-  const [templateNeedsUpdate, setTemplateNeedsUpdate] = useState(false) // Track if template was modified
-  const [renameMap, setRenameMap] = useState({}) // Track oldName -> currentName mapping
   const [error, setError] = useState(null)
   const [suggestions, setSuggestions] = useState([]) // AI suggestions for missing placeholders
   const [analyzing, setAnalyzing] = useState(false) // AI analysis in progress
@@ -102,7 +99,7 @@ function App() {
    * @param {Object} oldRenameMap - Previous rename mapping
    * @returns {Array} List of operations to execute via batchUpdate
    */
-  const buildOperationsFromChanges = (oldHtml, newHtml, oldFields, newFields, oldRenameMap) => {
+  const buildOperationsFromChanges = (oldHtml, newHtml, oldFields, newFields) => {
     const operations = []
 
     // =======================================================================
@@ -112,22 +109,6 @@ function App() {
     // Find deleted fields (fields in old but not in new)
     const deletedFields = oldFields.filter(f => !newFields.includes(f))
 
-    // Find renamed fields (by comparing with renameMap)
-    // This handles cases where user clicked on placeholder to rename
-    const renamedFields = []
-    const currentFields = newFields
-
-    // Check renameMap to see if any fields were renamed
-    for (const [original, current] of Object.entries(oldRenameMap)) {
-      if (current && current !== original && !currentFields.includes(current)) {
-        // This field was renamed to something not in currentFields
-        // Check if the new name exists in currentFields
-        if (currentFields.includes(current)) {
-          renamedFields.push({ oldName: original, newName: current })
-        }
-      }
-    }
-
     // Add delete operations for deleted placeholders
     deletedFields.forEach(fieldName => {
       operations.push({
@@ -135,16 +116,6 @@ function App() {
         field_name: fieldName
       })
       console.log(`[BUILD OP] Delete placeholder: ${fieldName}`)
-    })
-
-    // Add rename operations
-    renamedFields.forEach(({ oldName, newName }) => {
-      operations.push({
-        type: 'rename_placeholder',
-        old_name: oldName,
-        new_name: newName
-      })
-      console.log(`[BUILD OP] Rename placeholder: ${oldName} → ${newName}`)
     })
 
     // =======================================================================
@@ -366,7 +337,6 @@ function App() {
     // Update HTML
     setEditorHtml(newHtml)
     setFields(newFields)
-    setOriginalFields(newFields)
 
     // Restore scroll position and set cursor AFTER DOM update
     setTimeout(() => {
@@ -531,17 +501,10 @@ function App() {
             }
 
             // Call the API with para_in_cell parameter
-            const formData = new FormData()
-            formData.append('template_id', templateId)
-            formData.append('block_index', cellBlockIndex)
-            formData.append('old_text', oldText)
-            formData.append('new_text', newText)
-            formData.append('para_in_cell', paraInCell)
-
-            const response = await axios.post(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`, formData, {
-              headers: {
-                'Content-Type': 'multipart/form-data',
-              },
+            await updateTextInTemplate(templateId, {
+              blockIndex: cellBlockIndex,
+              oldText: oldText,
+              newText: newText
             })
 
             setError('✅ Đã cập nhật text trong ô bảng')
@@ -903,26 +866,9 @@ function App() {
     // Store current state for rollback
     const oldHtml = editorHtml
     const oldFields = extractFields(editor.innerHTML)
-    const oldRenameMap = { ...renameMap }
 
     console.log('[renameField] Stored state for rollback:', {
-      oldFieldsCount: oldFields.length,
-      oldRenameMap: oldRenameMap
-    })
-
-    // Update renameMap: replace oldName with newName in all values
-    const newMap = {}
-    for (const [original, current] of Object.entries(renameMap)) {
-      if (current === oldName) {
-        newMap[original] = newName
-      } else {
-        newMap[original] = current
-      }
-    }
-
-    console.log('[renameField] Updated renameMap:', {
-      old: renameMap,
-      new: newMap
+      oldFieldsCount: oldFields.length
     })
 
     // Update UI immediately
@@ -947,7 +893,6 @@ function App() {
 
     const newHtml = editor.innerHTML
     setEditorHtml(newHtml)
-    setRenameMap(newMap)
 
     try {
       // Use batchUpdate for rename operation
@@ -974,7 +919,6 @@ function App() {
 
       // Update state from backend response
       setFields(result.fields || extractFields(newHtml))
-      setTemplateNeedsUpdate(false)
       setError(`✅ Đã đổi tên «${oldName}» → «${newName}»`)
       setTimeout(() => setError(null), 2000)
 
@@ -997,7 +941,6 @@ function App() {
           span.textContent = `«${oldName}»`
         }
       })
-      setRenameMap(oldRenameMap)
       setEditorHtml(oldHtml)
       setFields(oldFields)
       console.log('[renameField] Rollback completed')
@@ -1023,11 +966,9 @@ function App() {
     // Store current state for rollback
     const oldHtml = editorHtml
     const oldFields = [...fields]
-    const oldRenameMap = { ...renameMap }
 
     console.log('[deleteField] Stored state for rollback:', {
-      oldFieldsCount: oldFields.length,
-      oldRenameMapKeys: Object.keys(oldRenameMap)
+      oldFieldsCount: oldFields.length
     })
 
     try {
@@ -1054,7 +995,7 @@ function App() {
       })
 
       // Build operations list using batch update helper
-      const operations = buildOperationsFromChanges(oldHtml, newHtml, oldFields, newFields, oldRenameMap)
+      const operations = buildOperationsFromChanges(oldHtml, newHtml, oldFields, newFields)
 
       console.log('[deleteField] Built operations:', operations)
 
@@ -1078,10 +1019,8 @@ function App() {
 
       if (result.success) {
         // Update local state after successful server update
-        setRenameMap(oldRenameMap) // Keep renameMap as-is (only placeholders deleted)
-        updateEditorHtmlWithPreservation(result.html_preview, result.fields)
-        setTemplateNeedsUpdate(false) // Reset flag since we just updated
-        setError(`✅ Đã xóa «${fieldName}»`)
+                updateEditorHtmlWithPreservation(result.html_preview, result.fields)
+                setError(`✅ Đã xóa «${fieldName}»`)
         setTimeout(() => setError(null), 2000)
 
         console.log('[deleteField] ✅ Deletion completed successfully')
@@ -1103,8 +1042,7 @@ function App() {
       console.log('[deleteField] Rolling back UI changes...')
       editor.innerHTML = oldHtml
       updateEditorHtmlWithPreservation(oldHtml, oldFields)
-      setRenameMap(oldRenameMap)
-      console.log('[deleteField] Rollback completed')
+            console.log('[deleteField] Rollback completed')
 
       setTimeout(() => setError(null), 3000)
     }
@@ -1117,14 +1055,6 @@ function App() {
     setTemplateId(data.templateId)
     setEditorHtml(data.previewHtml)
     setFields(data.fields)
-    setOriginalFields(data.fields) // Store original fields
-
-    // Initialize renameMap mapping original fields to themselves
-    const initMap = {}
-    data.fields.forEach(f => initMap[f] = f)
-    setRenameMap(initMap)
-
-    setTemplateNeedsUpdate(false) // Reset update flag
     setStep('preview')
   }
 
@@ -1143,14 +1073,6 @@ function App() {
     setError(null)
 
     try {
-      // Update template if fields were modified (renamed/added/deleted)
-      if (templateNeedsUpdate) {
-        console.log('Updating template with modified fields...')
-        await updateTemplate(templateId, renameMap)
-        console.log('Template updated successfully')
-        setTemplateNeedsUpdate(false)
-      }
-
       // Use direct values if available, otherwise use context
       const data = hasDirectValues ? fieldValues : context
       const result = await mergeTemplate(templateId, data, hasDirectValues, fields)
@@ -1214,8 +1136,7 @@ function App() {
       // Update editor with result from applySuggestions (no extra API call needed)
       setEditorHtml(result.html_preview)
       setFields(result.updated_fields)
-      setOriginalFields(result.updated_fields)
-
+      
       // Clear suggestions and edits after successful apply
       setSuggestions([])
       setSelectedSuggestions([])
@@ -1334,8 +1255,7 @@ function App() {
       // Update UI with new data
       setEditorHtml(result.html_preview)
       setFields(result.updated_fields)
-      setOriginalFields(result.updated_fields)
-
+      
       // Reset add mode
       setIsAddMode(false)
       setSelectedBlockIndex(null)
@@ -1563,8 +1483,7 @@ function App() {
       // Update UI
       setEditorHtml(result.html_preview)
       setFields(result.fields)
-      setOriginalFields(result.fields)
-
+      
       setShowEditPopup(false)
       setSelectedTextForEdit(null)
 
@@ -1628,8 +1547,7 @@ function App() {
       // Update UI
       setEditorHtml(result.html_preview)
       setFields(result.fields)
-      setOriginalFields(result.fields)
-
+      
       // Show success message
       setError('✅ Đã thêm ngắt trang tại vị trí cursor!')
       setTimeout(() => setError(null), 3000)
@@ -1650,8 +1568,7 @@ function App() {
 
       setEditorHtml(result.html_preview)
       setFields(result.fields)
-      setOriginalFields(result.fields)
-
+      
       setError(`✅ Đã thêm row ${position === 'above' ? 'trên' : 'dưới'} thành công!`)
       setTimeout(() => setError(null), 2000)
     } catch (err) {
@@ -1669,8 +1586,7 @@ function App() {
 
       setEditorHtml(result.html_preview)
       setFields(result.fields)
-      setOriginalFields(result.fields)
-
+      
       // Reset table selection after deleting
       setSelectedTableInfo({
         tableIndex: null,
@@ -1696,8 +1612,7 @@ function App() {
 
       setEditorHtml(result.html_preview)
       setFields(result.fields)
-      setOriginalFields(result.fields)
-
+      
       setError(`✅ Đã thêm column ${position === 'left' ? 'trái' : 'phải'} thành công!`)
       setTimeout(() => setError(null), 2000)
     } catch (err) {
@@ -1715,8 +1630,7 @@ function App() {
 
       setEditorHtml(result.html_preview)
       setFields(result.fields)
-      setOriginalFields(result.fields)
-
+      
       // Reset table selection after deleting
       setSelectedTableInfo({
         tableIndex: null,
@@ -1840,6 +1754,27 @@ function App() {
     }
   }
 
+  const handleOpenCellFormatDialog = async () => {
+    if (!selectedTableInfo.isCellSelected) return
+
+    try {
+      const { tableIndex, rowIndex, colIndex } = selectedTableInfo
+
+      // Load current cell format from backend
+      const response = await getCellFormat(templateId, tableIndex, rowIndex, colIndex)
+
+      if (response && response.format) {
+        setCellFormatOptions(response.format)
+      }
+
+      setShowCellFormatDialog(true)
+    } catch (err) {
+      console.error('Load cell format failed:', err)
+      // Use default values if loading fails
+      setShowCellFormatDialog(true)
+    }
+  }
+
   const handleFormatTableCell = async () => {
     if (!selectedTableInfo.isCellSelected) return
 
@@ -1849,8 +1784,7 @@ function App() {
 
       setEditorHtml(result.html_preview)
       setFields(result.fields)
-      setOriginalFields(result.fields)
-
+      
       setShowCellFormatDialog(false)
       setError(`✅ Đã format cell thành công!`)
       setTimeout(() => setError(null), 2000)
@@ -1888,8 +1822,7 @@ function App() {
 
       setEditorHtml(result.html_preview)
       setFields(result.fields)
-      setOriginalFields(result.fields)
-
+      
       setShowHyperlinkDialog(false)
       setHyperlinkData({ url: '' })
       setError(`✅ Đã thêm hyperlink vào "${hyperlinkPosition.selectedText}"!`)
@@ -1921,17 +1854,12 @@ function App() {
               </div>
 
               {fields.length > 0 && (
-                <div className={`p-4 border rounded-lg ${templateNeedsUpdate ? 'bg-orange-50 border-orange-300' : 'bg-blue-50 border-blue-200'}`}>
+                <div className="p-4 border rounded-lg bg-blue-50 border-blue-200">
                   <div className="flex justify-between items-start gap-4">
                     <div className="flex-1">
                       <p className="text-sm font-semibold mb-2">
-                        {templateNeedsUpdate ? '⚠️ Template đã chỉnh sửa' : `✅ ${fields.length} placeholder:`}
+                        {`✅ ${fields.length} placeholder:`}
                       </p>
-                      {templateNeedsUpdate && (
-                        <p className="text-xs text-orange-700 mb-2">
-                          Các thay đổi sẽ được lưu vào template khi merge.
-                        </p>
-                      )}
                       <div className="mt-2 flex flex-wrap gap-2">
                         {fields.map((f, i) => (
                           <span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-blue-300 rounded text-xs font-mono">
@@ -2136,10 +2064,10 @@ function App() {
                                   onChange={(e) => updateSuggestionEdit(s, 'position', e.target.value)}
                                   onClick={(e) => e.stopPropagation()}
                                   className={`text-xs px-2 py-0.5 rounded border ${editedPosition !== s.position ? 'border-yellow-400 bg-yellow-50' : 'border-transparent bg-transparent'} ${editedPosition === 'left'
-                                      ? 'bg-blue-100 text-blue-700'
-                                      : editedPosition === 'right'
-                                        ? 'bg-purple-100 text-purple-700'
-                                        : 'bg-orange-100 text-orange-700'
+                                    ? 'bg-blue-100 text-blue-700'
+                                    : editedPosition === 'right'
+                                      ? 'bg-purple-100 text-purple-700'
+                                      : 'bg-orange-100 text-orange-700'
                                     }`}
                                 >
                                   <option value="left">⬅️ Trước text</option>
@@ -2298,8 +2226,8 @@ function App() {
                         }}
                         disabled={!copiedFormat}
                         className={`px-3 py-1.5 text-white rounded-lg text-sm font-medium transition-colors ${copiedFormat
-                            ? 'bg-indigo-500 hover:bg-indigo-600'
-                            : 'bg-gray-300 cursor-not-allowed'
+                          ? 'bg-indigo-500 hover:bg-indigo-600'
+                          : 'bg-gray-300 cursor-not-allowed'
                           }`}
                         title="Paste định dạng đã copy vào văn bản đang chọn"
                       >
@@ -2389,7 +2317,7 @@ function App() {
                         {/* Cell formatting */}
                         <div className="flex gap-1">
                           <button
-                            onClick={() => setShowCellFormatDialog(true)}
+                            onClick={handleOpenCellFormatDialog}
                             className="px-2 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600 font-medium"
                             title="Format ô (màu nền, căn lề)"
                           >
@@ -2506,8 +2434,7 @@ function App() {
                             // Update UI with new HTML preview
                             setEditorHtml(result.html_preview)
                             setFields(result.fields)
-                            setOriginalFields(result.fields)
-
+                            
                             // CRITICAL FIX: Restore scroll position and set cursor after HTML update
                             // Use setTimeout to ensure DOM is updated
                             setTimeout(() => {
@@ -2883,39 +2810,6 @@ function App() {
                       setFields(newFields)
                     }
 
-                    // Handle placeholder deletion via batch update
-                    if (deletedFields.length > 0) {
-                      try {
-                        const operations = deletedFields.map(fieldName => ({
-                          type: 'delete_placeholder',
-                          field_name: fieldName
-                        }))
-
-                        const result = await batchUpdate(templateId, operations, false, true)
-
-                        // Only update fields, preserve UI HTML (contentEditable already applied changes)
-                        setFields(result.fields || newFields)
-                        setTemplateNeedsUpdate(false)
-
-                        const deletedList = deletedFields.map(f => `«${f}»`).join(', ')
-                        setError(`✅ Đã xóa ${deletedFields.length} placeholder: ${deletedList}`)
-                        setTimeout(() => setError(null), 2000)
-                      } catch (err) {
-                        console.error('[DELETE] Failed:', err)
-                        setError('⚠️ Xóa placeholder thất bại: ' + (err.response?.data?.detail || err.message))
-                        setTimeout(() => setError(null), 3000)
-
-                        // Rollback: refresh from backend
-                        try {
-                          const previewData = await getPreview(templateId)
-                          setEditorHtml(previewData.html_preview)
-                          setFields(previewData.fields)
-                        } catch (rollbackErr) {
-                          console.error('[DELETE] Rollback failed:', rollbackErr)
-                        }
-                      }
-                    }
-
                     // Handle regular text edits (debounced)
                     const selection = window.getSelection()
                     if (selection.rangeCount > 0 && deletedFields.length === 0) {
@@ -2983,8 +2877,6 @@ function App() {
                             changed: oldCellParas.length !== newCellParas.length
                           })
 
-                          // Track if we need to refresh after processing all changes
-                          let needsRefresh = false
                           let skipTextUpdates = false // Skip text updates if structure changed significantly
                           let lastUpdateResponse = null // Store response from last update-text call
 
@@ -3012,15 +2904,10 @@ function App() {
                                 })
 
                                 // Call backend to delete the paragraph (clear its content)
-                                const formData = new FormData()
-                                formData.append('template_id', templateId)
-                                formData.append('block_index', cellBlockIndex)
-                                formData.append('old_text', deletedText)
-                                formData.append('new_text', '') // Empty to delete
-                                formData.append('para_in_cell', deletedParaIndex)
-
-                                const response = await axios.post(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`, formData, {
-                                  headers: { 'Content-Type': 'multipart/form-data' }
+                                const response = await updateTextInTemplate(templateId, {
+                                  blockIndex: cellBlockIndex,
+                                  oldText: deletedText,
+                                  newText: '' // Empty to delete
                                 })
 
                                 // Store response for final update
@@ -3164,8 +3051,7 @@ function App() {
 
                         // Update state from backend response
                         setFields(result.fields || newFields)
-                        setTemplateNeedsUpdate(false)
-
+                        
                         // Show success message with field details
                         const deletedList = deletedFields.map(f => `«${f}»`).join(', ')
                         setError(`✅ Đã xóa ${deletedFields.length} placeholder: ${deletedList}`)
@@ -3208,26 +3094,17 @@ function App() {
                         try {
                           console.log('[TEXT UPDATE] Sending to backend:', textChangeInfo)
 
-                          const formData = new FormData()
-                          formData.append('template_id', templateId)
-                          formData.append('block_index', textChangeInfo.blockIndex)
-                          formData.append('old_text', textChangeInfo.originalText)
-                          formData.append('new_text', textChangeInfo.newText)
+                          const response = await updateTextInTemplate(templateId, {
+                            blockIndex: textChangeInfo.blockIndex,
+                            oldText: textChangeInfo.originalText,
+                            newText: textChangeInfo.newText
+                          })
 
-                          if (textChangeInfo.paraInCell !== undefined) {
-                            formData.append('para_in_cell', textChangeInfo.paraInCell)
-                          }
-
-                          const response = await axios.post(
-                            `${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/update-text`,
-                            formData
-                          )
-
-                          console.log('[TEXT UPDATE] Backend response:', response.data)
+                          console.log('[TEXT UPDATE] Backend response:', response)
 
                           // CRITICAL FIX: Update editorHtml to sync with file
                           // But preserve cursor position to avoid disrupting user typing
-                          if (response.data.html_preview) {
+                          if (response.html_preview) {
                             // Save cursor position
                             const selection = window.getSelection()
                             const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null
@@ -3236,7 +3113,7 @@ function App() {
                             const currentBlock = document.querySelector(`[data-block-index="${textChangeInfo.blockIndex}"]`)
 
                             // Update editorHtml
-                            setEditorHtml(response.data.html_preview)
+                            setEditorHtml(response.html_preview)
 
                             // Restore cursor after DOM update
                             setTimeout(() => {
@@ -3251,11 +3128,10 @@ function App() {
                             }, 0)
                           }
 
-                          if (response.data.fields) {
-                            setFields(response.data.fields)
+                          if (response.fields) {
+                            setFields(response.fields)
                           }
-                          setTemplateNeedsUpdate(false)
-
+                          
                           console.log('[TEXT UPDATE] Successfully synced with cursor preserved')
                         } catch (err) {
                           console.error('[TEXT UPDATE] Failed:', err)
@@ -3697,8 +3573,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'left', vertical_align: 'top' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'top'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Trên-Trái"
                   >
@@ -3708,8 +3584,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'center', vertical_align: 'top' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'top'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Trên-Giữa"
                   >
@@ -3719,8 +3595,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'right', vertical_align: 'top' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'top'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Trên-Phải"
                   >
@@ -3732,8 +3608,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'left', vertical_align: 'center' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'center'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Giữa-Trái"
                   >
@@ -3743,8 +3619,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'center', vertical_align: 'center' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'center'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Giữa-Giữa"
                   >
@@ -3754,8 +3630,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'right', vertical_align: 'center' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'center'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Giữa-Phải"
                   >
@@ -3767,8 +3643,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'left', vertical_align: 'bottom' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'left' && cellFormatOptions.vertical_align === 'bottom'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Dưới-Trái"
                   >
@@ -3778,8 +3654,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'center', vertical_align: 'bottom' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'center' && cellFormatOptions.vertical_align === 'bottom'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Dưới-Giữa"
                   >
@@ -3789,8 +3665,8 @@ function App() {
                     type="button"
                     onClick={() => setCellFormatOptions({ ...cellFormatOptions, horizontal_align: 'right', vertical_align: 'bottom' })}
                     className={`p-3 border rounded-lg text-xs font-medium transition-all ${cellFormatOptions.horizontal_align === 'right' && cellFormatOptions.vertical_align === 'bottom'
-                        ? 'bg-indigo-500 text-white border-indigo-600'
-                        : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
+                      ? 'bg-indigo-500 text-white border-indigo-600'
+                      : 'bg-gray-50 hover:bg-gray-100 border-gray-300'
                       }`}
                     title="Dưới-Phải"
                   >

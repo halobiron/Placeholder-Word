@@ -73,7 +73,9 @@
       "Bash(git restore:*)",
       "Bash(pip list:*)",
       "Bash(pip show:*)",
-      "mcp__plugin_everything-claude-code_sequential-thinking__sequentialthinking"
+      "mcp__plugin_everything-claude-code_sequential-thinking__sequentialthinking",
+      "Bash(cp main.py main.py.bak)",
+      "Bash(sed -i '858,975d' main.py)"
     ]
   },
   "enabledMcpjsonServers": [

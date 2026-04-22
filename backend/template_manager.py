@@ -2042,12 +2042,65 @@ JSON:"""
         print(f"[_process_table_to_html] START Processing table {table_index} with {len(table.rows)} rows, {len(table.columns)} columns")
         table_html = ['<table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; margin: 10px 0;">']
 
+        # Extract column widths from tblGrid to set proper cell proportions
+        column_widths = []
+        try:
+            tbl_grid = table._element.find(f"{self.w_ns}tblGrid")
+            if tbl_grid is not None:
+                grid_cols = tbl_grid.findall(f"{self.w_ns}gridCol")
+                total_width = 0
+                widths = []
+                for col in grid_cols:
+                    w_val = col.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}w")
+                    if w_val:
+                        width = int(w_val)
+                        widths.append(width)
+                        total_width += width
+
+                # Calculate percentages
+                if total_width > 0 and widths:
+                    for width in widths:
+                        percentage = (width / total_width) * 100
+                        column_widths.append(f"{percentage:.2f}%")
+                    print(f"[_process_table_to_html] Column widths from tblGrid: {column_widths}")
+        except Exception as e:
+            print(f"[_process_table_to_html] Error extracting column widths: {e}")
+
         # Track block index for each cell (matching extract_structured_content logic)
         current_cell_block_index = block_index
         cells_processed = 0
 
         for row_idx, row in enumerate(table.rows):
-            table_html.append('<tr style="border: 1px solid #ccc;">')
+            # Extract row height from trPr
+            row_style = "border: 1px solid #ccc;"
+            try:
+                trPr = row._element.find(f"{self.w_ns}trPr")
+                if trPr is not None:
+                    tr_height = trPr.find(f"{self.w_ns}trHeight")
+                    if tr_height is not None:
+                        h_val = tr_height.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+                        h_rule = trPr.find(f"{self.w_ns}hRule")
+                        h_rule_val = h_rule.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val") if h_rule is not None else None
+
+                        if h_val:
+                            # Convert twips to pixels (1 twip = 1/20 point, 1 point ≈ 1.333 pixels)
+                            # Or simpler: 1 twip ≈ 0.067em, or use pixels directly
+                            height_px = int(h_val) / 15  # Approximate conversion to pixels
+
+                            if h_rule_val == "exact":
+                                row_style += f" height: {height_px}px;"
+                                print(f"[_process_table_to_html] Row {row_idx} exact height: {h_val} twips ≈ {height_px}px")
+                            elif h_rule_val == "atLeast":
+                                row_style += f" min-height: {height_px}px;"
+                                print(f"[_process_table_to_html] Row {row_idx} min-height: {h_val} twips ≈ {height_px}px")
+                            else:  # auto or unspecified
+                                # For auto, still apply min-height to ensure visibility
+                                row_style += f" min-height: {height_px}px;"
+                                print(f"[_process_table_to_html] Row {row_idx} auto height: {h_val} twips ≈ {height_px}px (as min-height)")
+            except Exception as e:
+                print(f"[_process_table_to_html] Error extracting row {row_idx} height: {e}")
+
+            table_html.append(f'<tr style="{row_style}">')
             for cell_idx, cell in enumerate(row.cells):
                 # Extract cell text to check if it has content
                 cell_text = ""
@@ -2141,7 +2194,16 @@ JSON:"""
                 tag = "th" if row_idx == 0 else "td"
 
                 # Extract cell formatting from tcPr (table cell properties)
-                cell_style = "border: 1px solid #ccc; padding: 5px;"
+                # IMPORTANT: Reset browser defaults to prevent inherited styling
+                # - font-weight: normal prevents TH from being bold by default
+                # - font-style: normal prevents italic inheritance
+                # - text-decoration: none prevents underline inheritance
+                cell_style = "border: 1px solid #ccc; padding: 5px; font-weight: normal; font-style: normal; text-decoration: none;"
+
+                # Add column width from tblGrid if available
+                if column_widths and cell_idx < len(column_widths):
+                    cell_style += f" width: {column_widths[cell_idx]};"
+
                 try:
                     tcPr = cell._element.find(f"{self.w_ns}tcPr")
                     if tcPr is not None:

@@ -42,7 +42,6 @@ class DeletePlaceholderOp(BaseOperation):
     Delete a placeholder completely WITHOUT restoring original text
 
     This is TRUE DELETION - removes the MERGEFIELD entirely.
-    Unlike update-template endpoint which restores text from \z switch.
 
     Example:
         {"type": "delete_placeholder", "field_name": "dia_chi"}

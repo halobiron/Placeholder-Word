@@ -354,9 +354,19 @@ class DocxFullEditor:
             if p_idx == paragraph_index:
                 if new_text and new_text.strip():
                     if paragraph.runs:
-                        paragraph.runs[0].text = new_text
+                        # CRITICAL FIX: Remove leading \xa0 (non-breaking space) that may be added automatically
+                        clean_text = new_text.lstrip('\xa0')
+                        paragraph.runs[0].text = clean_text
                     else:
-                        paragraph.add_run(new_text)
+                        # CRITICAL FIX: Use XML directly to avoid python-docx adding non-breaking space
+                        r = OxmlElement('w:r')
+                        t = OxmlElement('w:t')
+                        t.set(qn('xml:space'), 'preserve')
+                        # Remove leading \xa0 (non-breaking space) that may be added automatically
+                        clean_text = new_text.lstrip('\xa0')
+                        t.text = clean_text
+                        r.append(t)
+                        paragraph._element.append(r)
                     print(f"[DEBUG] Inserted new_text into paragraph {paragraph_index}: '{new_text}'")
                 else:
                     for run in paragraph.runs:
@@ -1954,10 +1964,9 @@ class DocxFullEditor:
 
     def delete_placeholder(self, field_name: str) -> bool:
         """
-        Xóa hoàn toàn placeholder KHÔNG restore text gốc từ \z switch
+        Xóa hoàn toàn placeholder KHÔNG restore text gốc
 
-        Đây là TRUE DELETION - xóa cả field MERGEFIELD và wrapper runs,
-        không restore lại text gốc như update-template endpoint.
+        Đây là TRUE DELETION - xóa cả field MERGEFIELD và wrapper runs.
 
         Args:
             field_name: Tên placeholder cần xóa (ví dụ: "ho_ten", "dia_chi")
@@ -3669,6 +3678,79 @@ class DocxFullEditor:
                     tc_borders.replace(existing_border, border)
                 else:
                     tc_borders.append(border)
+
+    def get_cell_format(self, table_index: int, row_index: int, col_index: int) -> dict:
+        """Get current formatting of a table cell
+
+        Returns:
+            dict with keys: background_color, vertical_align, horizontal_align
+        """
+        if table_index >= len(self.doc.tables):
+            return None
+
+        table = self.doc.tables[table_index]
+        if row_index >= len(table.rows):
+            return None
+
+        row = table.rows[row_index]
+        if col_index >= len(row.cells):
+            return None
+
+        cell = row.cells[col_index]
+
+        # Default format
+        format_info = {
+            'background_color': '#ffffff',
+            'vertical_align': 'top',
+            'horizontal_align': 'left'
+        }
+
+        try:
+            # Get tcPr (table cell properties)
+            tc_pr = cell._element.find(qn('w:tcPr'))
+            if tc_pr is not None:
+                # Background color from shd element
+                shd = tc_pr.find(qn('w:shd'))
+                if shd is not None:
+                    fill = shd.get(qn('w:fill'))
+                    if fill and fill != 'auto':
+                        # Convert to hex format
+                        if not fill.startswith('#'):
+                            fill = f'#{fill}'
+                        format_info['background_color'] = fill
+
+                # Vertical alignment from vAlign element
+                v_align = tc_pr.find(qn('w:vAlign'))
+                if v_align is not None:
+                    v_align_val = v_align.get(qn('w:val'), 'top')
+                    # Word uses "top", "center", "bottom" directly
+                    if v_align_val in ['top', 'center', 'bottom']:
+                        format_info['vertical_align'] = v_align_val
+
+            # Horizontal alignment from first paragraph in cell
+            # Horizontal alignment is a paragraph property, not cell property
+            if cell.paragraphs:
+                first_para = cell.paragraphs[0]
+                if first_para.alignment is not None:
+                    # Map WD_PARAGRAPH_ALIGNMENT to string
+                    alignment_map = {
+                        WD_PARAGRAPH_ALIGNMENT.LEFT: 'left',
+                        WD_PARAGRAPH_ALIGNMENT.CENTER: 'center',
+                        WD_PARAGRAPH_ALIGNMENT.RIGHT: 'right',
+                        WD_PARAGRAPH_ALIGNMENT.JUSTIFY: 'left',  # Map justify to left for simplicity
+                        WD_PARAGRAPH_ALIGNMENT.DISTRIBUTE: 'left'
+                    }
+                    format_info['horizontal_align'] = alignment_map.get(
+                        first_para.alignment,
+                        'left'
+                    )
+
+            return format_info
+
+        except Exception as e:
+            print(f"Error getting cell format: {str(e)}")
+            # Return default format on error
+            return format_info
 
     # ===== UTILITY FUNCTIONS =====
 

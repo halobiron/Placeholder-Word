@@ -262,7 +262,11 @@ def _execute_format_op(editor: DocxFullEditor, op: Operation) -> None:
 
     if op.type == "format_text":
         if not editor.apply_format_at_position(
-            op.selected_text, para_index, op.start_offset, op.end_offset, **format_kwargs
+            op.selected_text,
+            para_index,
+            start_offset=op.start_offset,
+            end_offset=op.end_offset,
+            **format_kwargs
         ):
             raise ValueError(f"Failed to format text")
     else:
