@@ -245,6 +245,163 @@ function App() {
     return editedBlock ? parseInt(editedBlock.getAttribute('data-block-index')) : null
   }
 
+  // Helper: Get selection context when selection stays within a single editable block
+  const getSingleBlockSelectionContext = (range) => {
+    const getElement = (node) => (node?.nodeType === Node.TEXT_NODE ? node.parentElement : node)
+
+    const startElement = getElement(range.startContainer)
+    const endElement = getElement(range.endContainer)
+    const startBlock = startElement?.closest('[data-block-index], .cell-paragraph')
+    const endBlock = endElement?.closest('[data-block-index], .cell-paragraph')
+
+    if (!startBlock || !endBlock || startBlock !== endBlock) {
+      return null
+    }
+
+    if (startBlock.classList.contains('cell-paragraph')) {
+      const cellBlock = startBlock.closest('[data-block-index]')
+      if (!cellBlock) return null
+
+      return {
+        targetElement: startBlock,
+        blockIndex: parseInt(cellBlock.getAttribute('data-block-index')),
+        paraInCell: parseInt(startBlock.getAttribute('data-para-in-cell')),
+        tableIndex: parseInt(cellBlock.getAttribute('data-table-index') || '0'),
+        rowIndex: parseInt(cellBlock.getAttribute('data-row')),
+        colIndex: parseInt(cellBlock.getAttribute('data-col'))
+      }
+    }
+
+    return {
+      targetElement: startBlock,
+      blockIndex: parseInt(startBlock.getAttribute('data-block-index'))
+    }
+  }
+
+  // Helper: Calculate selection offsets within a block using the rendered text,
+  // including placeholder labels because backend offsets count «field_name».
+  const calculateSelectionOffsets = (range, targetElement) => {
+    try {
+      const startRange = document.createRange()
+      startRange.selectNodeContents(targetElement)
+      startRange.setEnd(range.startContainer, range.startOffset)
+
+      const endRange = document.createRange()
+      endRange.selectNodeContents(targetElement)
+      endRange.setEnd(range.endContainer, range.endOffset)
+
+      return {
+        startOffset: startRange.toString().length,
+        endOffset: endRange.toString().length
+      }
+    } catch (error) {
+      console.error('[DELETE RANGE] Failed to calculate selection offsets:', error)
+      return null
+    }
+  }
+
+  // Helper: Detect whether a selection touches any placeholder span in the target block.
+  const selectionTouchesPlaceholder = (range, targetElement) => {
+    const placeholders = targetElement?.querySelectorAll('.mail-merge-placeholder') || []
+    return Array.from(placeholders).some((placeholder) => {
+      try {
+        return range.intersectsNode(placeholder)
+      } catch (error) {
+        console.warn('[DELETE RANGE] intersectsNode failed for placeholder:', error)
+        return false
+      }
+    })
+  }
+
+  // Helper: place caret by rendered text offset across the whole block,
+  // treating placeholders as atomic non-editable nodes.
+  const setCaretAtRenderedOffset = (targetBlock, desiredOffset) => {
+    const range = document.createRange()
+    const selection = window.getSelection()
+    let currentOffset = 0
+
+    const placeAtNodeBoundary = (node, position) => {
+      if (position === 'before') {
+        range.setStartBefore(node)
+      } else {
+        range.setStartAfter(node)
+      }
+      range.collapse(true)
+      return true
+    }
+
+    const walkNode = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const textLength = node.textContent?.length || 0
+        if (desiredOffset <= currentOffset + textLength) {
+          range.setStart(node, Math.max(0, Math.min(desiredOffset - currentOffset, textLength)))
+          range.collapse(true)
+          return true
+        }
+        currentOffset += textLength
+        return false
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) {
+        return false
+      }
+
+      const isAtomicPlaceholder = node.classList?.contains('mail-merge-placeholder') ||
+        node.getAttribute?.('contenteditable') === 'false'
+
+      if (isAtomicPlaceholder) {
+        const atomicLength = node.textContent?.length || 0
+
+        if (desiredOffset <= currentOffset) {
+          return placeAtNodeBoundary(node, 'before')
+        }
+
+        if (desiredOffset < currentOffset + atomicLength) {
+          const relativeOffset = desiredOffset - currentOffset
+          const snapAfter = relativeOffset >= atomicLength / 2
+          return placeAtNodeBoundary(node, snapAfter ? 'after' : 'before')
+        }
+
+        if (desiredOffset === currentOffset + atomicLength) {
+          return placeAtNodeBoundary(node, 'after')
+        }
+
+        currentOffset += atomicLength
+        return false
+      }
+
+      for (const child of node.childNodes) {
+        if (walkNode(child)) {
+          return true
+        }
+      }
+
+      return false
+    }
+
+    for (const child of targetBlock.childNodes) {
+      if (walkNode(child)) {
+        selection.removeAllRanges()
+        selection.addRange(range)
+        return true
+      }
+    }
+
+    range.selectNodeContents(targetBlock)
+    range.collapse(false)
+    selection.removeAllRanges()
+    selection.addRange(range)
+    return false
+  }
+
+  const getCursorTargetSelector = ({ blockIndex, paraInCell, tableIndex, rowIndex, colIndex }) => {
+    if (tableIndex !== undefined && rowIndex !== undefined && colIndex !== undefined) {
+      return `[data-block-index="${blockIndex}"] .cell-paragraph[data-para-in-cell="${paraInCell || 0}"]`
+    }
+
+    return `[data-block-index="${blockIndex}"]`
+  }
+
   // Helper: Calculate cursor offset within a block (excluding placeholders)
   const calculateCursorOffset = (range, blockIndex) => {
     try {
@@ -358,49 +515,20 @@ function App() {
       // Set cursor to target if provided
       if (cursorTarget) {
         try {
-          const { blockIndex, paraInCell, tableIndex, rowIndex, colIndex, offset } = cursorTarget
-
-          let targetSelector = ''
-
-          // Build selector based on cursor target type
-          if (tableIndex !== undefined && rowIndex !== undefined && colIndex !== undefined) {
-            // Table cell paragraph
-            targetSelector = `[data-block-index="${blockIndex}"] .cell-paragraph[data-para-in-cell="${paraInCell || 0}"]`
-          } else {
-            // Regular paragraph
-            targetSelector = `[data-block-index="${blockIndex}"]`
-          }
-
+          const { blockIndex, paraInCell, offset } = cursorTarget
+          const targetSelector = getCursorTargetSelector(cursorTarget)
           const targetBlock = updatedEditor.querySelector(targetSelector)
 
           if (targetBlock) {
-            const range = document.createRange()
-            const selection = window.getSelection()
-
-            // Try to find a suitable text node
-            const textNodes = Array.from(targetBlock.childNodes)
-              .filter(node => node.nodeType === Node.TEXT_NODE)
-
-            if (textNodes.length > 0) {
-              // Use first text node
-              const targetNode = textNodes[0]
-              const targetOffset = offset !== undefined ? Math.min(offset, targetNode.textContent.length) : 0
-              range.setStart(targetNode, targetOffset)
-              range.collapse(true)
-            } else {
-              // No text node, set at start of block
-              range.setStart(targetBlock, 0)
-              range.collapse(true)
-            }
-
-            selection.removeAllRanges()
-            selection.addRange(range)
+            const resolvedOffset = offset !== undefined ? Math.max(0, offset) : 0
+            const placedInsideFlow = setCaretAtRenderedOffset(targetBlock, resolvedOffset)
 
             console.log('[DEBUG] Cursor set to:', {
               selector: targetSelector,
               blockIndex,
               paraInCell,
-              offset
+              offset: resolvedOffset,
+              placedInsideFlow
             })
           } else {
             console.warn('[DEBUG] Could not find target block:', targetSelector)
@@ -2464,38 +2592,25 @@ function App() {
                                 // The new paragraph should be after the block we just edited
                                 // For regular paragraphs: find block with index = params.blockIndex + 1
                                 // For table cells: find cell paragraph with paraInCell = params.paraInCell + 1
-                                let targetSelector = ''
+                                let cursorTarget = null
                                 if (params.tableIndex !== undefined && params.rowIndex !== undefined && params.colIndex !== undefined) {
-                                  // Table cell paragraph
-                                  const newParaInCell = (params.paraInCell || 0) + 1
-                                  targetSelector = `[data-block-index="${params.blockIndex}"] .cell-paragraph[data-para-in-cell="${newParaInCell}"]`
+                                  cursorTarget = {
+                                    blockIndex: params.blockIndex,
+                                    paraInCell: (params.paraInCell || 0) + 1,
+                                    tableIndex: params.tableIndex,
+                                    rowIndex: params.rowIndex,
+                                    colIndex: params.colIndex
+                                  }
                                 } else {
-                                  // Regular paragraph
-                                  const newBlockIndex = params.blockIndex + 1
-                                  targetSelector = `[data-block-index="${newBlockIndex}"]`
+                                  cursorTarget = {
+                                    blockIndex: params.blockIndex + 1
+                                  }
                                 }
 
+                                const targetSelector = getCursorTargetSelector(cursorTarget)
                                 const targetBlock = updatedEditor.querySelector(targetSelector)
                                 if (targetBlock) {
-                                  // Set cursor at start of new paragraph
-                                  const range = document.createRange()
-                                  const selection = window.getSelection()
-
-                                  // Find first text node or create range at start
-                                  const firstTextNode = Array.from(targetBlock.childNodes)
-                                    .find(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim().length > 0)
-
-                                  if (firstTextNode) {
-                                    range.setStart(firstTextNode, 0)
-                                    range.collapse(true)
-                                  } else {
-                                    // No text node found, set range at start of block
-                                    range.setStart(targetBlock, 0)
-                                    range.collapse(true)
-                                  }
-
-                                  selection.removeAllRanges()
-                                  selection.addRange(range)
+                                  setCaretAtRenderedOffset(targetBlock, 0)
                                   console.log('[DEBUG] Set cursor to new paragraph:', targetSelector)
                                 } else {
                                   console.log('[DEBUG] Could not find new paragraph with selector:', targetSelector)
@@ -2520,6 +2635,65 @@ function App() {
                       const selection = window.getSelection()
                       if (selection.rangeCount > 0) {
                         const range = selection.getRangeAt(0)
+
+                        const singleBlockSelection = !range.collapsed
+                          ? getSingleBlockSelectionContext(range)
+                          : null
+
+                        if (
+                          singleBlockSelection &&
+                          !Number.isNaN(singleBlockSelection.blockIndex) &&
+                          selectionTouchesPlaceholder(range, singleBlockSelection.targetElement)
+                        ) {
+                          e.preventDefault()
+
+                          try {
+                            const offsets = calculateSelectionOffsets(range, singleBlockSelection.targetElement)
+                            if (!offsets || offsets.endOffset <= offsets.startOffset) {
+                              console.warn('[DELETE RANGE] Invalid offsets for placeholder-aware deletion:', {
+                                selectionText: selection.toString(),
+                                offsets,
+                                context: singleBlockSelection
+                              })
+                              return
+                            }
+
+                            const operation = {
+                              type: 'delete_text_range',
+                              block_index: singleBlockSelection.blockIndex,
+                              start_offset: offsets.startOffset,
+                              end_offset: offsets.endOffset,
+                              ...(singleBlockSelection.paraInCell !== undefined && {
+                                para_in_cell: singleBlockSelection.paraInCell
+                              })
+                            }
+
+                            console.log('[DELETE RANGE] Placeholder-aware deletion:', {
+                              key: e.key,
+                              selectionText: selection.toString(),
+                              operation,
+                              context: singleBlockSelection
+                            })
+
+                            const result = await batchUpdate(templateId, [operation], false, true)
+                            updateEditorHtmlWithPreservation(
+                              result.html_preview,
+                              result.fields,
+                              {
+                                ...singleBlockSelection,
+                                offset: offsets.startOffset
+                              }
+                            )
+                            setError('✅ Đã xóa đoạn chứa placeholder!')
+                            setTimeout(() => setError(null), 2000)
+                            return
+                          } catch (err) {
+                            console.error('[DELETE RANGE] Placeholder-aware deletion failed:', err)
+                            setError('⚠️ Xóa đoạn chứa placeholder thất bại: ' + (err.response?.data?.detail || err.message))
+                            setTimeout(() => setError(null), 4000)
+                            return
+                          }
+                        }
 
                         // Check if user is selecting multiple blocks (not just text)
                         const isMultipleBlockSelection = () => {
@@ -3059,13 +3233,11 @@ function App() {
                         console.log('[DELETE PLACEHOLDERS] Batch update result:', result)
                         console.log('[DELETE PLACEHOLDERS] Remaining fields:', result.fields)
 
-                        // CRITICAL: Do NOT update editorHtml from backend response!
-                        // UI already has text changes applied. Backend html_preview would override them.
-                        // Only update fields list to reflect deleted placeholders.
-                        console.log('[DELETE PLACEHOLDERS] Preserving UI editorHtml (text changes already applied)')
-
-                        // Update state from backend response
-                        setFields(result.fields || newFields)
+                        // Always trust backend preview after placeholder deletion.
+                        // Otherwise export/preview can drift when the DOM changed locally
+                        // but the DOCX only deleted the field.
+                        console.log('[DELETE PLACEHOLDERS] Syncing editor with backend html_preview')
+                        updateEditorHtmlWithPreservation(result.html_preview, result.fields || newFields)
                         
                         // Show success message with field details
                         const deletedList = deletedFields.map(f => `«${f}»`).join(', ')

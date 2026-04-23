@@ -239,9 +239,18 @@ def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
             raise ValueError(f"Invalid para_in_cell")
 
     if op.type == "update_text":
+        logger.info(
+            "Executing update_text: block_index=%s para_index=%s para_in_cell=%s old_len=%s new_len=%s",
+            op.block_index, para_index, op.para_in_cell,
+            len(op.old_text or ""), len(op.new_text or "")
+        )
         if not editor.replace_text_at_position(op.old_text, op.new_text, para_index):
             raise ValueError(f"Failed to update text")
     elif op.type == "delete_text_range":
+        logger.info(
+            "Executing delete_text_range: block_index=%s para_index=%s para_in_cell=%s start=%s end=%s",
+            op.block_index, para_index, op.para_in_cell, op.start_offset, op.end_offset
+        )
         target_paragraph = get_paragraph_at_index(editor, para_index)
         if target_paragraph:
             if not editor.delete_text_range(target_paragraph, op.start_offset, op.end_offset):

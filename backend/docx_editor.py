@@ -66,18 +66,46 @@ class DocxFullEditor:
         normalized = self._normalize_text(text)
         return re.sub(r'«[^»]+»', '', normalized).strip()
 
-    def _clear_segment_text(self, seg: dict) -> None:
-        """Clear all text in a segment."""
-        element = seg['element']
-        if element.tag.split('}')[1] == 'r':
-            for t_elem in element.findall(f"{self.w_ns}t"):
-                t_elem.text = ""
+    def _modify_segment_text(self, seg: dict, mode: str, text: str = "", start_idx: int = None, end_idx: int = None, success_msg: str = None) -> bool:
+        """
+        Modify text within a document segment.
+        Modes:
+        - "clear": Clears all text
+        - "set": Replaces the first text element's content
+        - "replace": Replaces a specific range in the first text element
+        """
+        element = seg.get('element')
+        if element is None or element.tag.split('}')[1] != 'r':
+            return False
 
-    def _replace_text_in_range(self, text: str, start: int, end: int, new_text: str) -> str:
-        """Replace text in range [start, end) with new_text."""
-        end_clamped = min(end, len(text))
-        suffix = text[end_clamped:] if end_clamped < len(text) else ""
-        return text[:start] + new_text + suffix
+        t_elements = element.findall(f"{self.w_ns}t")
+        if not t_elements:
+            return False
+
+        if mode == "clear":
+            for t_elem in t_elements:
+                t_elem.text = ""
+            return True
+
+        if mode == "set":
+            t_elements[0].text = text
+            return True
+
+        if mode == "replace" and start_idx is not None and end_idx is not None:
+            t_elem = t_elements[0]
+            original_text = t_elem.text if t_elem.text else ""
+            seg_start = seg['start_pos']
+            # Calculate relative positions within segment
+            pos_start_in_seg = max(0, start_idx - seg_start)
+            pos_end_in_seg = end_idx - seg_start
+
+            # Replace text using safe slicing
+            t_elem.text = original_text[:pos_start_in_seg] + text + original_text[pos_end_in_seg:]
+            if success_msg:
+                print(f"[REPLACE] ✓ {success_msg}")
+            return True
+
+        return False
 
     def _validate_placeholder_structure(self, old_parts: list, new_parts: list) -> bool:
         """Check if placeholder structure matches between old and new text."""
@@ -87,84 +115,112 @@ class DocxFullEditor:
         new_placeholders = new_parts[1::2]
         return old_placeholders == new_placeholders
 
-    def _replace_simple_segments(self, target_segments: list, start_idx: int,
-                                  end_idx: int, new_text: str) -> bool:
-        """Handle simple case: single or multiple non-field segments."""
+    def _replace_text_in_segments(self, target_segments: list, start_idx: int,
+                                   end_idx: int, new_text: str,
+                                   success_msg: str = "Success (text replaced)") -> bool:
+        """
+        Unified text replacement for segments (simple or placeholder change cases).
+        Handle simple case: single or multiple non-field segments.
+        Clears all segments after the first, then replaces the first segment.
+        """
         first_non_field_seg = None
         for seg in target_segments:
             if not seg['is_field']:
                 if first_non_field_seg is None:
                     first_non_field_seg = seg
                 else:
-                    self._clear_segment_text(seg)
+                    self._modify_segment_text(seg, "clear")
 
         if not first_non_field_seg:
             return False
 
-        element = first_non_field_seg['element']
-        if element.tag.split('}')[1] == 'r':
-            t_elements = element.findall(f"{self.w_ns}t")
-            if t_elements:
-                t_elem = t_elements[0]
-                original_text = t_elem.text if t_elem.text else ""
-                seg_start = first_non_field_seg['start_pos']
-                pos_in_seg = max(0, start_idx - seg_start)
-                seg_end_pos = end_idx - seg_start
+        return self._modify_segment_text(first_non_field_seg, "replace",
+                                         text=new_text, start_idx=start_idx,
+                                         end_idx=end_idx, success_msg=success_msg)
 
-                t_elem.text = self._replace_text_in_range(original_text, pos_in_seg, seg_end_pos, new_text)
-                print(f"[REPLACE] ✓ Success (single/multiple segments)")
-                return True
-        return False
+    def _get_segment_rpr(self, seg: dict):
+        """Get run properties element from a text or merge-field segment."""
+        element = seg.get('element')
+        if element is None:
+            return None
 
-    def _replace_placeholder_change(self, target_segments: list, start_idx: int,
-                                     end_idx: int, new_text: str) -> bool:
-        """Handle case where placeholders are being changed/removed."""
-        first_non_field_seg = None
-        for seg in target_segments:
-            if not seg['is_field']:
-                if first_non_field_seg is None:
-                    first_non_field_seg = seg
-                else:
-                    self._clear_segment_text(seg)
+        tag_name = element.tag.split('}')[1] if '}' in element.tag else element.tag
+        if tag_name == 'r':
+            return element.find(f"{self.w_ns}rPr")
+        if tag_name == 'fldSimple':
+            nested_r = element.find(f"{self.w_ns}r")
+            if nested_r is not None:
+                return nested_r.find(f"{self.w_ns}rPr")
+        return None
 
-        if not first_non_field_seg:
-            return False
+    def _insert_text_segment(self, paragraph: Paragraph, insert_index: int,
+                             text: str, format_sources: list) -> None:
+        """Insert a new text run at a specific XML index while preserving nearby format."""
+        if not text:
+            return
 
-        element = first_non_field_seg['element']
-        if element.tag.split('}')[1] == 'r':
-            t_elements = element.findall(f"{self.w_ns}t")
-            if t_elements:
-                t_elem = t_elements[0]
-                original_text = t_elem.text if t_elem.text else ""
-                seg_start = first_non_field_seg['start_pos']
-                pos_in_seg = max(0, start_idx - seg_start)
-                seg_end_pos = end_idx - seg_start
+        rpr_element = None
+        for source in format_sources:
+            if source is None:
+                continue
+            rpr_element = self._get_segment_rpr(source)
+            if rpr_element is not None:
+                break
 
-                t_elem.text = self._replace_text_in_range(original_text, pos_in_seg, seg_end_pos, new_text)
-                print(f"[REPLACE] ✓ Success (placeholder changed)")
-                return True
-        return False
+        new_run = self._create_run_with_format(paragraph, rpr_element, text)
+        paragraph._element.remove(new_run._element)
+        paragraph._element.insert(insert_index, new_run._element)
 
-    def _replace_text_between_placeholders(self, target_segments: list,
+    def _replace_text_between_placeholders(self, paragraph: Paragraph, target_segments: list,
                                             old_parts: list, new_parts: list,
                                             start_idx: int) -> bool:
         """Replace text between placeholders while preserving placeholder structure."""
+        field_segments = [seg for seg in target_segments if seg['is_field']]
+        text_part_to_seg = {}
         text_part_idx = 0
+
         for seg in target_segments:
             if not seg['is_field']:
-                part_idx = text_part_idx * 2
-                if part_idx < len(old_parts):
-                    old_part = old_parts[part_idx]
-                    new_part = new_parts[part_idx]
-
-                    if old_part != new_part:
-                        element = seg['element']
-                        if element.tag.split('}')[1] == 'r':
-                            t_elements = element.findall(f"{self.w_ns}t")
-                            if t_elements:
-                                t_elements[0].text = new_part
-                                print(f"[REPLACE] ✓ Updated text part {text_part_idx}: '{old_part}' -> '{new_part}'")
+                text_part_to_seg[text_part_idx] = seg
+            else:
                 text_part_idx += 1
+
+        total_text_parts = (len(old_parts) + 1) // 2
+        for text_part_idx in range(total_text_parts):
+            part_idx = text_part_idx * 2
+            if part_idx >= len(old_parts) or part_idx >= len(new_parts):
+                continue
+
+            old_part = old_parts[part_idx]
+            new_part = new_parts[part_idx]
+            existing_seg = text_part_to_seg.get(text_part_idx)
+
+            if existing_seg is not None:
+                if old_part != new_part:
+                    if self._modify_segment_text(existing_seg, "set", text=new_part):
+                        print(f"[REPLACE] ✓ Updated text part {text_part_idx}: '{old_part}' -> '{new_part}'")
+                continue
+
+            if not new_part:
+                continue
+
+            if text_part_idx == 0:
+                anchor_seg = target_segments[0]
+                insert_index = list(paragraph._element).index(anchor_seg['element'])
+                format_sources = [anchor_seg]
+            else:
+                previous_field = field_segments[text_part_idx - 1]
+                previous_field_index = list(paragraph._element).index(previous_field['element'])
+                insert_index = previous_field_index + 1
+                next_field = field_segments[text_part_idx] if text_part_idx < len(field_segments) else None
+                format_sources = [
+                    text_part_to_seg.get(text_part_idx - 1),
+                    previous_field,
+                    next_field
+                ]
+
+            self._insert_text_segment(paragraph, insert_index, new_part, format_sources)
+            print(f"[REPLACE] ✓ Inserted missing text part {text_part_idx}: '{new_part}'")
 
         print(f"[REPLACE] ✓ Success (text between placeholders)")
         return True
@@ -570,16 +626,18 @@ class DocxFullEditor:
                 # Validate placeholder structure
                 if self._validate_placeholder_structure(old_parts, new_parts):
                     print(f"[REPLACE] Placeholders match: {old_parts[1::2]}")
-                    return self._replace_text_between_placeholders(target_segments, old_parts, new_parts, start_idx)
+                    return self._replace_text_between_placeholders(paragraph, target_segments, old_parts, new_parts, start_idx)
                 else:
                     print(f"[REPLACE] Warning: Placeholder structure differs")
                     print(f"[REPLACE]   Old placeholders: {re.findall(placeholder_pattern, old_text)}")
                     print(f"[REPLACE]   New placeholders: {re.findall(placeholder_pattern, new_text)}")
                     print(f"[REPLACE] Placeholder change detected, using minimax pattern")
-                    return self._replace_placeholder_change(target_segments, start_idx, end_idx, new_text)
+                    return self._replace_text_in_segments(target_segments, start_idx, end_idx, new_text,
+                                                          success_msg="Success (placeholder changed)")
 
             # Perform replacement - simple case (no fields in target)
-            if self._replace_simple_segments(target_segments, start_idx, end_idx, new_text):
+            if self._replace_text_in_segments(target_segments, start_idx, end_idx, new_text,
+                                              success_msg="Success (single/multiple segments)"):
                 print(f"[REPLACE] ===== TEXT REPLACE END (SUCCESS) =====")
                 return True
 
@@ -1421,6 +1479,25 @@ class DocxFullEditor:
                         })
                         current_pos += len(field_text)
 
+            full_text_before = "".join(seg['text'] for seg in text_segments)
+            print(
+                f"[DELETE_TEXT_RANGE] Request start={start_offset} end={end_offset} "
+                f"paragraph='{full_text_before}'"
+            )
+            print(
+                "[DELETE_TEXT_RANGE] Segments: "
+                + str([
+                    {
+                        'text': seg['text'],
+                        'is_field': seg['is_field'],
+                        'field_name': seg.get('field_name'),
+                        'start_pos': seg['start_pos'],
+                        'end_pos': seg['end_pos']
+                    }
+                    for seg in text_segments
+                ])
+            )
+
             # Find which segments intersect with delete range
             segments_to_delete = []
             for seg in text_segments:
@@ -1446,33 +1523,14 @@ class DocxFullEditor:
                         print(f"[DELETE_TEXT_RANGE] Removed placeholder '{seg['field_name']}' at offset {seg['start_pos']}-{seg['end_pos']}")
                 else:
                     # This is a regular run - modify its text
-                    element = seg['element']
-                    run_text = seg['text']
-
-                    # Calculate intersection with delete range
-                    seg_start = seg['start_pos']
-                    seg_end = seg['end_pos']
-
-                    # Calculate how much to delete from this run
-                    delete_start = max(start_offset - seg_start, 0)
-                    delete_end = min(end_offset - seg_start, len(run_text))
-
-                    if delete_end <= delete_start:
-                        # No overlap (shouldn't happen given our intersection check)
-                        continue
-
-                    # Use helper to replace text in range with empty string (delete)
-                    new_text = self._replace_text_in_range(run_text, delete_start, delete_end, "")
-
-                    # Find all w:t elements in this run and update the first one
-                    t_elements = element.findall(f"{w_ns}t")
-                    if t_elements:
-                        t_elements[0].text = new_text
+                    if self._modify_segment_text(seg, "replace", text="", start_idx=start_offset, end_idx=end_offset):
                         deleted_any = True
 
             # Clean up empty runs after deletion
             if deleted_any:
                 self._remove_empty_runs(paragraph)
+                full_text_after, _ = self._extract_paragraph_full_text(paragraph)
+                print(f"[DELETE_TEXT_RANGE] Result paragraph='{full_text_after}'")
 
             return deleted_any
 
