@@ -6,6 +6,7 @@ import re
 import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
+from lxml.etree import _Element as Element
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Twips
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT, WD_BREAK
@@ -16,6 +17,24 @@ from docx.oxml.table import CT_Tbl
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from lxml import etree
+
+
+# Alignment mappings - centralized to avoid duplication
+ALIGNMENT_STRING_TO_ENUM = {
+    "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
+    "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
+    "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
+    "justify": WD_PARAGRAPH_ALIGNMENT.JUSTIFY,
+    "both": WD_PARAGRAPH_ALIGNMENT.JUSTIFY,  # XML value for justify in w:jc/@w:val
+}
+
+ALIGNMENT_ENUM_TO_STRING = {
+    WD_PARAGRAPH_ALIGNMENT.LEFT: 'left',
+    WD_PARAGRAPH_ALIGNMENT.CENTER: 'center',
+    WD_PARAGRAPH_ALIGNMENT.RIGHT: 'right',
+    WD_PARAGRAPH_ALIGNMENT.JUSTIFY: 'left',  # Simplified mapping (from existing code)
+    WD_PARAGRAPH_ALIGNMENT.DISTRIBUTE: 'left',
+}
 
 
 class DocxFullEditor:
@@ -861,6 +880,226 @@ class DocxFullEditor:
         text_after = run.text[split_pos:]
         return text_before, text_after
 
+    def _find_paragraph_by_index(self, paragraph_index: int):
+        """
+        Find paragraph by index using document order iterator.
+
+        Reused in: insert_placeholder_at_offset, add_table_at_cursor
+
+        Args:
+            paragraph_index: Index of paragraph (from all paragraphs iterator)
+
+        Returns:
+            Paragraph object or None if not found
+        """
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if p_idx == paragraph_index:
+                return paragraph
+        return None
+
+    def _build_run_text_map(self, paragraph) -> List[Dict]:
+        """
+        Build mapping of runs to their text positions in paragraph.
+
+        Reused in: insert_placeholder_at_offset, add_table_at_cursor
+
+        Args:
+            paragraph: Paragraph object
+
+        Returns:
+            List of dicts with keys: run, start, end, text
+        """
+        run_text_map = []
+        current_offset = 0
+        for run in paragraph.runs:
+            if run.text:
+                text_len = len(run.text)
+                run_text_map.append({
+                    'run': run,
+                    'start': current_offset,
+                    'end': current_offset + text_len,
+                    'text': run.text
+                })
+                current_offset += text_len
+        return run_text_map
+
+    def _find_run_at_offset(self, run_text_map: List[Dict], offset: int) -> Optional[Dict]:
+        """
+        Find which run contains the given offset.
+
+        Args:
+            run_text_map: List from _build_run_text_map
+            offset: Character offset to find
+
+        Returns:
+            Run info dict or None
+        """
+        for run_info in run_text_map:
+            if run_info['start'] <= offset <= run_info['end']:
+                return run_info
+        return None
+
+    def _read_alignment_from_xml(self, p_element) -> Optional[WD_PARAGRAPH_ALIGNMENT]:
+        """
+        Read paragraph alignment directly from XML (avoids object property issues).
+
+        Reused in: empty paragraph case, same cell alignment search
+
+        Args:
+            p_element: Paragraph XML element
+
+        Returns:
+            WD_PARAGRAPH_ALIGNMENT or None
+        """
+        try:
+            pPr = p_element.find(f"{self.w_ns}pPr")
+            if pPr is not None:
+                jc = pPr.find(f"{self.w_ns}jc")
+                if jc is not None:
+                    jc_val = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+                    return ALIGNMENT_STRING_TO_ENUM.get(jc_val)
+        except Exception:
+            pass
+        return None
+
+    def _find_alignment_in_same_cell(self, p_element) -> Optional[WD_PARAGRAPH_ALIGNMENT]:
+        """
+        Find alignment from another paragraph in the same table cell.
+
+        Args:
+            p_element: Current paragraph XML element
+
+        Returns:
+            WD_PARAGRAPH_ALIGNMENT or None
+        """
+        try:
+            parent_tc = None
+            current = p_element
+            while current is not None:
+                if current.tag == f"{self.w_ns}tc":
+                    parent_tc = current
+                    break
+                current = current.getparent()
+
+            if parent_tc is not None:
+                cell_paras = parent_tc.findall(f"{self.w_ns}p")
+                for cell_para_xml in cell_paras:
+                    if cell_para_xml == p_element:
+                        continue
+                    alignment = self._read_alignment_from_xml(cell_para_xml)
+                    if alignment is not None:
+                        return alignment
+        except Exception:
+            pass
+        return None
+
+    def _get_format_from_previous_paragraph(self, target_para) -> tuple:
+        """
+        Get run format and alignment from previous paragraph in document.
+
+        Args:
+            target_para: Current paragraph object
+
+        Returns:
+            (rpr_element, alignment) tuple
+        """
+        original_rpr = None
+        original_alignment = None
+        try:
+            all_paras = list(self._iterate_paragraphs_in_doc_order())
+            current_idx = None
+            for idx, para in enumerate(all_paras):
+                if para._element == target_para._element:
+                    current_idx = idx
+                    break
+
+            if current_idx is not None and current_idx > 0:
+                prev_para = all_paras[current_idx - 1]
+                for run in prev_para.runs:
+                    rpr = run._r.get_or_add_rPr()
+                    if rpr is not None and len(list(rpr)) > 0:
+                        original_rpr = rpr
+                        break
+                if prev_para.alignment is not None:
+                    original_alignment = prev_para.alignment
+        except Exception:
+            pass
+
+        return original_rpr, original_alignment
+
+    def _get_format_from_previous_run(self, run_text_map: List[Dict], target_run) -> Optional[Element]:
+        """
+        Find format from previous non-placeholder run.
+
+        Args:
+            run_text_map: List from _build_run_text_map
+            target_run: Current run to skip when searching
+
+        Returns:
+            rpr element or None
+        """
+        for i in range(len(run_text_map) - 1, -1, -1):
+            prev_run_info = run_text_map[i]
+            if prev_run_info['run'] == target_run:
+                continue
+
+            run_text = prev_run_info['text'] or ''
+            is_placeholder = '«' in run_text and '»' in run_text
+
+            if not is_placeholder and run_text.strip():
+                prev_rpr = prev_run_info['run']._r.get_or_add_rPr()
+                if prev_rpr is not None and len(list(prev_rpr)) > 0:
+                    return prev_rpr
+        return None
+
+    def _insert_placeholder_to_empty_paragraph(
+        self, target_para, p_element, field_name: str, paragraph_index: int
+    ) -> bool:
+        """
+        Handle placeholder insertion into empty paragraph.
+
+        Args:
+            target_para: Empty paragraph object
+            p_element: Paragraph XML element
+            field_name: Merge field name
+            paragraph_index: For debug logging
+
+        Returns:
+            True if successful
+        """
+        from docx.oxml import parse_xml
+
+        placeholder_text = f"«{field_name}»"
+
+        # Read current alignment
+        current_alignment = self._read_alignment_from_xml(p_element)
+        if current_alignment is None:
+            current_alignment = target_para.alignment
+
+        # Get format from previous paragraph or use default
+        original_rpr, original_alignment = self._get_format_from_previous_paragraph(target_para)
+
+        if original_rpr is None:
+            default_rpr_xml = '<w:rPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'
+            original_rpr = parse_xml(default_rpr_xml)
+
+        # Create placeholder with MERGEFIELD structure
+        placeholder_run = self._create_run_with_format(target_para, original_rpr, placeholder_text)
+        fld = OxmlElement('w:fldSimple')
+        fld.set(qn('w:instr'), f' MERGEFIELD {field_name} \\* MERGEFORMAT \\z "" ')
+        fld.append(placeholder_run._element)
+        p_element.insert(0, fld)
+
+        # Set final alignment priority: current > same cell > previous > default
+        if current_alignment is None:
+            current_alignment = self._find_alignment_in_same_cell(p_element)
+
+        final_alignment = current_alignment if current_alignment is not None else original_alignment
+        if final_alignment is not None:
+            target_para.alignment = final_alignment
+
+        return True
+
     def _handle_boolean_formats(self, bold=None, italic=None, underline=None,
                                 strikethrough=None, all_caps=None, *, rpr=None):
         """
@@ -1004,8 +1243,6 @@ class DocxFullEditor:
             bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
             all_caps: All caps formatting
         """
-        w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-
         skip_props = self._handle_boolean_formats(bold, italic, underline)
 
         # Group runs by hyperlink element
@@ -1022,7 +1259,7 @@ class DocxFullEditor:
                 hyperlink_groups[id(hl_element)]['runs'].append(run_info)
 
         # Process each hyperlink group
-        for hl_id, hl_group in hyperlink_groups.items():
+        for hl_group in hyperlink_groups.values():
             hl_element = hl_group['hyperlink_element']
             group_runs = hl_group['runs']
 
@@ -1088,28 +1325,7 @@ class DocxFullEditor:
         Returns:
             New Run object (not yet added to paragraph, just XML element created)
         """
-        from docx.oxml import OxmlElement
-
-        # Create run element
-        new_run = OxmlElement('w:r')
-
-        # Copy format properties
-        if rpr_element is not None:
-            new_rpr = copy.deepcopy(rpr_element)
-
-            # Remove skipped properties
-            if skip_props:
-                for prop in skip_props:
-                    for child in new_rpr.findall(f'{self.w_ns}{prop}'):
-                        new_rpr.remove(child)
-
-            new_run.append(new_rpr)
-
-        # Add text
-        new_t = OxmlElement('w:t')
-        new_t.set(qn('xml:space'), 'preserve')
-        new_t.text = text
-        new_run.append(new_t)
+        new_run = self._create_run_element(text, rpr_element, skip_props=skip_props)
 
         # Insert into hyperlink element
         hyperlink_element.insert(insert_offset, new_run)
@@ -1121,7 +1337,51 @@ class DocxFullEditor:
                 self._element = element
                 self.text = text
 
+            @property
+            def _r(self):
+                return self._element
+
         return SimpleRun(new_run)
+
+
+    def _copy_run_rpr(self, rpr_element, skip_props: list = None):
+        """Clone run properties while optionally removing specific properties."""
+        if rpr_element is None:
+            return None
+
+        new_rpr = copy.deepcopy(rpr_element)
+        if skip_props:
+            for prop in skip_props:
+                for child in list(new_rpr.findall(f'{self.w_ns}{prop}')):
+                    new_rpr.remove(child)
+        return new_rpr
+
+
+    def _append_rpr_children(self, target_rpr, source_rpr, skip_props: list = None):
+        """Copy run-property children from source to target."""
+        if source_rpr is None:
+            return
+
+        skip_props = skip_props or []
+        for child in source_rpr:
+            prop_tag = child.tag.replace(f'{self.w_ns}', '')
+            if prop_tag in skip_props:
+                continue
+            target_rpr.append(copy.deepcopy(child))
+
+
+    def _create_run_element(self, text: str, rpr_element=None, skip_props: list = None):
+        """Create a raw w:r element with preserved formatting and text."""
+        new_run = OxmlElement('w:r')
+        new_rpr = self._copy_run_rpr(rpr_element, skip_props=skip_props)
+        if new_rpr is not None:
+            new_run.append(new_rpr)
+
+        new_t = OxmlElement('w:t')
+        new_t.set(qn('xml:space'), 'preserve')
+        new_t.text = text
+        new_run.append(new_t)
+        return new_run
 
 
     def _create_run_with_format(self, paragraph, rpr_element, text: str, skip_props: list = None):
@@ -1140,24 +1400,27 @@ class DocxFullEditor:
         new_run = paragraph.add_run(text)
 
         # Copy format properties, excluding specified ones
-        if rpr_element is not None:
-            new_rpr = new_run._r.get_or_add_rPr()
-
-            # Properties to skip when copying (default: empty list, not None)
-            # Use _handle_boolean_formats helper to normalize the parameter
-            if skip_props is None:
-                skip_props = []
-
-            # Copy children except skipped properties
-            for child in rpr_element:
-                # Skip if this property tag is in skip_props
-                prop_tag = child.tag.replace(f'{self.w_ns}', '')
-                if prop_tag not in skip_props:
-                    # Deep copy to avoid reference issues
-                    child_copy = copy.deepcopy(child)
-                    new_rpr.append(child_copy)
+        new_rpr = new_run._r.get_or_add_rPr()
+        self._append_rpr_children(new_rpr, rpr_element, skip_props=skip_props)
 
         return new_run
+
+
+    def _apply_hyperlink_style(self, rpr_element):
+        """Force hyperlink styling onto an rPr element."""
+        if rpr_element is None:
+            rpr_element = OxmlElement('w:rPr')
+
+        for tag_name, value in (('color', '0000FF'), ('u', 'single')):
+            existing = rpr_element.find(f'{self.w_ns}{tag_name}')
+            if existing is not None:
+                rpr_element.remove(existing)
+
+            elem = OxmlElement(f'w:{tag_name}')
+            elem.set(qn('w:val'), value)
+            rpr_element.append(elem)
+
+        return rpr_element
 
     def _toggle_boolean_format(self, rpr, tag_name: str, value: bool, attr_value: str = '1'):
         """
@@ -1234,7 +1497,7 @@ class DocxFullEditor:
             if shd_elem is None:
                 shd_elem = rpr.makeelement(f'{self.w_ns}shd')
                 rpr.append(shd_elem)
-            shd_elem.set(f'{self.w_ns}fill', self._parse_highlight_color(highlight))
+            shd_elem.set(f'{self.w_ns}fill', highlight.lstrip('#').upper())
         elif not highlight or highlight.lower() in ['#ffffff', '#fff']:
             # Remove highlight if explicitly set to white/none
             shd_elem = rpr.find(f'{self.w_ns}shd')
@@ -1300,20 +1563,15 @@ class DocxFullEditor:
         Returns:
             True if found and formatted, False otherwise
         """
-        alignment_map = {
-            "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
-            "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
-            "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
-            "justify": WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-        }
-
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if p_idx != paragraph_index:
                 continue
 
             # Apply alignment
-            if alignment and alignment in alignment_map:
-                paragraph.alignment = alignment_map[alignment]
+            if alignment:
+                alignment_value = ALIGNMENT_STRING_TO_ENUM.get(alignment)
+                if alignment_value is not None:
+                    paragraph.alignment = alignment_value
 
             # Apply line spacing
             if line_spacing is not None:
@@ -1378,6 +1636,13 @@ class DocxFullEditor:
             print(f"[DEBUG] Copied run formatting: font={source_run.font.name}, size={source_run.font.size}, bold={source_run.font.bold}")
         except Exception as e:
             print(f"[DEBUG] Error copying run formatting: {e}")
+
+    def _copy_paragraph_format(self, source, target):
+        """Copy paragraph-level formatting from source to target."""
+        target.alignment = source.alignment
+        target.paragraph_format.space_before = source.paragraph_format.space_before
+        target.paragraph_format.space_after = source.paragraph_format.space_after
+        target.paragraph_format.line_spacing = source.paragraph_format.line_spacing
 
     def delete_text_range(self, paragraph, start_offset: int, end_offset: int):
         """
@@ -1667,7 +1932,8 @@ class DocxFullEditor:
         after_para_index: int = None
     ):
         """
-        Thêm paragraph mới vào table cell
+        Thêm paragraph mới vào table cell.
+        Dùng chung logic với insert_paragraph().
 
         Args:
             table_index: Index của table
@@ -1695,89 +1961,22 @@ class DocxFullEditor:
         cell = row.cells[col_index]
 
         try:
-
+            # Tìm target paragraph
             if after_para_index is not None and after_para_index < len(cell.paragraphs):
-                # Thêm sau một paragraph cụ thể trong cell
                 target_para = cell.paragraphs[after_para_index]
-                target_p_element = target_para._p
-                parent = target_p_element.getparent()
-
-                # Tạo new paragraph element
-                new_p = OxmlElement('w:p')
-
-                # Copy paragraph properties từ target paragraph
-                pPr = target_p_element.find(f"{self.w_ns}pPr")
-                if pPr is not None:
-                    new_p.append(copy.deepcopy(pPr))
-
-                # Copy run properties từ target paragraph
-                source_run_props = None
-                source_run_for_debug = None
-                if target_para.runs:
-                    for run in reversed(target_para.runs):
-                        if run.text and run.text.strip():
-                            run_element = run._element
-                            rPr = run_element.find(f"{self.w_ns}rPr")
-                            if rPr is not None:
-                                source_run_props = rPr
-                                source_run_for_debug = run
-                                print(f"[DEBUG] Found source run props in cell: font={run.font.name}, size={run.font.size}")
-                            break
-
-                # TẠO RUN LUÔN - kể cả khi text rỗng
-                new_r = OxmlElement('w:r')
-
-                # Copy run properties if available
-                if source_run_props is not None:
-                    new_r.append(copy.deepcopy(source_run_props))
-                    print(f"[DEBUG] Copied run props to new run in cell")
-                else:
-                    print(f"[DEBUG] No source run props in cell, using default")
-
-                # Tạo text element - có thể rỗng
-                new_t = OxmlElement('w:t')
-                new_t.set(qn('xml:space'), 'preserve')
-                new_t.text = text
-                new_r.append(new_t)
-                new_p.append(new_r)
-
-                # Insert new paragraph sau target paragraph
-                parent_index = list(parent).index(target_p_element)
-                parent.insert(parent_index + 1, new_p)
             else:
-                # Thêm vào cuối cell - kế thừa format từ paragraph cuối cùng
-                last_para = None
-                for para in cell.paragraphs:
-                    if para.text.strip():
-                        last_para = para
+                # Thêm cuối cell = thêm sau paragraph cuối cùng
+                if not cell.paragraphs:
+                    # Cell rỗng, tạo paragraph đầu tiên
+                    if text:
+                        cell.add_paragraph(text)
+                    else:
+                        cell.add_paragraph()
+                    return True
+                target_para = cell.paragraphs[-1]
 
-                if text:
-                    new_para = cell.add_paragraph(text)
-                else:
-                    new_para = cell.add_paragraph()
-
-                # Inherit formatting from last paragraph
-                if last_para:
-                    new_para.alignment = last_para.alignment
-                    new_para.paragraph_format.space_before = last_para.paragraph_format.space_before
-                    new_para.paragraph_format.space_after = last_para.paragraph_format.space_after
-                    new_para.paragraph_format.line_spacing = last_para.paragraph_format.line_spacing
-
-                    if last_para.runs:
-                        source_run = None
-                        for run in reversed(last_para.runs):
-                            if run.text and run.text.strip():
-                                source_run = run
-                                break
-
-                        if not source_run and last_para.runs:
-                            source_run = last_para.runs[0]
-
-                        if source_run:
-                            for new_run in new_para.runs:
-                                self._copy_run_formatting(source_run, new_run)
-                            print(f"[DEBUG] Copied formatting from last paragraph in cell")
-
+            # Dùng chung logic với insert_paragraph
+            self.insert_paragraph(target_para, text, "after")
             return True
 
         except Exception as e:
@@ -1808,8 +2007,6 @@ class DocxFullEditor:
             ValueError: If parameters are invalid
             RuntimeError: If operation fails
         """
-
-        # Validate inputs
         if paragraph_index < 0:
             raise ValueError(f"Invalid paragraph_index: {paragraph_index} (must be >= 0)")
         if offset < 0:
@@ -1817,215 +2014,21 @@ class DocxFullEditor:
         if not field_name or not field_name.strip():
             raise ValueError("Field name cannot be empty")
 
-        # Find target paragraph
-        target_para = None
-        total_paragraphs = 0
-        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
-            total_paragraphs += 1
-            if p_idx == paragraph_index:
-                target_para = paragraph
-                break
-
+        target_para = self._find_paragraph_by_index(paragraph_index)
         if not target_para:
+            total_paragraphs = sum(1 for _ in self._iterate_paragraphs_in_doc_order())
             raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
 
-        print(f"[DEBUG] Target paragraph found: index={paragraph_index}")
-        print(f"[DEBUG] Paragraph runs count: {len(target_para.runs)}")
-        print(f"[DEBUG] Paragraph text: {repr(target_para.text[:100] if target_para.text else '')}")
-
-        # Build text with run mapping
-        run_text_map = []  # [(run, start_offset, end_offset, text)]
-        current_offset = 0
-
-        for run in target_para.runs:
-            if run.text:
-                text_len = len(run.text)
-                run_text_map.append({
-                    'run': run,
-                    'start': current_offset,
-                    'end': current_offset + text_len,
-                    'text': run.text
-                })
-                current_offset += text_len
-
-        # Find which run contains the offset
-        target_run_info = None
+        run_text_map = self._build_run_text_map(target_para)
         total_text_length = sum(run_info['end'] - run_info['start'] for run_info in run_text_map)
+        target_run_info = self._find_run_at_offset(run_text_map, offset)
 
-        for run_info in run_text_map:
-            if run_info['start'] <= offset <= run_info['end']:
-                target_run_info = run_info
-                break
-
-        # Handle empty paragraph or no valid run found
+        # Handle empty paragraph
         if not target_run_info:
-            para_text = target_para.text
-            para_preview = para_text[:50] + "..." if len(para_text) > 50 else para_text
-
-            print(f"[DEBUG] No target run found. Paragraph text length: {total_text_length}, offset: {offset}")
-            print(f"[DEBUG] Paragraph runs count: {len(target_para.runs)}")
-
-            # Special case: Empty paragraph - always insert at beginning, regardless of offset
-            # Auto-correct offset to 0 for empty paragraphs
             if total_text_length == 0:
-                if offset != 0:
-                    print(f"[DEBUG] WARNING: Offset {offset} is invalid for empty paragraph, auto-correcting to 0")
-                    offset = 0
-                print(f"[DEBUG] Empty paragraph {paragraph_index}, inserting placeholder at beginning")
-
-                # Create placeholder text
-                placeholder_text = f"«{field_name}»"
-
-                # Get paragraph element
                 p_element = target_para._p
-                print(f"[DEBUG] Paragraph element: {p_element.tag}")
-
-                # Store current paragraph alignment before any changes
-                # Read alignment from XML directly to avoid object property issues
-                current_alignment = None
-                try:
-                    # Try to read from paragraph property (w:pPr/w:jc)
-                    pPr = p_element.find(f"{self.w_ns}pPr")
-                    if pPr is not None:
-                        jc = pPr.find(f"{self.w_ns}jc")
-                        if jc is not None:
-                            jc_val = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
-                            alignment_map = {
-                                "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
-                                "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
-                                "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
-                                "both": WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-                            }
-                            current_alignment = alignment_map.get(jc_val)
-                            print(f"[DEBUG] Read alignment from XML: {jc_val} -> {current_alignment}")
-                except Exception as e:
-                    print(f"[DEBUG] Could not read alignment from XML: {e}")
-
-                # Fallback to object property if XML reading failed
-                if current_alignment is None:
-                    current_alignment = target_para.alignment
-                    print(f"[DEBUG] Using object alignment property: {current_alignment}")
-
-                # Try to find format from previous paragraph in document
-                original_rpr = None
-                original_alignment = None
-                try:
-                    # Look for previous paragraph with format
-                    # CRITICAL FIX: Compare by _element, not object identity!
-                    # Paragraph() creates new objects each time, so .index() fails
-                    all_paras = list(self._iterate_paragraphs_in_doc_order())
-                    current_idx = None
-                    for idx, para in enumerate(all_paras):
-                        if para._element == target_para._element:
-                            current_idx = idx
-                            break
-
-                    if current_idx is not None:
-                        print(f"[DEBUG] Current paragraph index: {current_idx}, total paragraphs: {len(all_paras)}")
-
-                        if current_idx > 0:
-                            prev_para = all_paras[current_idx - 1]
-                            print(f"[DEBUG] Previous paragraph has {len(prev_para.runs)} runs")
-                            # Find first run with format in previous paragraph
-                            for run in prev_para.runs:
-                                rpr = run._r.get_or_add_rPr()
-                                if rpr is not None and len(list(rpr)) > 0:
-                                    original_rpr = rpr
-                                    print(f"[DEBUG] Using format from previous paragraph")
-                                    break
-                            # Also get alignment from previous paragraph
-                            if prev_para.alignment is not None:
-                                original_alignment = prev_para.alignment
-                                print(f"[DEBUG] Using alignment from previous paragraph: {original_alignment}")
-                    else:
-                        print(f"[DEBUG] Could not find current paragraph in iterator")
-                except Exception as e:
-                    print(f"[DEBUG] Could not get format from previous paragraph: {e}")
-
-                # If no format found, use default
-                if original_rpr is None:
-                    # Create default format
-                    from docx.oxml import parse_xml
-                    default_rpr_xml = '<w:rPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'
-                    original_rpr = parse_xml(default_rpr_xml)
-                    print(f"[DEBUG] Using default format")
-
-                # Create placeholder with MERGEFIELD structure
-                placeholder_run = self._create_run_with_format(target_para, original_rpr, placeholder_text)
-                print(f"[DEBUG] Created placeholder run: {placeholder_run.text}")
-
-                # Convert to MERGEFIELD structure
-                fld = OxmlElement('w:fldSimple')
-                fld.set(qn('w:instr'), f' MERGEFIELD {field_name} \\* MERGEFORMAT \\z "" ')
-                print(f"[DEBUG] Created fldSimple element")
-
-                # Move the run element into fldSimple
-                fld.append(placeholder_run._element)
-                print(f"[DEBUG] Appended run to fldSimple")
-
-                # Insert at the beginning of paragraph
-                p_element.insert(0, fld)
-                print(f"[DEBUG] Inserted fldSimple at position 0")
-
-                # IMPORTANT: Preserve paragraph alignment
-                # Priority: current alignment > same cell alignment > previous paragraph alignment > default (left)
-
-                # If current paragraph has no alignment, try to find from same cell
-                if current_alignment is None:
-                    print(f"[DEBUG] Current paragraph has no alignment, looking in same cell...")
-                    try:
-                        # Find all paragraphs in the same table cell
-                        # Get parent cell from paragraph element
-                        # In Word XML: w:tbl/w:tr/w:tc/w:p
-                        # We need to find the parent w:tc element
-                        parent_tc = None
-                        current = p_element
-                        while current is not None:
-                            if current.tag == f"{self.w_ns}tc":
-                                parent_tc = current
-                                break
-                            current = current.getparent()
-
-                        if parent_tc is not None:
-                            print(f"[DEBUG] Found parent cell element")
-                            # Find all paragraphs in this cell
-                            cell_paras = parent_tc.findall(f"{self.w_ns}p")
-                            print(f"[DEBUG] Cell has {len(cell_paras)} paragraphs")
-
-                            # Look for first paragraph with alignment in this cell
-                            for cell_para_xml in cell_paras:
-                                if cell_para_xml == p_element:
-                                    continue  # Skip current paragraph
-                                cell_pPr = cell_para_xml.find(f"{self.w_ns}pPr")
-                                if cell_pPr is not None:
-                                    cell_jc = cell_pPr.find(f"{self.w_ns}jc")
-                                    if cell_jc is not None:
-                                        cell_jc_val = cell_jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
-                                        alignment_map = {
-                                            "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
-                                            "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
-                                            "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
-                                            "both": WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-                                        }
-                                        cell_alignment = alignment_map.get(cell_jc_val)
-                                        if cell_alignment is not None:
-                                            original_alignment = cell_alignment
-                                            print(f"[DEBUG] Found alignment in same cell: {cell_jc_val} -> {cell_alignment}")
-                                            break
-                    except Exception as e:
-                        print(f"[DEBUG] Could not find alignment in same cell: {e}")
-
-                final_alignment = current_alignment if current_alignment is not None else original_alignment
-                if final_alignment is not None:
-                    target_para.alignment = final_alignment
-                    print(f"[DEBUG] Set paragraph alignment to: {final_alignment}")
-                else:
-                    print(f"[DEBUG] No alignment to set, using default")
-
-                print(f"[DEBUG] Successfully inserted placeholder into empty paragraph")
-                return True  # Early return for empty paragraph case
-
-            # Non-zero offset in empty paragraph or other error cases
+                return self._insert_placeholder_to_empty_paragraph(target_para, p_element, field_name, paragraph_index)
+            para_preview = target_para.text[:50] + "..." if len(target_para.text) > 50 else target_para.text
             raise RuntimeError(
                 f"Offset {offset} not found in paragraph {paragraph_index}. "
                 f"Paragraph text length: {total_text_length}, "
@@ -2033,94 +2036,52 @@ class DocxFullEditor:
                 f"Text preview: '{para_preview}'"
             )
 
-        # Get original format from target run
+        # Normal case: split run and insert placeholder
         target_run = target_run_info['run']
-        original_rpr = target_run._r.get_or_add_rPr()
-
-        # Split run at offset position
         text_before, text_after = self._split_run_at_offset(target_run, offset, target_run_info['start'])
-
-        # Create placeholder text
         placeholder_text = f"«{field_name}»"
 
-        # Get paragraph element
         p_element = target_para._p
         run_element = target_run._element
         insert_index = list(p_element).index(run_element)
-
-        # Store paragraph alignment before modification
         paragraph_alignment = target_para.alignment
-        print(f"[DEBUG] Storing paragraph alignment: {paragraph_alignment}")
 
-        # Find nearest format source (prefer text_before, then look for previous non-placeholder run)
+        # Get format: prefer target run, or previous non-placeholder run if text_before is empty
         original_rpr = target_run._r.get_or_add_rPr()
-
-        # If text_before is empty or is just whitespace, try to find format from previous run
-        # Skip placeholder runs (runs with «...» format)
         if (not text_before or not text_before.strip()) and inherit_format:
-            print(f"[DEBUG] text_before is empty/whitespace, looking for previous run format...")
-            for i in range(len(run_text_map) - 1, -1, -1):
-                prev_run_info = run_text_map[i]
-                if prev_run_info['run'] == target_run:
-                    continue
+            prev_rpr = self._get_format_from_previous_run(run_text_map, target_run)
+            if prev_rpr is not None:
+                original_rpr = prev_rpr
 
-                # Check if this run contains placeholder markers
-                run_text = prev_run_info['text'] or ''
-                is_placeholder = '«' in run_text and '»' in run_text
-
-                # Prefer non-placeholder runs with actual text content
-                if not is_placeholder and run_text.strip():
-                    prev_rpr = prev_run_info['run']._r.get_or_add_rPr()
-                    if prev_rpr is not None and len(list(prev_rpr)) > 0:
-                        original_rpr = prev_rpr
-                        print(f"[DEBUG] Using format from previous non-placeholder run: {run_text[:30]}...")
-                        break
-                elif is_placeholder:
-                    print(f"[DEBUG] Skipping placeholder run: {run_text[:30]}...")
-
-        # Remove original run
+        # Remove original run and insert new structure
         target_run.text = ""
         p_element.remove(run_element)
 
         try:
-            # Insert text_before (keep original format)
             if text_before:
                 new_run = self._create_run_with_format(target_para, original_rpr, text_before)
                 p_element.insert(insert_index, new_run._element)
                 insert_index += 1
 
-            # Insert placeholder with MERGEFIELD structure
-            # Use _create_run_with_format to properly inherit format from nearest text
             placeholder_run = self._create_run_with_format(target_para, original_rpr, placeholder_text)
-
-            # Convert to MERGEFIELD structure
             fld = OxmlElement('w:fldSimple')
             fld.set(qn('w:instr'), f' MERGEFIELD {field_name} \\* MERGEFORMAT \\z "" ')
-
-            # Move the run element into fldSimple
             fld.append(placeholder_run._element)
-
-            # Insert placeholder
             p_element.insert(insert_index, fld)
             insert_index += 1
 
-            # Insert text_after (keep original format)
             if text_after:
                 new_run = self._create_run_with_format(target_para, original_rpr, text_after)
                 p_element.insert(insert_index, new_run._element)
 
-            # IMPORTANT: Restore paragraph alignment after modification
-            # This ensures placeholder inherits the paragraph's alignment (center, right, etc.)
             if paragraph_alignment is not None:
                 target_para.alignment = paragraph_alignment
-                print(f"[DEBUG] Restored paragraph alignment to: {paragraph_alignment}")
 
         except Exception as e:
             raise RuntimeError(
                 f"Failed to insert placeholder structure at offset {offset}: {type(e).__name__}: {str(e)}"
             )
 
-        print(f"[SUCCESS] Inserted placeholder «{field_name}» at offset {offset} in paragraph {paragraph_index}")
         return True
 
     def add_table_at_cursor(
@@ -2162,84 +2123,43 @@ class DocxFullEditor:
         if cols < 1 or cols > 10:
             raise ValueError(f"Invalid cols: {cols} (must be 1-10)")
 
-        # Find target paragraph
-        target_para = None
-        total_paragraphs = 0
-        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
-            total_paragraphs += 1
-            if p_idx == paragraph_index:
-                target_para = paragraph
-                break
-
+        target_para = self._find_paragraph_by_index(paragraph_index)
         if not target_para:
+            total_paragraphs = sum(1 for _ in self._iterate_paragraphs_in_doc_order())
             raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
 
-        # Build run text map (similar to insert_placeholder_at_offset)
-        run_text_map = []
-        current_offset = 0
-
-        for run in target_para.runs:
-            if run.text:
-                text_len = len(run.text)
-                run_text_map.append({
-                    'run': run,
-                    'start': current_offset,
-                    'end': current_offset + text_len,
-                    'text': run.text
-                })
-                current_offset += text_len
-
-        # Find which run contains the offset
-        target_run_info = None
+        run_text_map = self._build_run_text_map(target_para)
         total_text_length = sum(run_info['end'] - run_info['start'] for run_info in run_text_map)
+        target_run_info = self._find_run_at_offset(run_text_map, offset)
 
         # Special case: Empty paragraph
         if total_text_length == 0:
-            # For empty paragraphs, only offset 0 is valid
             if offset != 0:
                 print(f"[WARN] Offset {offset} requested for empty paragraph {paragraph_index}. Using offset 0 instead.")
                 offset = 0
 
-            # Create a new run for the empty paragraph
             if len(target_para.runs) == 0:
-                # Paragraph has no runs at all, create one
                 new_run = target_para.add_run("")
-                target_run_info = {
-                    'run': new_run,
-                    'start': 0,
-                    'end': 0,
-                    'text': ''
-                }
+                target_run_info = {'run': new_run, 'start': 0, 'end': 0, 'text': ''}
             else:
-                # Use the first (empty) run
                 target_run_info = {
                     'run': target_para.runs[0],
                     'start': 0,
                     'end': 0,
                     'text': target_para.runs[0].text or ''
                 }
-        else:
-            # Normal case: Find run containing offset
-            for run_info in run_text_map:
-                if run_info['start'] <= offset <= run_info['end']:
-                    target_run_info = run_info
-                    break
 
-            if not target_run_info:
-                para_text = target_para.text
-                para_preview = para_text[:50] + "..." if len(para_text) > 50 else para_text
-                raise RuntimeError(
-                    f"Offset {offset} not found in paragraph {paragraph_index}. "
-                    f"Paragraph text length: {total_text_length}, "
-                    f"Valid range: 0-{total_text_length}, "
-                    f"Text preview: '{para_preview}'"
-                )
+        if not target_run_info:
+            para_preview = target_para.text[:50] + "..." if len(target_para.text) > 50 else target_para.text
+            raise RuntimeError(
+                f"Offset {offset} not found in paragraph {paragraph_index}. "
+                f"Paragraph text length: {total_text_length}, "
+                f"Valid range: 0-{total_text_length}, "
+                f"Text preview: '{para_preview}'"
+            )
 
-        # Get original format from target run
         target_run = target_run_info['run']
         original_rpr = target_run._r.get_or_add_rPr()
-
-        # Split run at offset position
         text_before, text_after = self._split_run_at_offset(target_run, offset, target_run_info['start'])
 
         # Update original run to only contain text_before
@@ -2371,12 +2291,8 @@ class DocxFullEditor:
         Returns:
             True nếu thành công, False nếu thất bại
         """
-        print(f"[DEBUG] add_page_break_at_cursor called: block_index={block_index}, offset={offset}")
-
-        # Build block index map if not exists
         self._build_block_index_map()
 
-        # Get paragraph from block index
         if block_index not in self._block_to_para_index_map:
             print(f"[ERROR] Block index {block_index} not found in map")
             return False
@@ -2389,209 +2305,77 @@ class DocxFullEditor:
         source_para = block_info['paragraph']
         source_element = source_para._element
 
-        print(f"[DEBUG] Found paragraph: '{source_para.text[:50]}...'")
-
-        # Get plain text without placeholders for offset calculation
+        # Get plain text and validate offset
         plain_text = source_para.text
-        print(f"[DEBUG] Plain text length: {len(plain_text)}, offset: {offset}")
-
-        # Validate offset
         if offset < 0 or offset > len(plain_text):
             print(f"[ERROR] Offset {offset} out of range [0, {len(plain_text)}]")
             return False
 
-        # If offset is at beginning, insert page break before this paragraph
+        # Special case: offset at beginning
         if offset == 0:
-            print(f"[DEBUG] Offset at beginning, inserting page break before paragraph")
             break_para = self.doc.add_paragraph()
-            break_run = break_para.add_run()
-            break_run.add_break(WD_BREAK.PAGE)
-
-            # Move page break BEFORE this paragraph (not after!)
+            break_para.add_run().add_break(WD_BREAK.PAGE)
             source_element.addprevious(break_para._element)
-
-            # CRITICAL FIX: Rebuild block index map after modifying document structure
             self._block_to_para_index_map = None
             self._build_block_index_map()
-
             return True
 
-        # If offset is at end (after last character), insert page break after this paragraph
+        # Special case: offset at end
         if offset >= len(plain_text):
-            print(f"[DEBUG] Offset at end ({offset} >= {len(plain_text)}), inserting page break at end of paragraph")
-            break_run = source_para.add_run()
-            break_run.add_break(WD_BREAK.PAGE)
-
-            # CRITICAL FIX: Rebuild block index map after modifying document structure
+            source_para.add_run().add_break(WD_BREAK.PAGE)
             self._block_to_para_index_map = None
             self._build_block_index_map()
-
             return True
 
-        # Split paragraph at offset using lxml (minimax-docx best practice)
-        print(f"[DEBUG] Splitting paragraph at offset {offset}")
+        # Split paragraph at offset (reuse helper functions like add_table_at_cursor)
+        run_text_map = self._build_run_text_map(source_para)
+        target_run_info = self._find_run_at_offset(run_text_map, offset)
 
-        # Calculate position in runs
-        current_offset = 0
-        split_run_index = None
-        split_within_run = None
-
-        for i, run in enumerate(source_para.runs):
-            run_text = run.text if run.text else ""
-            run_length = len(run_text)
-
-            if current_offset + run_length >= offset:
-                split_run_index = i
-                split_within_run = offset - current_offset
-                break
-
-            current_offset += run_length
-
-        if split_run_index is None:
-            print(f"[ERROR] Could not find split position")
+        if not target_run_info:
+            print(f"[ERROR] Could not find run at offset {offset}")
             return False
 
-        print(f"[DEBUG] Split at run {split_run_index}, within run offset: {split_within_run}")
+        target_run = target_run_info['run']
+        text_before, text_after = self._split_run_at_offset(
+            target_run, offset, target_run_info['start']
+        )
 
-        # Split the run at position
-        target_run = source_para.runs[split_run_index]
-        original_text = target_run.text
+        # Update original run to only contain text_before
+        target_run.text = text_before
 
-        if original_text:
-            before_text = original_text[:split_within_run]
-            after_text = original_text[split_within_run:]
+        # Create after paragraph for text_after (deep copy to preserve formatting)
+        after_para_element = copy.deepcopy(source_element)
+        after_para = Paragraph(after_para_element, self.doc)
 
-            # Modify original run to contain only "before" part
-            target_run.text = before_text
+        # Clear runs in after paragraph and rebuild
+        for run in after_para.runs:
+            run._element.getparent().remove(run._element)
 
-            # Create new paragraph for "after" part
-            after_para_element = copy.deepcopy(source_element)
+        # Add text_after to after paragraph
+        if text_after:
+            new_run = after_para.add_run(text_after)
+            self._copy_run_formatting(target_run, new_run)
 
-            # Clear runs in after paragraph and rebuild with "after" content
-            after_para = Paragraph(after_para_element, self.doc)
-            for run in after_para.runs:
-                run._element.getparent().remove(run._element)
+        # Add remaining runs from source paragraph
+        run_index = next(i for i, r in enumerate(source_para.runs) if r._element == target_run._element)
+        for i in range(run_index + 1, len(source_para.runs)):
+            original_run = source_para.runs[i]
+            new_run = after_para.add_run(original_run.text)
+            self._copy_run_formatting(original_run, new_run)
 
-            # Add split run and remaining runs to after paragraph
-            if after_text:
-                new_run = after_para.add_run(after_text)
-                # Copy formatting from original run
-                self._copy_run_formatting(target_run, new_run)
+        # Remove remaining runs from source paragraph
+        for run in list(source_para.runs)[run_index + 1:]:
+            run._element.getparent().remove(run._element)
 
-            # Add remaining runs from source paragraph
-            for i in range(split_run_index + 1, len(source_para.runs)):
-                original_run = source_para.runs[i]
-                new_run = after_para.add_run(original_run.text)
-                self._copy_run_formatting(original_run, new_run)
+        # Insert page break and after paragraph
+        source_para.add_run().add_break(WD_BREAK.PAGE)
+        source_element.addnext(after_para_element)
 
-            # Remove split and remaining runs from source paragraph
-            runs_to_remove = list(source_para.runs)[split_run_index + 1:]
-            for run in runs_to_remove:
-                run._element.getparent().remove(run._element)
+        # Rebuild block index map after modifying document structure
+        self._block_to_para_index_map = None
+        self._build_block_index_map()
 
-            # Insert page break run at end of source paragraph
-            break_run = source_para.add_run()
-            break_run.add_break(WD_BREAK.PAGE)
-
-            # Insert after paragraph after source paragraph
-            source_element.addnext(after_para_element)
-
-            print(f"[DEBUG] Paragraph split successfully")
-
-            # CRITICAL FIX: Rebuild block index map after modifying document structure
-            # This ensures subsequent operations use correct block → paragraph mapping
-            self._block_to_para_index_map = None  # Clear cached map
-            self._build_block_index_map()  # Rebuild with new structure
-
-            return True
-        else:
-            print(f"[ERROR] Target run has no text")
-            return False
-
-    def add_image(self, image_path: str, position: str = "end", after_text: str = None, width: float = 4.0):
-        """
-        Thêm hình ảnh
-
-        Args:
-            image_path: Đường dẫn tới file ảnh
-            position: "end", "after:text"
-            after_text: Text đích
-            width: Chiều rộng (inches)
-        """
-        print(f"[DEBUG] add_image called: position={position}, width={width}")
-
-        if position == "end":
-            # Get last paragraph to inherit formatting
-            last_para = None
-            for para in self.doc.paragraphs:
-                if para.text.strip():
-                    last_para = para
-
-            # Create paragraph with image
-            image_para = self.doc.add_paragraph()
-            image_para.add_picture(image_path, width=Inches(width))
-
-            # Inherit formatting from last paragraph
-            if last_para:
-                image_para.alignment = last_para.alignment
-                image_para.paragraph_format.space_before = last_para.paragraph_format.space_before
-                image_para.paragraph_format.space_after = last_para.paragraph_format.space_after
-                image_para.paragraph_format.line_spacing = last_para.paragraph_format.line_spacing
-
-                if last_para.runs:
-                    source_run = None
-                    for run in reversed(last_para.runs):
-                        if run.text and run.text.strip():
-                            source_run = run
-                            break
-
-                    if not source_run and last_para.runs:
-                        source_run = last_para.runs[0]
-
-                    if source_run:
-                        for new_run in image_para.runs:
-                            self._copy_run_formatting(source_run, new_run)
-                        print(f"[DEBUG] Copied formatting for image paragraph")
-
-        elif position.startswith("after:"):
-            target_text = position.split("after:")[1].strip()
-            for i, paragraph in enumerate(self.doc.paragraphs):
-                if target_text in paragraph.text:
-                    print(f"[DEBUG] Found target paragraph for image at index {i}")
-
-                    if i < len(self.doc.paragraphs) - 1:
-                        # Add to next paragraph
-                        next_para = self.doc.paragraphs[i + 1]
-                        next_para.add_picture(image_path, width=Inches(width))
-                        print(f"[DEBUG] Added image to next paragraph")
-                    else:
-                        # Add new paragraph with image, inheriting from current
-                        new_para = self.doc.add_paragraph()
-                        new_para.add_picture(image_path, width=Inches(width))
-
-                        # Inherit formatting from current paragraph
-                        new_para.alignment = paragraph.alignment
-                        new_para.paragraph_format.space_before = paragraph.paragraph_format.space_before
-                        new_para.paragraph_format.space_after = paragraph.paragraph_format.space_after
-                        new_para.paragraph_format.line_spacing = paragraph.paragraph_format.line_spacing
-
-                        if paragraph.runs:
-                            source_run = None
-                            for run in reversed(paragraph.runs):
-                                if run.text and run.text.strip():
-                                    source_run = run
-                                    break
-
-                            if not source_run and paragraph.runs:
-                                source_run = paragraph.runs[0]
-
-                            if source_run:
-                                for new_run in new_para.runs:
-                                    self._copy_run_formatting(source_run, new_run)
-                                print(f"[DEBUG] Copied formatting for new image paragraph")
-
-                    return True
-        return False
+        return True
 
     def add_image_at_cursor(
         self,
@@ -2633,81 +2417,46 @@ class DocxFullEditor:
         if width < 1.0 or width > 8.0:
             raise ValueError(f"Invalid width: {width} (must be 1.0-8.0 inches)")
 
-        # Find target paragraph
-        target_para = None
-        total_paragraphs = 0
-        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
-            total_paragraphs += 1
-            if p_idx == paragraph_index:
-                target_para = paragraph
-                break
-
+        # Reuse helper functions (same as add_table_at_cursor)
+        target_para = self._find_paragraph_by_index(paragraph_index)
         if not target_para:
+            total_paragraphs = sum(1 for _ in self._iterate_paragraphs_in_doc_order())
             raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
 
-        # Build run text map (similar to insert_placeholder_at_offset)
-        run_text_map = []
-        current_offset = 0
-
-        for run in target_para.runs:
-            if run.text:
-                text_len = len(run.text)
-                run_text_map.append({
-                    'run': run,
-                    'start': current_offset,
-                    'end': current_offset + text_len,
-                    'text': run.text
-                })
-                current_offset += text_len
-
-        # Find which run contains the offset
-        target_run_info = None
+        run_text_map = self._build_run_text_map(target_para)
         total_text_length = sum(run_info['end'] - run_info['start'] for run_info in run_text_map)
+        target_run_info = self._find_run_at_offset(run_text_map, offset)
 
-        # Special case: empty paragraph - create a new run
+        # Special case: Empty paragraph (same logic as add_table_at_cursor)
         if total_text_length == 0:
-            if offset == 0:
-                # Empty paragraph, offset 0 is valid - create a new run
-                target_run = target_para.add_run("")
+            if offset != 0:
+                print(f"[WARN] Offset {offset} requested for empty paragraph {paragraph_index}. Using offset 0 instead.")
+                offset = 0
+
+            if len(target_para.runs) == 0:
+                new_run = target_para.add_run("")
+                target_run_info = {'run': new_run, 'start': 0, 'end': 0, 'text': ''}
+            else:
                 target_run_info = {
-                    'run': target_run,
+                    'run': target_para.runs[0],
                     'start': 0,
                     'end': 0,
-                    'text': ''
+                    'text': target_para.runs[0].text or ''
                 }
-                text_before = ""
-                text_after = ""
-            else:
-                raise RuntimeError(
-                    f"Offset {offset} not found in empty paragraph {paragraph_index}. "
-                    f"Valid range: 0-0"
-                )
-        else:
-            # Non-empty paragraph - find the run containing offset
-            for run_info in run_text_map:
-                if run_info['start'] <= offset <= run_info['end']:
-                    target_run_info = run_info
-                    break
 
-            if not target_run_info:
-                para_text = target_para.text
-                para_preview = para_text[:50] + "..." if len(para_text) > 50 else para_text
-                raise RuntimeError(
-                    f"Offset {offset} not found in paragraph {paragraph_index}. "
-                    f"Paragraph text length: {total_text_length}, "
-                    f"Valid range: 0-{total_text_length}, "
-                    f"Text preview: '{para_preview}'"
-                )
+        if not target_run_info:
+            para_preview = target_para.text[:50] + "..." if len(target_para.text) > 50 else target_para.text
+            raise RuntimeError(
+                f"Offset {offset} not found in paragraph {paragraph_index}. "
+                f"Paragraph text length: {total_text_length}, "
+                f"Valid range: 0-{total_text_length}, "
+                f"Text preview: '{para_preview}'"
+            )
 
-        # Get original format from target run
         target_run = target_run_info['run']
         original_rpr = target_run._r.get_or_add_rPr()
-
-        # Split run at offset position (only for non-empty case)
-        if total_text_length > 0:
-            text_before, text_after = self._split_run_at_offset(target_run, offset, target_run_info['start'])
-            # Update original run to only contain text_before
-            target_run.text = text_before
+        text_before, text_after = self._split_run_at_offset(target_run, offset, target_run_info['start'])
+        target_run.text = text_before
 
         # Find the document body
         doc_element = self.doc._element.body
@@ -2718,12 +2467,7 @@ class DocxFullEditor:
 
         # Create new paragraph for image (AFTER target paragraph)
         image_paragraph = self.doc.add_paragraph()
-
-        # Copy paragraph-level formatting from target paragraph
-        image_paragraph.alignment = target_para.alignment
-        image_paragraph.paragraph_format.space_before = target_para.paragraph_format.space_before
-        image_paragraph.paragraph_format.space_after = target_para.paragraph_format.space_after
-        image_paragraph.paragraph_format.line_spacing = target_para.paragraph_format.line_spacing
+        self._copy_paragraph_format(target_para, image_paragraph)
 
         # Add picture to the new paragraph
         try:
@@ -2731,21 +2475,11 @@ class DocxFullEditor:
             image_run.add_picture(image_path, width=Inches(width))
 
             # Copy run formatting from target paragraph if available
-            if target_para.runs:
-                source_run = None
-                for run in reversed(target_para.runs):
-                    if run.text and run.text.strip():
-                        source_run = run
-                        break
-
-                if not source_run and target_para.runs:
-                    source_run = target_para.runs[0]
-
-                if source_run:
-                    # Find the run that contains the picture (it's the first run we just added)
-                    for run in image_paragraph.runs:
-                        if run != image_run:  # Don't copy to the image run itself
-                            self._copy_run_formatting(source_run, run)
+            source_run = next((r for r in target_para.runs if r.text and r.text.strip()), target_para.runs[0] if target_para.runs else None)
+            if source_run:
+                for run in image_paragraph.runs:
+                    if run != image_run:
+                        self._copy_run_formatting(source_run, run)
         except Exception as e:
             # Clean up - remove the paragraph we just added
             image_p_element = image_paragraph._element
@@ -2760,13 +2494,7 @@ class DocxFullEditor:
         # Create new paragraph for text_after (AFTER image paragraph)
         if text_after.strip():
             text_paragraph = self.doc.add_paragraph()
-
-            # Copy paragraph-level formatting from target paragraph
-            text_paragraph.alignment = target_para.alignment
-            text_paragraph.paragraph_format.space_before = target_para.paragraph_format.space_before
-            text_paragraph.paragraph_format.space_after = target_para.paragraph_format.space_after
-            text_paragraph.paragraph_format.line_spacing = target_para.paragraph_format.line_spacing
-
+            self._copy_paragraph_format(target_para, text_paragraph)
             new_run = text_paragraph.add_run(text_after)
 
             # Copy formatting from original run
@@ -2962,6 +2690,101 @@ class DocxFullEditor:
 
         return True
 
+    # ===== CELL FORMATTING HELPERS =====
+
+    def _validate_and_get_cell(self, table_index: int, row_index: int, col_index: int):
+        """Validate indices and return cell. Returns None if invalid."""
+        if table_index >= len(self.doc.tables):
+            return None
+        table = self.doc.tables[table_index]
+        if row_index >= len(table.rows):
+            return None
+        row = table.rows[row_index]
+        if col_index >= len(row.cells):
+            return None
+        return row.cells[col_index]
+
+    def _word_border_to_format(self, border) -> Optional[dict]:
+        """Convert a Word border element into the format payload used by the UI."""
+        if border is None:
+            return None
+
+        border_val = border.get(qn('w:val'), 'single')
+        if border_val in ['none', 'nil', '']:
+            return {'style': 'none', 'size': 0, 'color': '#000000'}
+
+        border_size_raw = border.get(qn('w:sz'), '4')
+        try:
+            border_size = int(border_size_raw)
+        except (TypeError, ValueError):
+            border_size = 4
+
+        border_color = border.get(qn('w:color'), '000000')
+        return {
+            'style': border_val,
+            'size': border_size,
+            'color': f'#{border_color}' if border_color and not border_color.startswith('#') else border_color or '#000000'
+        }
+
+    def _get_table_borders(self, table_obj) -> dict:
+        """Extract table-level borders from tblPr."""
+        table_borders = {}
+        try:
+            tbl_pr = table_obj._element.find(qn('w:tblPr'))
+            if tbl_pr is None:
+                return table_borders
+
+            tbl_borders = tbl_pr.find(qn('w:tblBorders'))
+            if tbl_borders is None:
+                return table_borders
+
+            for side in ['top', 'bottom', 'left', 'right', 'insideH', 'insideV']:
+                border = tbl_borders.find(qn(f'w:{side}'))
+                if border is not None:
+                    table_borders[side] = border
+        except Exception as e:
+            print(f"Error extracting table borders: {e}")
+
+        return table_borders
+
+    def _get_effective_border(self, tc_pr, table_borders, side, row_idx, col_idx, last_row_idx, last_col_idx):
+        """Resolve effective border for one cell side."""
+        tc_borders = tc_pr.find(qn('w:tcBorders')) if tc_pr is not None else None
+        if tc_borders is not None:
+            direct_border = tc_borders.find(qn(f'w:{side}'))
+            direct_format = self._word_border_to_format(direct_border)
+            if direct_format is not None:
+                return direct_format
+
+        # Fallback to table borders
+        table_border = None
+        if side == 'top':
+            table_border = table_borders.get('top') if row_idx == 0 else table_borders.get('insideH')
+        elif side == 'bottom':
+            table_border = table_borders.get('bottom') if row_idx == last_row_idx else table_borders.get('insideH')
+        elif side == 'left':
+            table_border = table_borders.get('left') if col_idx == 0 else table_borders.get('insideV')
+        elif side == 'right':
+            table_border = table_borders.get('right') if col_idx == last_col_idx else table_borders.get('insideV')
+
+        return self._word_border_to_format(table_border)
+
+    def _get_default_cell_format(self) -> dict:
+        """Return default cell format structure."""
+        return {
+            'background_color': '#ffffff',
+            'vertical_align': 'top',
+            'horizontal_align': 'left',
+            'borders': {
+                'top': {'style': 'none', 'size': 0, 'color': '#000000'},
+                'bottom': {'style': 'none', 'size': 0, 'color': '#000000'},
+                'left': {'style': 'none', 'size': 0, 'color': '#000000'},
+                'right': {'style': 'none', 'size': 0, 'color': '#000000'}
+            }
+        }
+
+    # ===== PUBLIC CELL FORMATTING METHODS =====
+
     def format_table_cell(
         self,
         table_index: int,
@@ -2975,77 +2798,44 @@ class DocxFullEditor:
         - Horizontal: left, center, right
         - Vertical: top, center, bottom
         """
-        if table_index >= len(self.doc.tables):
+        cell = self._validate_and_get_cell(table_index, row_index, col_index)
+        if cell is None:
             return False
-
-        table = self.doc.tables[table_index]
-        if row_index >= len(table.rows):
-            return False
-
-        row = table.rows[row_index]
-        if col_index >= len(row.cells):
-            return False
-
-        cell = row.cells[col_index]
 
         try:
-            # Lấy hoặc tạo tcPr (table cell properties)
             tc_pr = cell._element.get_or_add_tcPr()
 
             # Background color
             if 'background_color' in format_options:
                 bg_color = format_options['background_color']
                 if bg_color and bg_color != 'auto':
-
-                    # Tạo hoặc cập nhật shd element (shading)
                     shd = tc_pr.find(qn('w:shd'))
                     if shd is None:
                         shd = OxmlElement('w:shd')
                         tc_pr.append(shd)
-
-                    # Parse màu hex
-                    if bg_color.startswith('#'):
-                        hex_color = bg_color.lstrip('#')
-                        shd.set(qn('w:fill'), hex_color)
-                    else:
-                        shd.set(qn('w:fill'), bg_color)
+                    shd.set(qn('w:fill'), bg_color.lstrip('#'))
 
             # Vertical alignment
             if 'vertical_align' in format_options:
                 v_align = format_options['vertical_align']
                 if v_align in ['top', 'center', 'bottom']:
-
-
-                    # Tạo hoặc cập nhật vAlign element
                     v_align_element = tc_pr.find(qn('w:vAlign'))
                     if v_align_element is None:
                         v_align_element = OxmlElement('w:vAlign')
                         tc_pr.append(v_align_element)
-
                     v_align_element.set(qn('w:val'), v_align)
 
-            # Horizontal alignment (NEW)
+            # Horizontal alignment
             if 'horizontal_align' in format_options:
                 h_align = format_options['horizontal_align']
-                if h_align in ['left', 'center', 'right']:
+                alignment_value = ALIGNMENT_STRING_TO_ENUM.get(h_align)
+                if alignment_value is not None:
+                    for para in cell.paragraphs:
+                        para.alignment = alignment_value
 
-                    # Map alignment string to WD_PARAGRAPH_ALIGNMENT enum
-                    alignment_map = {
-                        'left': WD_PARAGRAPH_ALIGNMENT.LEFT,
-                        'center': WD_PARAGRAPH_ALIGNMENT.CENTER,
-                        'right': WD_PARAGRAPH_ALIGNMENT.RIGHT
-                    }
-
-                    alignment_value = alignment_map.get(h_align)
-                    if alignment_value is not None:
-                        # Apply horizontal alignment to ALL paragraphs in the cell
-                        for para in cell.paragraphs:
-                            para.alignment = alignment_value
-
-            # Borders (optional)
+            # Borders
             if 'borders' in format_options:
-                borders = format_options['borders']
-                self._apply_cell_borders(tc_pr, borders)
+                self._apply_cell_borders(tc_pr, format_options['borders'])
 
             return True
 
@@ -3054,70 +2844,55 @@ class DocxFullEditor:
             return False
 
     def _apply_cell_borders(self, tc_pr, borders: dict):
-        """Apply borders to table cell"""
-        # Tạo hoặc lấy tcBorders element
+        """Apply borders to table cell.
+
+        Supports styles: none (remove), single, double, dashed, dotted
+        """
         tc_borders = tc_pr.find(qn('w:tcBorders'))
         if tc_borders is None:
             tc_borders = OxmlElement('w:tcBorders')
             tc_pr.append(tc_borders)
 
-        # Áp dụng border cho từng phía
         for side in ['top', 'bottom', 'left', 'right']:
-            if side in borders:
-                border_config = borders[side]
+            if side not in borders:
+                continue
 
-                # Tạo border element
-                border = OxmlElement(f'w:{side}')
+            border_config = borders[side]
+            border_style = border_config.get('style', 'single')
 
-                # Border style
-                border_style = border_config.get('style', 'single')
-                border.set(qn('w:val'), border_style)
-
-                # Border size (in eighth points)
-                border_size = border_config.get('size', 4)
-                border.set(qn('w:sz'), str(border_size))
-
-                # Border color
-                border_color = border_config.get('color', 'auto')
-                if border_color.startswith('#'):
-                    border_color = border_color.lstrip('#')
-                border.set(qn('w:color'), border_color)
-
-                # Thêm hoặc replace border
+            # Remove border if style is "none"
+            if border_style in ('none', ''):
                 existing_border = tc_borders.find(qn(f'w:{side}'))
                 if existing_border is not None:
-                    tc_borders.replace(existing_border, border)
-                else:
-                    tc_borders.append(border)
+                    tc_borders.remove(existing_border)
+                continue
+
+            # Create/update border element
+            border = OxmlElement(f'w:{side}')
+            border.set(qn('w:val'), border_style)
+            border.set(qn('w:sz'), str(border_config.get('size', 4)))
+            border.set(qn('w:color'), border_config.get('color', 'auto').lstrip('#'))
+
+            existing_border = tc_borders.find(qn(f'w:{side}'))
+            if existing_border is not None:
+                tc_borders.replace(existing_border, border)
+            else:
+                tc_borders.append(border)
 
     def get_cell_format(self, table_index: int, row_index: int, col_index: int) -> dict:
-        """Get current formatting of a table cell
+        """Get current formatting of a table cell.
 
         Returns:
-            dict with keys: background_color, vertical_align, horizontal_align
+            dict with keys: background_color, vertical_align, horizontal_align, borders
         """
-        if table_index >= len(self.doc.tables):
+        cell = self._validate_and_get_cell(table_index, row_index, col_index)
+        if cell is None:
             return None
 
         table = self.doc.tables[table_index]
-        if row_index >= len(table.rows):
-            return None
-
-        row = table.rows[row_index]
-        if col_index >= len(row.cells):
-            return None
-
-        cell = row.cells[col_index]
-
-        # Default format
-        format_info = {
-            'background_color': '#ffffff',
-            'vertical_align': 'top',
-            'horizontal_align': 'left'
-        }
+        format_info = self._get_default_cell_format()
 
         try:
-            # Get tcPr (table cell properties)
             tc_pr = cell._element.find(qn('w:tcPr'))
             if tc_pr is not None:
                 # Background color from shd element
@@ -3125,90 +2900,41 @@ class DocxFullEditor:
                 if shd is not None:
                     fill = shd.get(qn('w:fill'))
                     if fill and fill != 'auto':
-                        # Convert to hex format
-                        if not fill.startswith('#'):
-                            fill = f'#{fill}'
-                        format_info['background_color'] = fill
+                        format_info['background_color'] = f'#{fill}' if fill and not fill.startswith('#') else fill or '#000000'
 
                 # Vertical alignment from vAlign element
                 v_align = tc_pr.find(qn('w:vAlign'))
                 if v_align is not None:
                     v_align_val = v_align.get(qn('w:val'), 'top')
-                    # Word uses "top", "center", "bottom" directly
                     if v_align_val in ['top', 'center', 'bottom']:
                         format_info['vertical_align'] = v_align_val
 
-            # Horizontal alignment from first paragraph in cell
-            # Horizontal alignment is a paragraph property, not cell property
+                # Resolve borders
+                table_borders = self._get_table_borders(table)
+                last_row_idx = len(table.rows) - 1
+                last_col_idx = len(table.columns) - 1
+
+                for side in ['top', 'bottom', 'left', 'right']:
+                    effective_border = self._get_effective_border(
+                        tc_pr, table_borders, side,
+                        row_index, col_index, last_row_idx, last_col_idx
+                    )
+                    if effective_border is not None:
+                        format_info['borders'][side] = effective_border
+
+            # Horizontal alignment from first paragraph (paragraph property, not cell)
             if cell.paragraphs:
                 first_para = cell.paragraphs[0]
                 if first_para.alignment is not None:
-                    # Map WD_PARAGRAPH_ALIGNMENT to string
-                    alignment_map = {
-                        WD_PARAGRAPH_ALIGNMENT.LEFT: 'left',
-                        WD_PARAGRAPH_ALIGNMENT.CENTER: 'center',
-                        WD_PARAGRAPH_ALIGNMENT.RIGHT: 'right',
-                        WD_PARAGRAPH_ALIGNMENT.JUSTIFY: 'left',  # Map justify to left for simplicity
-                        WD_PARAGRAPH_ALIGNMENT.DISTRIBUTE: 'left'
-                    }
-                    format_info['horizontal_align'] = alignment_map.get(
-                        first_para.alignment,
-                        'left'
+                    format_info['horizontal_align'] = ALIGNMENT_ENUM_TO_STRING.get(
+                        first_para.alignment, 'left'
                     )
 
             return format_info
 
         except Exception as e:
             print(f"Error getting cell format: {str(e)}")
-            # Return default format on error
             return format_info
-
-    # ===== UTILITY FUNCTIONS =====
-
-    def _parse_color(self, color: str) -> RGBColor:
-        """Parse color string to RGBColor"""
-        if color.startswith("#"):
-            # Hex color
-            hex_color = color.lstrip("#")
-            rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-            return RGBColor(*rgb)
-        elif color.startswith("rgb"):
-            # RGB color format: rgb(r, g, b) or rgba(r, g, b, a)
-            import re
-            rgb_match = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', color)
-            if rgb_match:
-                r, g, b = int(rgb_match.group(1)), int(rgb_match.group(2)), int(rgb_match.group(3))
-                return RGBColor(r, g, b)
-            else:
-                # If RGB parsing fails, default to black
-                return RGBColor(0, 0, 0)
-        else:
-            # Named color
-            color_map = {
-                "red": RGBColor(255, 0, 0),
-                "green": RGBColor(0, 255, 0),
-                "blue": RGBColor(0, 0, 255),
-                "yellow": RGBColor(255, 255, 0),
-                "orange": RGBColor(255, 165, 0),
-                "purple": RGBColor(128, 0, 128),
-                "black": RGBColor(0, 0, 0),
-                "white": RGBColor(255, 255, 255),
-                "gray": RGBColor(128, 128, 128),
-            }
-            return color_map.get(color.lower(), RGBColor(0, 0, 0))
-
-    def _parse_highlight_color(self, color: str) -> str:
-        """Parse highlight color to hex value (frontend always sends hex: #RRGGBB)
-
-        Args:
-            color: Color as hex (e.g., "#ffff00", "#FFFF00")
-
-        Returns:
-            Hex color string (uppercase, no #) for DOCX shd element
-        """
-        # Frontend always sends hex format
-        return color.lstrip('#').upper()
-
 
     # ===== SAVE =====
 
@@ -3221,118 +2947,7 @@ class DocxFullEditor:
 
     # ===== FORMAT EXTRACTION =====
 
-    def get_format_at_position(
-        self,
-        text: str,
-        paragraph_index: int = None
-    ) -> Optional[Dict]:
-        """
-        Extract formatting information for text at a specific position
-        NOW SUPPORTS extracting format from hyperlink text
-
-        Args:
-            text: Text to extract format from
-            paragraph_index: Index of paragraph containing the text (optional, for precision)
-
-        Returns:
-            Dict with format info or None if not found:
-            {
-                'bold': bool,
-                'italic': bool,
-                'underline': str (none/single/double/dotted/dash/dashDot/dashDotDot/double/wave),
-                'color': str (hex, e.g., 'FF0000'),
-                'highlight': str (hex, e.g., 'FFFF00'),
-                'font_size': int (points, e.g., 12),
-                'font_name': str,
-                'superscript': bool,
-                'subscript': bool
-            }
-        """
-        # Normalize search text for matching
-        search_text_normalized = self._normalize_text(text)
-
-        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
-            if paragraph_index is not None and p_idx != paragraph_index:
-                continue
-
-            # Use new helper to extract ALL runs including hyperlinks
-            all_runs = self._extract_all_text_runs(paragraph)
-            full_text = "".join(run_info['text'] for run_info in all_runs)
-            full_text_normalized = self._normalize_text(full_text)
-
-            if search_text_normalized not in full_text_normalized:
-                continue
-
-            # Find position in normalized text
-            start_idx_normalized = full_text_normalized.find(search_text_normalized)
-            if start_idx_normalized == -1:
-                continue
-
-            end_idx_normalized = start_idx_normalized + len(search_text_normalized)
-
-            # Map normalized position back to original text position
-            # by counting non-whitespace characters
-            char_count = 0
-            non_ws_count = 0
-            start_idx_original = None
-            end_idx_original = None
-
-            for char in full_text:
-                if char.isspace():
-                    # Whitespace character - skip counting but increment char_count
-                    pass
-                else:
-                    # Non-whitespace character
-                    if start_idx_original is None and non_ws_count == start_idx_normalized:
-                        start_idx_original = char_count
-                    if non_ws_count == end_idx_normalized - 1:
-                        end_idx_original = char_count + 1
-                        break
-                    non_ws_count += 1
-                char_count += 1
-
-            # If end_idx_original is still None, set it to the end of the text
-            if end_idx_original is None and start_idx_original is not None:
-                end_idx_original = len(full_text)
-
-            # Fallback: if mapping failed, try direct search in original text
-            if start_idx_original is None or end_idx_original is None:
-                start_idx_original = full_text.find(text)
-                if start_idx_original != -1:
-                    end_idx_original = start_idx_original + len(text)
-                else:
-                    # Try finding the search text in the runs directly
-                    for run_info in all_runs:
-                        if search_text_normalized in self._normalize_text(run_info['text']):
-                            return self._extract_run_format(run_info['run'])
-                    continue
-
-            # Find runs containing the text using original positions
-            formats_found = []
-
-            for run_info in all_runs:
-                run_start = run_info['start_offset']
-                run_end = run_info['end_offset']
-
-                # Check if this run overlaps with the target text range
-                if run_end > start_idx_original and run_start < end_idx_original:
-                    # This run contains part of the target text
-                    # Only extract format from runs that have actual text content
-                    if run_info['text'].strip():
-                        format_info = self._extract_run_format(run_info['run'])
-                        formats_found.append(format_info)
-
-            if formats_found:
-                # Return format from the first non-empty run with actual content
-                for fmt in formats_found:
-                    if fmt:
-                        return fmt
-
-                return formats_found[0]
-
-        return None
-
-    def get_format_at_offset(
+    def get_format(
         self,
         paragraph_index: int = None,
         offset: int = None,
@@ -3340,10 +2955,7 @@ class DocxFullEditor:
         para_in_cell: int = None
     ) -> Optional[Dict]:
         """
-        Extract formatting information using precise offset within paragraph.
-
-        This is more accurate than get_format_at_position which uses text search,
-        especially for duplicate words where we need to target a specific occurrence.
+        Extract formatting information using offset within paragraph.
 
         Args:
             paragraph_index: Index of paragraph containing the text
@@ -3357,38 +2969,23 @@ class DocxFullEditor:
         if offset is None or paragraph_index is None:
             return None
 
-        # Handle table cells with para_in_cell
-        actual_para_index = paragraph_index
-        if para_in_cell is not None:
-            # For table cells, we need to find the specific paragraph
-            # The paragraph_index in this case refers to the table's paragraph
-            # and para_in_cell is the index within the cell
-            pass  # The iteration will handle this correctly
-
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if p_idx != paragraph_index:
                 continue
 
-            # Use new helper to extract ALL runs including hyperlinks
             all_runs = self._extract_all_text_runs(paragraph)
-
-            # Find runs that overlap with the target offset range
             formats_found = []
 
             for run_info in all_runs:
                 run_start = run_info['start_offset']
                 run_end = run_info['end_offset']
 
-                # Check if this run overlaps with the target offset range
-                # A run overlaps if: run_end > offset AND run_start < end_offset
                 if end_offset is not None:
                     if run_end > offset and run_start < end_offset:
-                        # This run contains part of the target text
                         if run_info['text'].strip():
                             format_info = self._extract_run_format(run_info['run'])
                             formats_found.append(format_info)
                 else:
-                    # Only have start offset, find run containing this position
                     if run_start <= offset < run_end:
                         if run_info['text'].strip():
                             format_info = self._extract_run_format(run_info['run'])
@@ -3396,13 +2993,12 @@ class DocxFullEditor:
                             break
 
             if formats_found:
-                # Return format from the first non-empty run with actual content
                 for fmt in formats_found:
                     if fmt:
                         return fmt
                 return formats_found[0]
 
-            break  # Found the paragraph, no need to continue
+            break
 
         return None
 
@@ -3540,36 +3136,19 @@ class DocxFullEditor:
             raise ValueError("URL cannot be empty")
 
         # Find target paragraph
-        target_para = None
-        total_paragraphs = 0
-        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
-            total_paragraphs += 1
-            if p_idx == paragraph_index:
-                target_para = paragraph
-                break
-
+        target_para = self._find_paragraph_by_index(paragraph_index)
         if not target_para:
+            total_paragraphs = sum(1 for _ in self._iterate_paragraphs_in_doc_order())
             raise RuntimeError(f"Paragraph {paragraph_index} not found (document has {total_paragraphs} paragraphs)")
 
         # Build run text map
-        run_text_map = []
-        current_offset = 0
-        for run in target_para.runs:
-            run_text = run.text
-            if run_text:
-                run_text_map.append({
-                    'run': run,
-                    'start': current_offset,
-                    'end': current_offset + len(run_text),
-                    'text': run_text
-                })
-                current_offset += len(run_text)
+        run_text_map = self._build_run_text_map(target_para)
 
         # Find all runs that overlap with selection [start_offset, end_offset]
-        affected_runs = []
-        for run_info in run_text_map:
-            if run_info['end'] > start_offset and run_info['start'] < end_offset:
-                affected_runs.append(run_info)
+        affected_runs = [
+            run_info for run_info in run_text_map
+            if run_info['end'] > start_offset and run_info['start'] < end_offset
+        ]
 
         if not affected_runs:
             raise RuntimeError(f"Selection range [{start_offset}, {end_offset}] not found in paragraph {paragraph_index}")
@@ -3584,7 +3163,7 @@ class DocxFullEditor:
                                        is_external=True)
 
         # Process each affected run in reverse order to maintain insertion positions
-        for i, run_info in enumerate(reversed(affected_runs)):
+        for run_info in reversed(affected_runs):
             run = run_info['run']
             run_start = run_info['start']
             run_end = run_info['end']
@@ -3609,10 +3188,13 @@ class DocxFullEditor:
             # Get original run formatting
             original_rpr = run._element.find(qn('w:rPr'))
 
-            # Get current position in paragraph (before modifications)
-            run_elements = list(p_element.findall(qn('w:r')))
+            # Get current position in the full paragraph child list.
+            # IMPORTANT: w:pPr must remain before any run/hyperlink children.
+            # Using only the run index would insert before w:pPr when the target
+            # run is the first text child in a formatted paragraph.
+            child_elements = list(p_element)
             try:
-                run_index = run_elements.index(run._element)
+                run_index = child_elements.index(run._element)
             except ValueError:
                 # Run not found in paragraph, skip this iteration
                 continue
@@ -3626,18 +3208,7 @@ class DocxFullEditor:
 
             # 1. Insert "before" text run (if not empty)
             if before_text:
-                before_run = OxmlElement('w:r')
-
-                # Copy original formatting
-                if original_rpr is not None:
-                    before_rpr = copy.deepcopy(original_rpr)
-                    before_run.append(before_rpr)
-
-                # Add before text
-                before_t = OxmlElement('w:t')
-                before_t.set(qn('xml:space'), 'preserve')
-                before_t.text = before_text
-                before_run.append(before_t)
+                before_run = self._create_run_element(before_text, original_rpr)
 
                 # Insert before hyperlink
                 p_element.insert(insert_offset, before_run)
@@ -3648,41 +3219,8 @@ class DocxFullEditor:
             hyperlink.set(qn('r:id'), r_id)
 
             # Create run for hyperlink text with original formatting + hyperlink style
-            hyperlink_run = OxmlElement('w:r')
-
-            # Copy original formatting
-            if original_rpr is not None:
-                hyperlink_rpr = copy.deepcopy(original_rpr)
-
-                # Add hyperlink style (blue and underlined)
-                color = OxmlElement('w:color')
-                color.set(qn('w:val'), '0000FF')
-                hyperlink_rpr.append(color)
-
-                underline = OxmlElement('w:u')
-                underline.set(qn('w:val'), 'single')
-                hyperlink_rpr.append(underline)
-
-                hyperlink_run.append(hyperlink_rpr)
-            else:
-                # No original formatting, add basic hyperlink style
-                hyperlink_rpr = OxmlElement('w:rPr')
-
-                color = OxmlElement('w:color')
-                color.set(qn('w:val'), '0000FF')
-                hyperlink_rpr.append(color)
-
-                underline = OxmlElement('w:u')
-                underline.set(qn('w:val'), 'single')
-                hyperlink_rpr.append(underline)
-
-                hyperlink_run.append(hyperlink_rpr)
-
-            # Add selected text
-            t = OxmlElement('w:t')
-            t.set(qn('xml:space'), 'preserve')
-            t.text = selected_text
-            hyperlink_run.append(t)
+            hyperlink_rpr = self._apply_hyperlink_style(self._copy_run_rpr(original_rpr))
+            hyperlink_run = self._create_run_element(selected_text, hyperlink_rpr, skip_props=None)
 
             hyperlink.append(hyperlink_run)
 
@@ -3692,18 +3230,7 @@ class DocxFullEditor:
 
             # 3. Insert "after" text run (if not empty)
             if after_text:
-                after_run = OxmlElement('w:r')
-
-                # Copy original formatting
-                if original_rpr is not None:
-                    after_rpr = copy.deepcopy(original_rpr)
-                    after_run.append(after_rpr)
-
-                # Add after text
-                after_t = OxmlElement('w:t')
-                after_t.set(qn('xml:space'), 'preserve')
-                after_t.text = after_text
-                after_run.append(after_t)
+                after_run = self._create_run_element(after_text, original_rpr)
 
                 # Insert after hyperlink
                 p_element.insert(insert_offset, after_run)

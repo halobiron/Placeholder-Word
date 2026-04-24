@@ -614,24 +614,13 @@ async def get_selection_format(
             else:
                 actual_para_index = editor.get_paragraph_index_from_block(block_index)
 
-        # CRITICAL FIX: Use offset for precise format detection when available
-        # This fixes bug where duplicate words always get format from first occurrence
-        format_info = None
-        if offset is not None and end_offset is not None:
-            # Use offset-based format extraction (more precise)
-            format_info = editor.get_format_at_offset(
-                paragraph_index=actual_para_index,
-                offset=offset,
-                end_offset=end_offset,
-                para_in_cell=para_in_cell
-            )
-
-        # Fallback to text-based search if offset method didn't work or wasn't provided
-        if format_info is None:
-            format_info = editor.get_format_at_position(
-                text=selected_text,
-                paragraph_index=actual_para_index
-            ) or {}
+        # Get format using offset (frontend always provides this)
+        format_info = editor.get_format(
+            paragraph_index=actual_para_index,
+            offset=offset,
+            end_offset=end_offset,
+            para_in_cell=para_in_cell
+        ) or {}
 
         # Convert to frontend format
         frontend_format = {

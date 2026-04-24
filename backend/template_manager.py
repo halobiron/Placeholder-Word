@@ -32,6 +32,97 @@ class MailMergeProcessor:
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         self.gemini_client = GeminiClient(gemini_api_key) if gemini_api_key else None
 
+    def _word_border_to_css(self, border) -> str:
+        """Convert a Word border element to a CSS border declaration.
+
+        Returns:
+            CSS border string, "__NONE__" when the border is explicitly disabled,
+            or None when no border element is present.
+        """
+        if border is None:
+            return None
+
+        border_val = border.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "single")
+        if border_val in ["none", "nil", ""]:
+            return "__NONE__"
+
+        border_style_map = {
+            "single": "solid",
+            "double": "double",
+            "dashed": "dashed",
+            "dotted": "dotted",
+            "dashSmallGap": "dashed",
+            "dotDash": "dashed",
+            "dotDotDash": "dotted",
+            "thick": "solid",
+        }
+        css_style = border_style_map.get(border_val, "solid")
+
+        border_sz = border.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}sz", "4")
+        try:
+            css_width = max(1, int(border_sz) // 6) if border_sz else 1
+        except (TypeError, ValueError):
+            css_width = 1
+
+        border_color = border.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}color", "000000")
+        if border_color and not border_color.startswith("#"):
+            border_color = f"#{border_color}"
+
+        return f"{css_width}px {css_style} {border_color or '#000000'}"
+
+    def _get_table_borders(self, table) -> Dict[str, object]:
+        """Extract tblBorders from a table, if present."""
+        table_borders = {}
+        try:
+            tbl_pr = table._element.find(f"{self.w_ns}tblPr")
+            if tbl_pr is None:
+                return table_borders
+
+            tbl_borders = tbl_pr.find(f"{self.w_ns}tblBorders")
+            if tbl_borders is None:
+                return table_borders
+
+            for side in ["top", "bottom", "left", "right", "insideH", "insideV"]:
+                border = tbl_borders.find(f"{self.w_ns}{side}")
+                if border is not None:
+                    table_borders[side] = border
+        except Exception as e:
+            print(f"[_get_table_borders] Error extracting table borders: {e}")
+
+        return table_borders
+
+    def _get_cell_border_css(
+        self,
+        tc_pr,
+        table_borders: Dict[str, object],
+        side: str,
+        row_idx: int,
+        col_idx: int,
+        last_row_idx: int,
+        last_col_idx: int,
+    ) -> str:
+        """Resolve the effective border for one cell side."""
+        tc_borders = tc_pr.find(f"{self.w_ns}tcBorders") if tc_pr is not None else None
+        if tc_borders is not None:
+            direct_border = tc_borders.find(f"{self.w_ns}{side}")
+            css_border = self._word_border_to_css(direct_border)
+            if css_border == "__NONE__":
+                return None
+            if css_border:
+                return css_border
+
+        table_border = None
+        if side == "top":
+            table_border = table_borders.get("top") if row_idx == 0 else table_borders.get("insideH")
+        elif side == "bottom":
+            table_border = table_borders.get("bottom") if row_idx == last_row_idx else table_borders.get("insideH")
+        elif side == "left":
+            table_border = table_borders.get("left") if col_idx == 0 else table_borders.get("insideV")
+        elif side == "right":
+            table_border = table_borders.get("right") if col_idx == last_col_idx else table_borders.get("insideV")
+
+        return self._word_border_to_css(table_border)
+
     def _clean_gemini_json_response(self, response_text: str) -> dict:
         """Clean Gemini JSON response by removing markdown code blocks
 
@@ -2079,10 +2170,13 @@ JSON:"""
         # Track block index for each cell (matching extract_structured_content logic)
         current_cell_block_index = block_index
         cells_processed = 0
+        table_borders = self._get_table_borders(table)
+        last_row_idx = len(table.rows) - 1
+        last_col_idx = len(table.columns) - 1
 
         for row_idx, row in enumerate(table.rows):
             # Extract row height from trPr
-            row_style = "border: 1px solid #ccc;"
+            row_style = ""
             try:
                 trPr = row._element.find(f"{self.w_ns}trPr")
                 if trPr is not None:
@@ -2201,14 +2295,17 @@ JSON:"""
                 # Create cell content (empty string if no paragraphs)
                 cell_content = "".join(cell_paragraphs_html) if cell_paragraphs_html else "&nbsp;"
 
-                tag = "th" if row_idx == 0 else "td"
+                # Use td for all rows to prevent browser default th styling (like centering)
+                # Word tables don't always have a header row, so td is a safer default for preview
+                tag = "td"
 
                 # Extract cell formatting from tcPr (table cell properties)
                 # IMPORTANT: Reset browser defaults to prevent inherited styling
                 # - font-weight: normal prevents TH from being bold by default
                 # - font-style: normal prevents italic inheritance
                 # - text-decoration: none prevents underline inheritance
-                cell_style = "border: 1px solid #ccc; padding: 5px; font-weight: normal; font-style: normal; text-decoration: none;"
+                # - text-align: left provides a consistent starting point
+                cell_style = "padding: 5px; font-weight: normal; font-style: normal; text-decoration: none; text-align: left;"
 
                 # Add column width from tblGrid if available
                 if column_widths and cell_idx < len(column_widths):
@@ -2225,15 +2322,33 @@ JSON:"""
                                 cell_style += f" background-color: #{fill};"
                                 print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] background: #{fill}")
 
-                        # Vertical alignment (NEW)
+                        # Vertical alignment (Default to 'top' to match Word)
                         v_align = tcPr.find(f"{self.w_ns}vAlign")
                         if v_align is not None:
-                            v_align_val = v_align.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "center")
+                            v_align_val = v_align.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "top")
                             # Map Word values to CSS
                             v_align_map = {"top": "top", "center": "middle", "bottom": "bottom"}
-                            css_v_align = v_align_map.get(v_align_val, "middle")
+                            css_v_align = v_align_map.get(v_align_val, "top")
                             cell_style += f" vertical-align: {css_v_align};"
                             print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] vertical-align: {css_v_align}")
+
+                        # Extract borders from tcBorders element first, then fall back to table borders.
+                        # If no border is defined anywhere, keep the cell borderless instead of inventing
+                        # a black default that does not exist in the DOCX.
+                        for side in ["top", "bottom", "left", "right"]:
+                            css_border = self._get_cell_border_css(
+                                tcPr,
+                                table_borders,
+                                side,
+                                row_idx,
+                                cell_idx,
+                                last_row_idx,
+                                last_col_idx
+                            )
+                            if css_border:
+                                cell_style += f" border-{side}: {css_border};"
+                                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] border-{side}: {css_border}")
+
                 except Exception as e:
                     print(f"[_process_table_to_html] Error extracting cell formatting: {e}")
 

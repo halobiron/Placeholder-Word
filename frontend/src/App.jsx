@@ -49,7 +49,13 @@ function App() {
   const [cellFormatOptions, setCellFormatOptions] = useState({
     background_color: '#ffffff',
     vertical_align: 'top',
-    horizontal_align: 'left'
+    horizontal_align: 'left',
+    borders: {
+      top: { style: 'single', size: 4, color: '#000000' },
+      bottom: { style: 'single', size: 4, color: '#000000' },
+      left: { style: 'single', size: 4, color: '#000000' },
+      right: { style: 'single', size: 4, color: '#000000' }
+    }
   })
 
   // Hyperlink editing states
@@ -1674,16 +1680,21 @@ function App() {
         return
       }
 
-      // Call API with block_index and offset
-      const response = await fetch(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/add-page-break-at-cursor`, {
+      // Call batch-update API with add_page_break operation
+      const response = await fetch(`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/batch-update`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           template_id: templateId,
-          block_index: blockIndex,
-          offset: offset
+          operations: [
+            {
+              type: 'add_page_break',
+              block_index: blockIndex,
+              offset: offset
+            }
+          ]
         })
       })
 
@@ -3849,6 +3860,98 @@ function App() {
                 </p>
               </div>
 
+              {/* Borders section */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Đường viền (Borders):</label>
+                <div className="space-y-3">
+                  {['top', 'bottom', 'left', 'right'].map((side) => (
+                    <div key={side} className="flex items-center gap-2">
+                      <span className="w-16 text-xs font-medium capitalize text-gray-600">
+                        {side === 'top' ? 'Trên' : side === 'bottom' ? 'Dưới' : side === 'left' ? 'Trái' : 'Phải'}:
+                      </span>
+                      <select
+                        value={cellFormatOptions.borders[side].style}
+                        onChange={(e) => setCellFormatOptions({
+                          ...cellFormatOptions,
+                          borders: {
+                            ...cellFormatOptions.borders,
+                            [side]: { ...cellFormatOptions.borders[side], style: e.target.value }
+                          }
+                        })}
+                        className="px-2 py-1 border border-gray-300 rounded text-xs flex-1"
+                      >
+                        <option value="none">Không có</option>
+                        <option value="single">Đường đơn</option>
+                        <option value="double">Đường kép</option>
+                        <option value="dashed">Nét đứt</option>
+                        <option value="dotted">Chấm</option>
+                      </select>
+                      <select
+                        value={cellFormatOptions.borders[side].size}
+                        onChange={(e) => setCellFormatOptions({
+                          ...cellFormatOptions,
+                          borders: {
+                            ...cellFormatOptions.borders,
+                            [side]: { ...cellFormatOptions.borders[side], size: parseInt(e.target.value) || 0 }
+                          }
+                        })}
+                        className="w-24 px-2 py-1 border border-gray-300 rounded text-xs"
+                        title="Độ dày viền"
+                      >
+                        <option value="0">Không viền</option>
+                        <option value="4">Mỏng (0.5pt)</option>
+                        <option value="8">Mảnh (1pt)</option>
+                        <option value="12">Trung bình (1.5pt)</option>
+                        <option value="16">Dày (2pt)</option>
+                        <option value="24">Rất dày (3pt)</option>
+                        <option value="32">Đồ sộ (4pt)</option>
+                      </select>
+                      <input
+                        type="color"
+                        value={cellFormatOptions.borders[side].color}
+                        onChange={(e) => setCellFormatOptions({
+                          ...cellFormatOptions,
+                          borders: {
+                            ...cellFormatOptions.borders,
+                            [side]: { ...cellFormatOptions.borders[side], color: e.target.value }
+                          }
+                        })}
+                        className="h-7 w-10 border border-gray-300 rounded cursor-pointer"
+                        title="Màu viền"
+                      />
+                      <input
+                        type="text"
+                        value={cellFormatOptions.borders[side].color}
+                        onChange={(e) => setCellFormatOptions({
+                          ...cellFormatOptions,
+                          borders: {
+                            ...cellFormatOptions.borders,
+                            [side]: { ...cellFormatOptions.borders[side], color: e.target.value }
+                          }
+                        })}
+                        className="w-20 px-2 py-1 border border-gray-300 rounded text-xs"
+                        placeholder="#000000"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCellFormatOptions({
+                    ...cellFormatOptions,
+                    borders: {
+                      top: { style: 'single', size: 4, color: '#000000' },
+                      bottom: { style: 'single', size: 4, color: '#000000' },
+                      left: { style: 'single', size: 4, color: '#000000' },
+                      right: { style: 'single', size: 4, color: '#000000' }
+                    }
+                  })}
+                  className="mt-2 text-xs text-indigo-600 hover:text-indigo-800 underline"
+                >
+                  Reset về mặc định
+                </button>
+              </div>
+
               {/* Buttons */}
               <div className="flex gap-2 pt-4">
                 <button
@@ -3863,7 +3966,13 @@ function App() {
                     setCellFormatOptions({
                       background_color: '#ffffff',
                       vertical_align: 'top',
-                      horizontal_align: 'left'
+                      horizontal_align: 'left',
+                      borders: {
+                        top: { style: 'single', size: 4, color: '#000000' },
+                        bottom: { style: 'single', size: 4, color: '#000000' },
+                        left: { style: 'single', size: 4, color: '#000000' },
+                        right: { style: 'single', size: 4, color: '#000000' }
+                      }
                     })
                   }}
                   className="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 font-medium"

@@ -297,13 +297,17 @@ class FormatTableCellOp(BaseOperation):
     Format a table cell (background color, alignment, borders)
 
     format_options can include:
-    - background_color (hex, e.g., "FFFF00")
+    - background_color (hex, e.g., "FFFF00" or "#FFFF00")
     - horizontal_align (left/center/right)
-    - vertical_align (top/middle/bottom)
+    - vertical_align (top/center/bottom)
+    - borders (dict with top/bottom/left/right keys):
+        Each border has: style (none/single/double/dashed/dotted), size (0-96), color (hex)
+        Example: {"top": {"style": "single", "size": 4, "color": "#000000"}, ...}
 
     Example:
         {"type": "format_table_cell", "table_index": 0, "row_index": 1, "col_index": 2,
-         "format_options": {"background_color": "FFFF00", "horizontal_align": "center"}}
+         "format_options": {"background_color": "FFFF00", "horizontal_align": "center",
+          "borders": {"top": {"style": "single", "size": 4, "color": "#000000"}}}}
     """
     type: Literal["format_table_cell"] = "format_table_cell"
     table_index: int = Field(..., ge=0, description="Table index")
