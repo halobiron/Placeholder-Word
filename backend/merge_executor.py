@@ -18,7 +18,12 @@ RESULT_DIR = Path(__file__).parent / "uploads" / "results"
 class MergeExecutor:
     """Execute mail merge operations with formatting preservation"""
 
-    def execute_merge(self, template_path: str, data: Dict[str, str]) -> str:
+    def execute_merge(
+        self,
+        template_path: str,
+        data: Dict[str, str],
+        locked_fields: set[str] | None = None
+    ) -> str:
         """Execute mail merge with provided data while preserving formatting"""
         template_path = Path(template_path)
         if not template_path.exists():
@@ -30,7 +35,7 @@ class MergeExecutor:
             raise ValueError(f"Failed to load template: {e}")
 
         # Execute merge with formatting preservation
-        self._merge_with_formatting(doc, data)
+        self._merge_with_formatting(doc, data, locked_fields or set())
 
         # Generate result path
         result_id = str(uuid.uuid4())
@@ -41,8 +46,18 @@ class MergeExecutor:
 
         return str(result_path), result_id
 
-    def _merge_with_formatting(self, doc: Document, data: Dict[str, str]):
-        """Replace mail merge fields with values while preserving formatting"""
+    def _merge_with_formatting(
+        self,
+        doc: Document,
+        data: Dict[str, str],
+        locked_fields: set[str]
+    ):
+        """Replace mail merge fields with values while preserving formatting.
+
+        Locked fields are treated as empty values so they resolve back to the
+        original placeholder text stored in the field's ``\\z`` switch instead of
+        leaving raw MERGEFIELD markup behind.
+        """
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
         # Find all fldSimple elements in the entire document (including tables, headers, footers)
@@ -55,11 +70,18 @@ class MergeExecutor:
                 continue
 
             field_name = match.group(1)
+
             z_match = re.search(r'\\z\s*"([^"]*)"', instr)
             original_text = z_match.group(1) if z_match else ""
 
-            # Get replacement value, fallback to original_text if empty
-            replacement = data.get(field_name, "")
+            # Locked fields behave like empty values so they fall back to the
+            # original placeholder text captured in the template.
+            if field_name in locked_fields:
+                replacement = original_text
+            else:
+                # Get replacement value, fallback to original_text if empty
+                replacement = data.get(field_name, "")
+
             if replacement is None or str(replacement).strip() == "":
                 replacement = original_text
             else:

@@ -77,6 +77,18 @@ def handle_endpoint_error(endpoint_name: str, error: Exception) -> HTTPException
     return HTTPException(status_code=500, detail=error_detail)
 
 
+def parse_json_list(raw_value: str | None) -> list[str]:
+    """Parse a JSON array form field into a list of strings."""
+    if not raw_value:
+        return []
+
+    parsed = json.loads(raw_value)
+    if not isinstance(parsed, list):
+        raise ValueError("Expected a JSON array")
+
+    return [str(item) for item in parsed if item is not None]
+
+
 # Setup paths
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -167,7 +179,7 @@ async def convert_to_template(file: UploadFile = File(...)):
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        processor = MailMergeProcessor(gemini_api_key=None)
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path))
@@ -197,7 +209,8 @@ async def merge_template(
     template_id: str = Form(...),
     context: str = Form(None),
     field_values: str = Form(None),
-    active_fields: str = Form(None)
+    active_fields: str = Form(None),
+    locked_fields: str = Form(None)
 ):
     """Fill Mail Merge template with data
 
@@ -235,9 +248,13 @@ async def merge_template(
             except ValueError as e:
                 raise HTTPException(status_code=500, detail=str(e))
             
-            if active_fields:
-                active_f = set(json.loads(active_fields))
+            active_f = set(parse_json_list(active_fields))
+            locked_f = set(parse_json_list(locked_fields))
+
+            if active_f:
                 template_fields = [f for f in template_fields if f in active_f]
+            if locked_f:
+                template_fields = [f for f in template_fields if f not in locked_f]
 
             logger.debug("=== MERGE DEBUG ===")
             logger.debug(f"Template fields to extract: {template_fields}")
@@ -254,7 +271,12 @@ async def merge_template(
             )
 
         # Execute merge
-        result_path, result_id = executor.execute_merge(str(template_path), data)
+        locked_f = set(parse_json_list(locked_fields))
+        result_path, result_id = executor.execute_merge(
+            str(template_path),
+            data,
+            locked_fields=locked_f
+        )
 
         return JSONResponse(content={
             "result_id": result_id,

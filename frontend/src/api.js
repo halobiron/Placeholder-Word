@@ -39,7 +39,13 @@ export const applySuggestions = async (templateId, suggestions) => {
   return response.data
 }
 
-export const mergeTemplate = async (templateId, data, isDirectValues = false, activeFields = null) => {
+export const mergeTemplate = async (
+  templateId,
+  data,
+  isDirectValues = false,
+  activeFields = null,
+  lockedFields = null
+) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
 
@@ -53,6 +59,10 @@ export const mergeTemplate = async (templateId, data, isDirectValues = false, ac
 
   if (activeFields) {
     formData.append('active_fields', JSON.stringify(activeFields))
+  }
+
+  if (lockedFields) {
+    formData.append('locked_fields', JSON.stringify(lockedFields))
   }
 
   const response = await axios.post(`${API_BASE}/merge`, formData, {

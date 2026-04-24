@@ -9,6 +9,8 @@ function App() {
   const [templateId, setTemplateId] = useState(null)
   const [editorHtml, setEditorHtml] = useState(null)
   const [fields, setFields] = useState([])
+  const [lockedFields, setLockedFields] = useState([]) // Fields kept at their original placeholder state during merge
+  const [selectedField, setSelectedField] = useState(null) // Field selected for keyboard shortcuts
   const [fieldValues, setFieldValues] = useState({}) // Direct value editing
   const [context, setContext] = useState('')
   const [resultId, setResultId] = useState(null)
@@ -73,6 +75,11 @@ function App() {
   // Warning message for mid-paragraph clicks
   const [paragraphWarning, setParagraphWarning] = useState(null)
 
+  const unlockedFields = useMemo(
+    () => fields.filter((field) => !lockedFields.includes(field)),
+    [fields, lockedFields]
+  )
+
   // Extract placeholders from HTML
   const extractFields = (html) => {
     if (!html) return []
@@ -84,6 +91,36 @@ function App() {
     }
     return Array.from(found)
   }
+
+  useEffect(() => {
+    setLockedFields((prev) => {
+      const next = prev.filter((field) => fields.includes(field))
+      if (next.length === prev.length && next.every((field, index) => field === prev[index])) {
+        return prev
+      }
+      return next
+    })
+  }, [fields])
+
+  useEffect(() => {
+    if (selectedField && !fields.includes(selectedField)) {
+      setSelectedField(null)
+    }
+  }, [fields, selectedField])
+
+  useEffect(() => {
+    const editor = document.getElementById('document-editor')
+    if (!editor) return
+
+    editor.querySelectorAll('.mail-merge-placeholder').forEach((span) => {
+      const fieldName = span.getAttribute('data-field')
+      const isSelected = fieldName === selectedField
+      const isLocked = lockedFields.includes(fieldName)
+
+      span.classList.toggle('is-selected', isSelected)
+      span.classList.toggle('is-locked', isLocked)
+    })
+  }, [editorHtml, selectedField, lockedFields])
 
   // =============================================================================
   // BATCH UPDATE HELPER: Build operations from changes
@@ -656,7 +693,7 @@ function App() {
     [templateId]
   )
 
-  // Attach click handlers to placeholders for rename
+  // Attach click handlers to placeholders for selection / rename
   useEffect(() => {
     const editor = document.getElementById('document-editor')
     if (!editor || !editorHtml) return
@@ -664,16 +701,30 @@ function App() {
     // Remove old handlers first
     editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
       span.onclick = null
+      span.ondblclick = null
     })
 
-    // Attach new handlers
+    // Single click selects the placeholder for keyboard lock toggle.
+    // Double click keeps rename available without conflicting with the shortcut.
     editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
       const fieldName = span.getAttribute('data-field')
       span.onclick = (e) => {
         e.preventDefault()
         e.stopPropagation()
 
-        // If in add mode, don't rename - show message
+        // If in add mode, don't select/rename
+        if (isAddMode) {
+          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
+          return
+        }
+
+        setSelectedField(fieldName)
+      }
+
+      span.ondblclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+
         if (isAddMode) {
           setError('Thoát chế độ thêm placeholder trước khi đổi tên')
           return
@@ -985,6 +1036,28 @@ function App() {
     }
   }, [editorHtml, isAddMode])
 
+  // Keyboard shortcut: Ctrl+Shift+L toggles lock for the selected placeholder
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const isToggleLock = (e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l'
+      if (!isToggleLock) return
+
+      const currentField = selectedField
+      const wasLocked = currentField ? lockedFields.includes(currentField) : false
+
+      if (currentField) {
+        toggleFieldLock(currentField)
+        e.preventDefault()
+        e.stopPropagation()
+        setError(`🔒 Đã ${wasLocked ? 'mở khóa' : 'khóa'} «${currentField}»`)
+        setTimeout(() => setError(null), 1500)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
+  }, [selectedField, lockedFields])
+
   // Rename placeholder using Batch Update API
   const renameField = async (oldName, newName) => {
     console.log('[renameField] ========== RENAME STARTED ==========')
@@ -1001,6 +1074,7 @@ function App() {
     // Store current state for rollback
     const oldHtml = editorHtml
     const oldFields = extractFields(editor.innerHTML)
+    const oldLockedFields = [...lockedFields]
 
     console.log('[renameField] Stored state for rollback:', {
       oldFieldsCount: oldFields.length
@@ -1054,6 +1128,12 @@ function App() {
 
       // Update state from backend response
       setFields(result.fields || extractFields(newHtml))
+      setSelectedField((prev) => (prev === oldName ? newName : prev))
+      setLockedFields((prev) =>
+        prev.includes(oldName)
+          ? prev.map((field) => (field === oldName ? newName : field))
+          : prev
+      )
       setError(`✅ Đã đổi tên «${oldName}» → «${newName}»`)
       setTimeout(() => setError(null), 2000)
 
@@ -1078,6 +1158,8 @@ function App() {
       })
       setEditorHtml(oldHtml)
       setFields(oldFields)
+      setSelectedField((prev) => (prev === newName ? oldName : prev))
+      setLockedFields(oldLockedFields)
       console.log('[renameField] Rollback completed')
 
       setTimeout(() => setError(null), 3000)
@@ -1101,6 +1183,7 @@ function App() {
     // Store current state for rollback
     const oldHtml = editorHtml
     const oldFields = [...fields]
+    const oldLockedFields = [...lockedFields]
 
     console.log('[deleteField] Stored state for rollback:', {
       oldFieldsCount: oldFields.length
@@ -1155,6 +1238,8 @@ function App() {
       if (result.success) {
         // Update local state after successful server update
                 updateEditorHtmlWithPreservation(result.html_preview, result.fields)
+                setSelectedField((prev) => (prev === fieldName ? null : prev))
+                setLockedFields((prev) => prev.filter((field) => field !== fieldName))
                 setError(`✅ Đã xóa «${fieldName}»`)
         setTimeout(() => setError(null), 2000)
 
@@ -1177,6 +1262,8 @@ function App() {
       console.log('[deleteField] Rolling back UI changes...')
       editor.innerHTML = oldHtml
       updateEditorHtmlWithPreservation(oldHtml, oldFields)
+      setSelectedField((prev) => (prev === fieldName ? null : prev))
+      setLockedFields(oldLockedFields)
             console.log('[deleteField] Rollback completed')
 
       setTimeout(() => setError(null), 3000)
@@ -1190,7 +1277,25 @@ function App() {
     setTemplateId(data.templateId)
     setEditorHtml(data.previewHtml)
     setFields(data.fields)
+    setLockedFields([])
+    setSelectedField(null)
     setStep('preview')
+  }
+
+  const toggleFieldLock = (fieldName) => {
+    setLockedFields((prev) =>
+      prev.includes(fieldName)
+        ? prev.filter((field) => field !== fieldName)
+        : [...prev, fieldName]
+    )
+  }
+
+  const lockAllFields = () => {
+    setLockedFields([...fields])
+  }
+
+  const unlockAllFields = () => {
+    setLockedFields([])
   }
 
   // Handle merge
@@ -1210,7 +1315,14 @@ function App() {
     try {
       // Use direct values if available, otherwise use context
       const data = hasDirectValues ? fieldValues : context
-      const result = await mergeTemplate(templateId, data, hasDirectValues, fields)
+      const activeFields = hasDirectValues ? null : unlockedFields
+      const result = await mergeTemplate(
+        templateId,
+        data,
+        hasDirectValues,
+        activeFields,
+        lockedFields
+      )
       setResultId(result.result_id)
 
       // Fetch preview
@@ -2018,13 +2130,57 @@ function App() {
                 <div className="p-4 border rounded-lg bg-blue-50 border-blue-200">
                   <div className="flex justify-between items-start gap-4">
                     <div className="flex-1">
-                      <p className="text-sm font-semibold mb-2">
-                        {`✅ ${fields.length} placeholder:`}
-                      </p>
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <p className="text-sm font-semibold">
+                          {`✅ ${fields.length} placeholder:`}
+                        </p>
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-gray-600">
+                            Gemini được phép điền: <strong>{unlockedFields.length}</strong>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={lockAllFields}
+                            className="px-2 py-1 rounded bg-amber-100 text-amber-800 hover:bg-amber-200 border border-amber-200 transition-colors"
+                          >
+                            Khóa tất cả
+                          </button>
+                          <button
+                            type="button"
+                            onClick={unlockAllFields}
+                            className="px-2 py-1 rounded bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200 transition-colors"
+                            >
+                              Mở khóa
+                            </button>
+                          </div>
+                      </div>
                       <div className="mt-2 flex flex-wrap gap-2">
                         {fields.map((f, i) => (
-                          <span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-blue-300 rounded text-xs font-mono">
+                          <span
+                            key={i}
+                            className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-mono border cursor-pointer transition-colors ${
+                              selectedField === f ? 'ring-2 ring-blue-400 ring-offset-1' : ''
+                            } ${
+                              lockedFields.includes(f)
+                                ? 'bg-amber-100 border-amber-300 text-amber-900'
+                                : 'bg-white border-blue-300 text-gray-800'
+                            }`}
+                            onClick={() => setSelectedField(f)}
+                            title={`Chọn «${f}» để khóa/mở khóa khi merge`}
+                          >
                             <span>«{f}»</span>
+                            {selectedField === f && (
+                              <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-blue-100 text-blue-700 border border-blue-200 whitespace-nowrap">
+                                Đang chọn
+                              </span>
+                            )}
+                            <button
+                              onClick={() => toggleFieldLock(f)}
+                              className={`font-bold ${lockedFields.includes(f) ? 'text-amber-700 hover:text-amber-900' : 'text-gray-500 hover:text-gray-800'}`}
+                              title={lockedFields.includes(f) ? 'Mở khóa khi merge' : 'Khóa khi merge'}
+                            >
+                              {lockedFields.includes(f) ? '🔒' : '🔓'}
+                            </button>
                             <button
                               onClick={() => deleteField(f)}
                               className="text-red-500 hover:text-red-700 font-bold"
@@ -3327,7 +3483,7 @@ function App() {
                   dangerouslySetInnerHTML={{ __html: editorHtml }}
                 />
                 <p className="text-xs text-gray-500 mt-2">
-                  💡 Click vào placeholder để đổi tên. Click "➕ Thêm Placeholder" để thêm placeholder thủ công vào vị trí bất kỳ.
+                  💡 Click vào placeholder để chọn, nhấn <span className="font-mono font-semibold">Ctrl+Shift+L</span> để khóa/mở khóa, double-click để đổi tên. Click "➕ Thêm Placeholder" để thêm placeholder thủ công vào vị trí bất kỳ.
                 </p>
               </div>
 
@@ -3343,9 +3499,18 @@ function App() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {fields.map((field) => (
                         <div key={field} className="flex items-center gap-2">
-                          <label className="text-xs font-mono text-gray-700 w-1/2 truncate" title={field}>
-                            «{field}»:
-                          </label>
+                          <div className="w-1/2 min-w-0">
+                            <div className="flex items-center gap-1">
+                              <label className="text-xs font-mono text-gray-700 truncate" title={field}>
+                                «{field}»:
+                              </label>
+                              {lockedFields.includes(field) && (
+                                <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-amber-100 text-amber-800 border border-amber-200 whitespace-nowrap">
+                                  Gemini bỏ qua
+                                </span>
+                              )}
+                            </div>
+                          </div>
                           <input
                             type="text"
                             value={fieldValues[field] || ''}
@@ -3499,6 +3664,19 @@ function App() {
             border: 2px solid #4a90d9;
             cursor: pointer;
             display: inline-block;
+            transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+          }
+          .mail-merge-placeholder.is-locked {
+            background: linear-gradient(120deg, #fff4d6 0%, #ffd59e 100%);
+            border-color: #d97706;
+            color: #7c2d12;
+            box-shadow: inset 0 0 0 1px rgba(180, 83, 9, 0.18);
+          }
+          .mail-merge-placeholder.is-selected {
+            outline: 2px solid #2563eb;
+            outline-offset: 2px;
+            border-radius: 4px;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
           }
           .mail-merge-placeholder:hover {
             transform: scale(1.05);

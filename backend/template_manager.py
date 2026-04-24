@@ -173,7 +173,6 @@ class MailMergeProcessor:
             print("=== STEP 1: Creating basic placeholders ===")
             converter = SmartMailMergeConverter(docx_path)
             fields = converter.convert(str(output_path))
-            print(f"Basic fields created: {fields}")
 
             # Step 2: Use Gemini to suggest better names (if API key provided)
             if self.gemini_client and fields:
@@ -252,14 +251,8 @@ class MailMergeProcessor:
                 child_type = type(child).__name__
                 if isinstance(child, CT_Tbl):
                     table_count += 1
-                    print(f"[DEBUG] Child #{child_count}: TABLE #{table_count} (type: {child_type})")
                 elif isinstance(child, CT_P):
                     para_count += 1
-                    print(f"[DEBUG] Child #{child_count}: PARAGRAPH #{para_count}")
-                else:
-                    print(f"[DEBUG] Child #{child_count}: UNKNOWN TYPE (type: {child_type}, isinstance CT_Tbl: {isinstance(child, CT_Tbl)}, isinstance CT_P: {isinstance(child, CT_P)})")
-
-            print(f"[DEBUG] Total children: {child_count} (tables: {table_count}, paras: {para_count})")
 
             for child in doc.element.body.iterchildren():
                 if isinstance(child, CT_P):
@@ -284,16 +277,11 @@ class MailMergeProcessor:
                     if text or has_images:
                         html = self._process_para_to_html(para, block_index, is_empty=False)
                         html_parts.append(html)
-                        if text:
-                            print(f"[HTML Preview] Block {block_index}: {text[:60]}...")
-                        else:
-                            print(f"[HTML Preview] Block {block_index}: IMAGE ONLY (no text)")
                         block_index += 1
                     else:
                         # Empty paragraph - render with block_index (selectable for adding placeholders)
                         html = self._process_para_to_html(para, block_index, is_empty=True)
                         html_parts.append(html)
-                        print(f"[HTML Preview] Block {block_index}: EMPTY LINE (selectable)")
                         block_index += 1
 
                 elif isinstance(child, CT_Tbl):
@@ -324,8 +312,6 @@ class MailMergeProcessor:
 
                             if cell_text:
                                 table_has_content = True
-                                print(f"[HTML Preview] Block {block_index}: TABLE_CELL[{row_idx},{cell_idx}] - {cell_text[:60]}...")
-
                             # CRITICAL FIX: Increment block_index for ALL cells, not just non-empty ones
                             # This ensures consistency with _process_table_to_html and _build_block_index_map
                             block_index += 1
