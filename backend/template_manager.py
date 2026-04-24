@@ -2368,5 +2368,3 @@ JSON:"""
         print(f"[_process_table_to_html] HTML preview: {html_result[:200]}...")
         return html_result
 
-
-

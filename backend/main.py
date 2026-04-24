@@ -3,6 +3,7 @@ import os
 import re
 import uuid
 import tempfile
+import shutil
 from pathlib import Path
 from typing import Dict, Literal
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
@@ -901,7 +902,6 @@ async def batch_update(request: Request):
         batch_request = BatchUpdateRequest(**request_data)
 
         template_path = validate_template_path(batch_request.template_id)
-        editor = DocxFullEditor(str(template_path))
 
         results = {
             "template_id": batch_request.template_id,
@@ -919,104 +919,110 @@ async def batch_update(request: Request):
         logger.info(f" Validate only: {batch_request.validate_only}")
         logger.info(f" Stop on error: {batch_request.stop_on_error}")
 
-        # =============================================================================
-        # PHASE 1: VALIDATION
-        # =============================================================================
-        logger.info(f" ===== PHASE 1: VALIDATION =====")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            working_template_path = Path(tmpdir) / template_path.name
+            shutil.copy2(template_path, working_template_path)
+            editor = DocxFullEditor(str(working_template_path))
 
-        for i, op in enumerate(batch_request.operations):
-            try:
-                validate_operation(editor, op)
+            logger.info(" ===== PHASE 1: VALIDATE AND APPLY =====")
+
+            for i, op in enumerate(batch_request.operations):
+                try:
+                    validate_operation(editor, op)
+                except ValueError as e:
+                    error_msg = f"Op {i} ({op.type}): {str(e)}"
+                    results["validation_errors"].append(error_msg)
+                    results["operation_results"].append({
+                        "index": i,
+                        "type": op.type,
+                        "status": "validation_failed",
+                        "error": str(e)
+                    })
+                    logger.debug(f" Op {i} ({op.type}): ✗ VALIDATION FAILED - {str(e)}")
+                    if batch_request.stop_on_error:
+                        break
+                    continue
+
+                try:
+                    execute_operation(editor, op)
+                except Exception as e:
+                    error_msg = f"Op {i} ({op.type}): {str(e)}"
+                    if batch_request.validate_only:
+                        results["validation_errors"].append(error_msg)
+                        results["operation_results"].append({
+                            "index": i,
+                            "type": op.type,
+                            "status": "validation_failed",
+                            "error": str(e)
+                        })
+                    else:
+                        results["failed"] += 1
+                        results["execution_errors"].append(error_msg)
+                        results["operation_results"].append({
+                            "index": i,
+                            "type": op.type,
+                            "status": "failed",
+                            "error": str(e)
+                        })
+                    logger.debug(f" Op {i} ({op.type}): ✗ EXECUTION FAILED - {str(e)}")
+                    if batch_request.stop_on_error:
+                        if batch_request.validate_only:
+                            break
+                        raise HTTPException(
+                            status_code=500,
+                            detail={
+                                "error": "Batch update failed",
+                                "failed_operation": error_msg,
+                                "message": f"Operation {i} failed during execution."
+                            }
+                        )
+                    continue
+
+                results["successful"] += 1
                 results["operation_results"].append({
                     "index": i,
                     "type": op.type,
-                    "status": "validated"
+                    "status": "validated" if batch_request.validate_only else "executed"
                 })
-                logger.debug(f" Op {i} ({op.type}): ✓ PASSED")
+                logger.debug(f" Op {i} ({op.type}): ✓ SUCCESS")
 
-            except ValueError as e:
-                error_msg = f"Op {i} ({op.type}): {str(e)}"
-                results["validation_errors"].append(error_msg)
-                results["operation_results"].append({
-                    "index": i,
-                    "type": op.type,
-                    "status": "validation_failed",
-                    "error": str(e)
-                })
-                logger.debug(f" Op {i} ({op.type}): ✗ FAILED - {str(e)}")
+            if results["validation_errors"]:
+                logger.info(" ===== VALIDATION FAILED =====")
+                logger.info(f" Validation errors: {len(results['validation_errors'])}")
 
-        # If validation failed, return errors without executing
-        if results["validation_errors"]:
-            logger.info(f" ===== VALIDATION FAILED =====")
-            logger.info(f" Validation errors: {len(results['validation_errors'])}")
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        **results,
+                        "success": False,
+                        "message": "Validation failed - no changes made",
+                        "fields": [],
+                        "field_count": 0,
+                        "html_preview": ""
+                    }
+                )
 
-            return JSONResponse(
-                status_code=400,
-                content={
+            if batch_request.validate_only:
+                logger.info(" ===== VALIDATE ONLY MODE - SKIPPING SAVE =====")
+
+                return {
                     **results,
-                    "success": False,
-                    "message": "Validation failed - no changes made",
+                    "success": True,
+                    "message": "Validation passed - no changes made (validate_only mode)",
                     "fields": [],
                     "field_count": 0,
                     "html_preview": ""
                 }
-            )
 
-        # If validate_only mode, return success without executing
-        if batch_request.validate_only:
-            logger.info(f" ===== VALIDATE ONLY MODE - SKIPPING EXECUTION =====")
+            # =============================================================================
+            # PHASE 2: SAVE & REGENERATE
+            # =============================================================================
+            logger.info(" ===== PHASE 2: SAVE & REGENERATE =====")
 
-            return {
-                **results,
-                "success": True,
-                "message": "Validation passed - no changes made (validate_only mode)"
-            }
-
-        # =============================================================================
-        # PHASE 2: EXECUTION
-        # =============================================================================
-        logger.info(f" ===== PHASE 2: EXECUTION =====")
-
-        for i, op in enumerate(batch_request.operations):
-            try:
-                execute_operation(editor, op)
-                results["successful"] += 1
-                results["operation_results"][i]["status"] = "executed"
-                logger.debug(f" Op {i} ({op.type}): ✓ SUCCESS")
-
-            except Exception as e:
-                results["failed"] += 1
-                error_msg = f"Op {i} ({op.type}): {str(e)}"
-                results["execution_errors"].append(error_msg)
-                results["operation_results"][i]["status"] = "failed"
-                results["operation_results"][i]["error"] = str(e)
-                logger.debug(f" Op {i} ({op.type}): ✗ FAILED - {str(e)}")
-
-                # Stop on error if requested
-                if batch_request.stop_on_error:
-                    logger.info(f" ===== STOP ON ERROR - ROLLING BACK =====")
-                    logger.info(f" Completed {i} operations before failure")
-
-                    # Rollback: reload from disk to undo changes
-                    editor = DocxFullEditor(str(template_path))
-
-                    raise HTTPException(
-                        status_code=500,
-                        detail={
-                            "error": "Batch update failed - transaction rolled back",
-                            "completed_operations": i,
-                            "failed_operation": error_msg,
-                            "message": f"Operation {i} failed. Previous {i} operations have been rolled back."
-                        }
-                    )
-
-        # =============================================================================
-        # PHASE 3: SAVE & REGENERATE
-        # =============================================================================
-        logger.info(f" ===== PHASE 3: SAVE & REGENERATE =====")
-
-        # Save updated template
-        fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
+            # Save updated template in the isolated working copy first, then
+            # commit the final file back to the real template path.
+            fields, html_preview = save_and_regenerate_preview(editor, str(working_template_path))
+            shutil.copy2(working_template_path, template_path)
 
         logger.info(f" ===== BATCH UPDATE COMPLETE =====")
         logger.info(f" Successful: {results['successful']}")
@@ -1038,13 +1044,6 @@ async def batch_update(request: Request):
         logger.error(f" ===== BATCH UPDATE FAILED =====")
         logger.error(f" {str(e)}")
         logger.debug(f"[TRACEBACK] {traceback.format_exc()}")
-
-        # Ensure we have a fresh editor instance after error
-        try:
-            editor = DocxFullEditor(str(template_path))
-        except:
-            pass
-
         raise HTTPException(
             status_code=500,
             detail=f"Batch update failed: {str(e)}"

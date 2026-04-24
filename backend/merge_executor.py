@@ -12,25 +12,11 @@ from docx.oxml.ns import qn
 from lxml import etree
 import copy
 
+RESULT_DIR = Path(__file__).parent / "uploads" / "results"
+
 
 class MergeExecutor:
     """Execute mail merge operations with formatting preservation"""
-
-    def __init__(self, result_dir: str = None):
-        """Initialize executor
-
-        Args:
-            result_dir: Directory to save merged documents
-        """
-        if result_dir is None:
-            # Determine directory relative to script
-            base_dir = Path(__file__).parent
-            self.result_dir = base_dir / "uploads" / "results"
-        else:
-            self.result_dir = Path(result_dir)
-
-        # Ensure directory exists
-        self.result_dir.mkdir(parents=True, exist_ok=True)
 
     def execute_merge(self, template_path: str, data: Dict[str, str]) -> str:
         """Execute mail merge with provided data while preserving formatting"""
@@ -48,7 +34,7 @@ class MergeExecutor:
 
         # Generate result path
         result_id = str(uuid.uuid4())
-        result_path = self.result_dir / f"{result_id}.docx"
+        result_path = RESULT_DIR / f"{result_id}.docx"
 
         # Save merged document
         doc.save(str(result_path))

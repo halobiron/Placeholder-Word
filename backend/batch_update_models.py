@@ -330,25 +330,6 @@ class AddTableAtCursorOp(BaseOperation):
     cols: int = Field(3, ge=1, le=10, description="Number of columns")
 
 
-# =============================================================================
-# IMAGE OPERATIONS
-# =============================================================================
-
-class AddImageOp(BaseOperation):
-    """
-    Add an image at document end or after specific text
-
-    Example:
-        {"type": "add_image", "image_path": "/uploads/image.png",
-         "position": "end", "width": 4.0}
-    """
-    type: Literal["add_image"] = "add_image"
-    image_path: str = Field(..., description="Path to image file")
-    position: Literal["end", "after_text"] = Field("end", description="Where to insert")
-    after_text: Optional[str] = Field(None, description="Text to insert after (if position='after_text')")
-    width: float = Field(4.0, ge=1.0, le=8.0, description="Image width in inches")
-
-
 class AddImageAtCursorOp(BaseOperation):
     """
     Add an image at cursor position
@@ -412,7 +393,6 @@ Operation = Union[
     FormatTableCellOp,
     AddTableAtCursorOp,
     # Image operations
-    AddImageOp,
     AddImageAtCursorOp,
     # Hyperlink operations
     AddHyperlinkOp,

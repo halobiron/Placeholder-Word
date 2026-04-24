@@ -161,6 +161,12 @@ def _validate_structural_op(editor: DocxFullEditor, op: Operation) -> None:
             if "block_index" not in block:
                 raise ValueError("Each block must have block_index")
             validate_block_index(editor, block["block_index"])
+            has_table_coords = any(k in block for k in ("table_index", "row_index", "col_index"))
+            if has_table_coords:
+                if not all(k in block for k in ("table_index", "row_index", "col_index")):
+                    raise ValueError("table_index, row_index, and col_index are required together")
+                if "para_in_cell" not in block or block["para_in_cell"] is None:
+                    raise ValueError("para_in_cell is required for delete_multiple_paragraphs in table cells")
     elif op.type in ("add_page_break", "add_table_at_cursor",
                      "add_image_at_cursor", "add_hyperlink"):
         validate_block_index(editor, op.block_index)
@@ -363,7 +369,7 @@ def _execute_delete_multiple(editor: DocxFullEditor, op: Operation) -> None:
 
                 para_in_cell = block_data.get("para_in_cell")
                 if para_in_cell is None:
-                    continue
+                    raise ValueError("para_in_cell is required for delete_multiple_paragraphs in table cells")
 
                 if para_in_cell < 0 or para_in_cell >= len(cell.paragraphs):
                     logger.warning(
@@ -452,8 +458,6 @@ def _execute_structural_op(editor: DocxFullEditor, op: Operation) -> None:
     elif op.type == "add_image_at_cursor":
         para_index = validate_block_index(editor, op.block_index)
         editor.add_image_at_cursor(para_index, op.offset, op.image_path, op.width)
-    elif op.type == "add_image":
-        editor.add_image(op.image_path, op.position, op.after_text, op.width)
     elif op.type == "add_hyperlink":
         para_index = validate_block_index(editor, op.block_index)
         if not editor.add_hyperlink(para_index, op.start_offset, op.end_offset, op.url):
@@ -502,7 +506,7 @@ def execute_operation(editor: DocxFullEditor, op: Operation) -> None:
             _execute_format_op(editor, op)
         elif op.type in ("add_paragraph", "delete_paragraph", "delete_multiple_paragraphs",
                          "add_page_break", "add_table_at_cursor", "add_image_at_cursor",
-                         "add_image", "add_hyperlink"):
+                         "add_hyperlink"):
             _execute_structural_op(editor, op)
         elif op.type in ("add_table_row", "delete_table_row", "add_table_column",
                          "delete_table_column", "format_table_cell"):
