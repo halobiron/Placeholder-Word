@@ -232,11 +232,25 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
 
 def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
     """Execute text operations"""
-    para_index = op.block_index
+    para_index = validate_block_index(editor, op.block_index)
     if op.para_in_cell is not None:
         para_index = editor.get_table_cell_paragraph_index(op.block_index, op.para_in_cell)
         if para_index is None:
             raise ValueError(f"Invalid para_in_cell")
+    else:
+        block_map = getattr(editor, "_block_to_para_index_map", None) or {}
+        block_data = block_map.get(op.block_index)
+        if block_data and block_data.get("type") == "table_cell":
+            cell = None
+            for table in editor.doc.tables:
+                if block_data["row"] < len(table.rows) and block_data["col"] < len(table.rows[block_data["row"]].cells):
+                    cell = table.rows[block_data["row"]].cells[block_data["col"]]
+                    break
+            if cell is not None and len(cell.paragraphs) > 1:
+                logger.warning(
+                    "update_text without para_in_cell on multi-paragraph cell: block_index=%s row=%s col=%s para_count=%s",
+                    op.block_index, block_data["row"], block_data["col"], len(cell.paragraphs)
+                )
 
     if op.type == "update_text":
         logger.info(
@@ -259,7 +273,7 @@ def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
 
 def _execute_format_op(editor: DocxFullEditor, op: Operation) -> None:
     """Execute formatting operations"""
-    para_index = op.block_index
+    para_index = validate_block_index(editor, op.block_index)
     if op.para_in_cell is not None:
         para_index = editor.get_table_cell_paragraph_index(op.block_index, op.para_in_cell)
         if para_index is None:
@@ -335,34 +349,87 @@ def _execute_delete_multiple(editor: DocxFullEditor, op: Operation) -> None:
     """Execute delete multiple paragraphs operation"""
     deleted_count = 0
 
-    for block_data in op.blocks:
+    resolved_targets = []
+
+    for order, block_data in enumerate(op.blocks):
         try:
             start_offset = block_data.get("start_offset")
             end_offset = block_data.get("end_offset")
             is_partial = (start_offset is not None and end_offset is not None)
 
-            if all(v in block_data.values() for v in ["table_index", "row_index", "col_index"]):
-                # Table cell
+            if all(k in block_data for k in ["table_index", "row_index", "col_index"]):
                 table = editor.doc.tables[block_data["table_index"]]
                 cell = table.rows[block_data["row_index"]].cells[block_data["col_index"]]
-                if block_data.get("para_in_cell") is not None:
-                    target_paragraph = cell.paragraphs[block_data["para_in_cell"]]
-                    success = (editor.delete_text_range(target_paragraph, start_offset, end_offset)
-                              if is_partial else editor.delete_paragraph(target_paragraph))
-                    if success:
-                        deleted_count += 1
+
+                para_in_cell = block_data.get("para_in_cell")
+                if para_in_cell is None:
+                    continue
+
+                if para_in_cell < 0 or para_in_cell >= len(cell.paragraphs):
+                    logger.warning(
+                        "Skipping invalid table cell paragraph: table=%s row=%s col=%s para_in_cell=%s",
+                        block_data["table_index"], block_data["row_index"], block_data["col_index"], para_in_cell
+                    )
+                    continue
+
+                para_index = editor.get_table_cell_paragraph_index(block_data["block_index"], para_in_cell)
+                if para_index is None:
+                    logger.warning("Could not resolve paragraph index for block=%s para_in_cell=%s",
+                                   block_data["block_index"], para_in_cell)
+                    continue
+
+                resolved_targets.append({
+                    "order": order,
+                    "para_index": para_index,
+                    "paragraph": cell.paragraphs[para_in_cell],
+                    "start_offset": start_offset,
+                    "end_offset": end_offset,
+                    "is_partial": is_partial,
+                    "source": block_data,
+                })
             else:
-                # Regular paragraph
                 para_index = editor.get_paragraph_index_from_block(block_data["block_index"])
-                if para_index is not None:
-                    target_paragraph = get_paragraph_at_index(editor, para_index)
-                    if target_paragraph:
-                        success = (editor.delete_text_range(target_paragraph, start_offset, end_offset)
-                                  if is_partial else editor.delete_paragraph(target_paragraph))
-                        if success:
-                            deleted_count += 1
+                if para_index is None:
+                    continue
+
+                target_paragraph = get_paragraph_at_index(editor, para_index)
+                if not target_paragraph:
+                    continue
+
+                resolved_targets.append({
+                    "order": order,
+                    "para_index": para_index,
+                    "paragraph": target_paragraph,
+                    "start_offset": start_offset,
+                    "end_offset": end_offset,
+                    "is_partial": is_partial,
+                    "source": block_data,
+                })
         except Exception as e:
-            logger.warning(f"Error deleting block {block_data}: {e}")
+            logger.warning(f"Error resolving block {block_data}: {e}")
+            continue
+
+    # Delete from the end of the document backward so index shifts do not
+    # invalidate later targets, especially inside the same table cell.
+    resolved_targets.sort(key=lambda item: (item["para_index"], item["order"]), reverse=True)
+
+    for target in resolved_targets:
+        try:
+            if target["is_partial"]:
+                success = editor.delete_text_range(
+                    target["paragraph"],
+                    target["start_offset"],
+                    target["end_offset"]
+                )
+            else:
+                success = editor.delete_paragraph(target["paragraph"])
+
+            if success:
+                deleted_count += 1
+            else:
+                logger.warning("Delete failed for target: %s", target["source"])
+        except Exception as e:
+            logger.warning(f"Error deleting target {target['source']}: {e}")
             continue
 
     logger.info(f"Deleted {deleted_count} paragraphs")

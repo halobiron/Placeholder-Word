@@ -632,7 +632,8 @@ function App() {
             await updateTextInTemplate(templateId, {
               blockIndex: cellBlockIndex,
               oldText: oldText,
-              newText: newText
+              newText: newText,
+              paraInCell
             })
 
             setError('✅ Đã cập nhật text trong ô bảng')
@@ -1597,7 +1598,9 @@ function App() {
 
       if (templateId) {
         try {
-          const response = await getSelectionFormat(templateId, selectedText, blockIndex)
+          // CRITICAL FIX: Pass offset information for precise format detection
+          // This fixes bug where duplicate words always get format from first occurrence
+          const response = await getSelectionFormat(templateId, selectedText, blockIndex, offset, endOffset, paraInCell)
           if (response?.format) {
             format = response.format
           }
@@ -2767,112 +2770,92 @@ function App() {
                               const editor = document.getElementById('document-editor')
                               if (!editor) return blocks
 
-                              // Get all blocks within the selection range
-                              const allBlocks = editor.querySelectorAll('[data-block-index], .cell-paragraph')
+                              // Only work with actual editable paragraphs.
+                              // Table cell wrappers also carry data-block-index, but they are
+                              // containers, not text blocks. Including them duplicates the
+                              // selection and breaks delete ranges in cells.
+                              const allBlocks = editor.querySelectorAll(
+                                '.cell-paragraph, [data-block-index]:not([data-type="table_cell"])'
+                              )
 
                               allBlocks.forEach(block => {
-                                // Check if this block intersects with selection
-                                const blockRange = document.createRange()
-                                blockRange.selectNodeContents(block)
-
-                                const intersects = range.intersectsNode(block)
-                                if (intersects) {
-                                  // Get block metadata
-                                  if (block.classList.contains('cell-paragraph')) {
-                                    // Table cell paragraph
-                                    const cellBlock = block.closest('[data-block-index]')
-                                    if (cellBlock) {
-                                      const blockText = block.textContent || ''
-                                      const blockInfo = {
-                                        type: 'table_cell',
-                                        blockIndex: parseInt(cellBlock.getAttribute('data-block-index')),
-                                        paraInCell: parseInt(block.getAttribute('data-para-in-cell')),
-                                        tableIndex: parseInt(cellBlock.getAttribute('data-table-index') || '0'),
-                                        rowIndex: parseInt(cellBlock.getAttribute('data-row')),
-                                        colIndex: parseInt(cellBlock.getAttribute('data-col')),
-                                        text: blockText?.trim() || ''
-                                      }
-
-                                      // Calculate offset if selection is partial
-                                      if (range.startContainer !== range.endContainer ||
-                                        range.startOffset !== range.endOffset) {
-                                        try {
-                                          // Calculate start offset relative to block text
-                                          const beforeRange = document.createRange()
-                                          beforeRange.setStartBefore(block.firstChild || block)
-                                          beforeRange.setEnd(range.startContainer, range.startOffset)
-
-                                          const startOffset = beforeRange.toString().length
-
-                                          // Calculate end offset
-                                          const afterRange = document.createRange()
-                                          afterRange.setStartBefore(block.firstChild || block)
-                                          afterRange.setEnd(range.endContainer, range.endOffset)
-
-                                          const endOffset = afterRange.toString().length
-
-                                          // Check if selection is partial (not the entire block)
-                                          if (startOffset > 0 || endOffset < blockText.length) {
-                                            blockInfo.startOffset = startOffset
-                                            blockInfo.endOffset = endOffset
-                                          }
-                                        } catch (e) {
-                                          console.warn('Could not calculate offset for block:', e)
-                                        }
-                                      }
-
-                                      blocks.push(blockInfo)
-                                    }
-                                  } else if (block.hasAttribute('data-block-index')) {
-                                    // Regular paragraph block
-                                    const blockText = block.textContent || ''
-                                    const blockInfo = {
-                                      type: 'paragraph',
-                                      blockIndex: parseInt(block.getAttribute('data-block-index')),
-                                      text: blockText?.trim() || ''
-                                    }
-
-                                    // Calculate offset if selection is partial
-                                    if (range.startContainer !== range.endContainer ||
-                                      range.startOffset !== range.endOffset) {
-                                      try {
-                                        // Calculate start offset relative to block text
-                                        const beforeRange = document.createRange()
-                                        beforeRange.setStartBefore(block.firstChild || block)
-                                        beforeRange.setEnd(range.startContainer, range.startOffset)
-
-                                        const startOffset = beforeRange.toString().length
-
-                                        // Calculate end offset
-                                        const afterRange = document.createRange()
-                                        afterRange.setStartBefore(block.firstChild || block)
-                                        afterRange.setEnd(range.endContainer, range.endOffset)
-
-                                        const endOffset = afterRange.toString().length
-
-                                        // Check if selection is partial (not the entire block)
-                                        if (startOffset > 0 || endOffset < blockText.length) {
-                                          blockInfo.startOffset = startOffset
-                                          blockInfo.endOffset = endOffset
-                                        }
-                                      } catch (e) {
-                                        console.warn('Could not calculate offset for block:', e)
-                                      }
-                                    }
-
-                                    blocks.push(blockInfo)
-                                  }
+                                if (!range.intersectsNode(block)) {
+                                  return
                                 }
+
+                                const blockText = block.textContent || ''
+                                const offsetInfo = calculateSelectionOffsets(range, block)
+                                const isCellParagraph = block.classList.contains('cell-paragraph')
+
+                                if (isCellParagraph) {
+                                  const cellBlock = block.closest('[data-block-index][data-type="table_cell"]')
+                                  if (!cellBlock) return
+
+                                  const blockInfo = {
+                                    type: 'table_cell',
+                                    blockIndex: parseInt(cellBlock.getAttribute('data-block-index')),
+                                    paraInCell: parseInt(block.getAttribute('data-para-in-cell')),
+                                    tableIndex: parseInt(cellBlock.getAttribute('data-table-index') || '0'),
+                                    rowIndex: parseInt(cellBlock.getAttribute('data-row')),
+                                    colIndex: parseInt(cellBlock.getAttribute('data-col')),
+                                    text: blockText?.trim() || ''
+                                  }
+
+                                  if (offsetInfo && (offsetInfo.startOffset > 0 || offsetInfo.endOffset < blockText.length)) {
+                                    blockInfo.startOffset = offsetInfo.startOffset
+                                    blockInfo.endOffset = offsetInfo.endOffset
+                                  }
+
+                                  blocks.push(blockInfo)
+                                  return
+                                }
+
+                                const blockInfo = {
+                                  type: 'paragraph',
+                                  blockIndex: parseInt(block.getAttribute('data-block-index')),
+                                  text: blockText?.trim() || ''
+                                }
+
+                                if (offsetInfo && (offsetInfo.startOffset > 0 || offsetInfo.endOffset < blockText.length)) {
+                                  blockInfo.startOffset = offsetInfo.startOffset
+                                  blockInfo.endOffset = offsetInfo.endOffset
+                                }
+
+                                blocks.push(blockInfo)
                               })
 
                               return blocks
                             }
 
-                            const selectedBlocks = getBlocksInSelection()
+                              const selectedBlocks = getBlocksInSelection()
 
-                            if (selectedBlocks.length > 0) {
-                              // Prepare blocks data for API
-                              const blocksData = selectedBlocks.map(block => {
+                              if (selectedBlocks.length > 0) {
+                              // Delete from the bottom of the document/cell upward.
+                              // This avoids index shifts when multiple paragraphs inside
+                              // the same table cell are removed in one batch.
+                              const orderedBlocks = [...selectedBlocks].sort((a, b) => {
+                                const aIsCell = a.type === 'table_cell'
+                                const bIsCell = b.type === 'table_cell'
+
+                                if (aIsCell && bIsCell) {
+                                  if (a.blockIndex !== b.blockIndex) {
+                                    return b.blockIndex - a.blockIndex
+                                  }
+                                  if (a.paraInCell !== b.paraInCell) {
+                                    return b.paraInCell - a.paraInCell
+                                  }
+                                  return 0
+                                }
+
+                                if (aIsCell !== bIsCell) {
+                                  return aIsCell ? 1 : -1
+                                }
+
+                                return b.blockIndex - a.blockIndex
+                              })
+
+                                // Prepare blocks data for API
+                              const blocksData = orderedBlocks.map(block => {
                                 if (block.type === 'table_cell') {
                                   const data = {
                                     block_index: block.blockIndex,
@@ -3096,7 +3079,8 @@ function App() {
                                 const response = await updateTextInTemplate(templateId, {
                                   blockIndex: cellBlockIndex,
                                   oldText: deletedText,
-                                  newText: '' // Empty to delete
+                                  newText: '', // Empty to delete
+                                  paraInCell: deletedParaIndex
                                 })
 
                                 // Store response for final update
@@ -3284,7 +3268,8 @@ function App() {
                           const response = await updateTextInTemplate(templateId, {
                             blockIndex: textChangeInfo.blockIndex,
                             oldText: textChangeInfo.originalText,
-                            newText: textChangeInfo.newText
+                            newText: textChangeInfo.newText,
+                            paraInCell: textChangeInfo.paraInCell
                           })
 
                           console.log('[TEXT UPDATE] Backend response:', response)

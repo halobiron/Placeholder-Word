@@ -1509,13 +1509,18 @@ JSON:"""
                     if val and val != "auto" and len(val) == 6:
                         font_styles.append(f"color: #{val}")
 
-                # Extract bold, italic, underline
+                # Extract bold, italic, underline, strike-through (gộp text-decoration)
                 if rPr.find(f"{self.w_ns}b") is not None:
                     font_styles.append("font-weight: bold")
                 if rPr.find(f"{self.w_ns}i") is not None:
                     font_styles.append("font-style: italic")
+                decorations = []
                 if rPr.find(f"{self.w_ns}u") is not None:
-                    font_styles.append("text-decoration: underline")
+                    decorations.append("underline")
+                if rPr.find(f"{self.w_ns}strike") is not None:
+                    decorations.append("line-through")
+                if decorations:
+                    font_styles.append(f"text-decoration: {' '.join(decorations)}")
 
                 # Found formatting, stop here
                 if font_styles:
@@ -1529,16 +1534,21 @@ JSON:"""
             return ""
 
         styles = []
-        style_map = {
-            f"{self.w_ns}b": "font-weight: bold",
-            f"{self.w_ns}i": "font-style: italic",
-            f"{self.w_ns}u": "text-decoration: underline",
-            f"{self.w_ns}strike": "text-decoration: line-through"
-        }
 
-        for root_tag, css in style_map.items():
-            if rPr.find(root_tag) is not None:
-                styles.append(css)
+        # Bold, italic (không conflict)
+        if rPr.find(f"{self.w_ns}b") is not None:
+            styles.append("font-weight: bold")
+        if rPr.find(f"{self.w_ns}i") is not None:
+            styles.append("font-style: italic")
+
+        # Underline + strike-through: gộp thành 1 dòng text-decoration
+        decorations = []
+        if rPr.find(f"{self.w_ns}u") is not None:
+            decorations.append("underline")
+        if rPr.find(f"{self.w_ns}strike") is not None:
+            decorations.append("line-through")
+        if decorations:
+            styles.append(f"text-decoration: {' '.join(decorations)}")
 
         sz = rPr.find(f"{self.w_ns}sz")
         if sz is not None and sz.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val"):

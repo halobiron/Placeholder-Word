@@ -393,6 +393,48 @@ class DocxFullEditor:
                                 yield para
                         # else: cell has no paragraphs (shouldn't happen with properly formatted cells)
 
+    def _collect_paragraph_text_segments(self, paragraph: Paragraph) -> list:
+        """
+        Collect ordered text segments from a paragraph, including MERGEFIELD placeholders.
+
+        This is the shared core for text extraction and deletion logic.
+        """
+        text_segments = []
+        current_pos = 0
+
+        for child in paragraph._element:
+            tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
+
+            if tag_name == 'r':
+                run_text = "".join(t.text for t in child.findall(f"{self.w_ns}t") if t.text)
+                if run_text:
+                    text_segments.append({
+                        'text': run_text,
+                        'is_field': False,
+                        'element': child,
+                        'start_pos': current_pos,
+                        'end_pos': current_pos + len(run_text)
+                    })
+                    current_pos += len(run_text)
+
+            elif tag_name == 'fldSimple':
+                instr = child.get(f"{self.w_ns}instr", "")
+                match = re.search(r'MERGEFIELD\s+(\S+)', instr)
+                if match:
+                    field_name = match.group(1)
+                    field_text = f"«{field_name}»"
+                    text_segments.append({
+                        'text': field_text,
+                        'is_field': True,
+                        'element': child,
+                        'field_name': field_name,
+                        'start_pos': current_pos,
+                        'end_pos': current_pos + len(field_text)
+                    })
+                    current_pos += len(field_text)
+
+        return text_segments
+
     # ===== POSITION-BASED EDITING =====
 
     def _extract_paragraph_full_text(self, paragraph: Paragraph) -> tuple:
@@ -409,43 +451,7 @@ class DocxFullEditor:
                 - start_pos: int (start position in full_text)
                 - end_pos: int (end position in full_text)
         """
-        text_segments = []
-        current_pos = 0
-
-        # Process paragraph element children in order
-        for child in paragraph._element:
-            tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
-
-            if tag_name == 'r':
-                # Regular run
-                run_text = "".join(t.text for t in child.findall(f"{self.w_ns}t") if t.text)
-                if run_text:
-                    text_segments.append({
-                        'text': run_text,
-                        'is_field': False,
-                        'element': child,
-                        'start_pos': current_pos,
-                        'end_pos': current_pos + len(run_text)
-                    })
-                    current_pos += len(run_text)
-
-            elif tag_name == 'fldSimple':
-                # MERGEFIELD field
-                instr = child.get(f"{self.w_ns}instr", "")
-                match = re.search(r'MERGEFIELD\s+(\S+)', instr)
-                if match:
-                    field_name = match.group(1)
-                    field_text = f"«{field_name}»"
-                    text_segments.append({
-                        'text': field_text,
-                        'is_field': True,
-                        'element': child,
-                        'field_name': field_name,
-                        'start_pos': current_pos,
-                        'end_pos': current_pos + len(field_text)
-                    })
-                    current_pos += len(field_text)
-
+        text_segments = self._collect_paragraph_text_segments(paragraph)
         full_text = "".join(seg['text'] for seg in text_segments)
         return full_text, text_segments
 
@@ -676,113 +682,59 @@ class DocxFullEditor:
         char_offset = 0
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
+        def _add_run(r_elem, parent_elem, is_hyperlink=False, hyperlink_url=None,
+                     is_merge_field=False, merge_field_element=None):
+            """Helper: add run entry to all_runs list."""
+            run = Run(r_elem, paragraph)
+            run_text = run.text or ""
+            entry = {
+                'run': run,
+                'text': run_text,
+                'is_hyperlink': is_hyperlink,
+                'hyperlink_url': hyperlink_url,
+                'is_merge_field': is_merge_field,
+                'start_offset': char_offset,
+                'end_offset': char_offset + len(run_text),
+                'element': r_elem,
+            }
+            if is_hyperlink:
+                entry['hyperlink_element'] = parent_elem
+            if is_merge_field:
+                entry['merge_field_element'] = merge_field_element
+            all_runs.append(entry)
+            return len(run_text)
+
         # First, collect all runs including those in hyperlinks and merge fields
         for child in paragraph._element:
             tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
 
             if tag_name == 'r':
-                # Regular run - create Run object directly from CT_R element
-                run = Run(child, paragraph)
-                run_text = run.text or ""
-                all_runs.append({
-                    'run': run,
-                    'text': run_text,
-                    'is_hyperlink': False,
-                    'hyperlink_url': None,
-                    'is_merge_field': False,
-                    'start_offset': char_offset,
-                    'end_offset': char_offset + len(run_text),
-                    'element': child
-                })
-                char_offset += len(run_text)
+                # Regular run
+                char_offset += _add_run(child, child)
 
             elif tag_name == 'hyperlink':
                 # Hyperlink element - extract runs inside it
                 r_id = child.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
                 hyperlink_url = ""
-
-                # Get URL from relationship
                 if r_id and r_id in self.doc.part.rels:
                     rel = self.doc.part.rels[r_id]
                     hyperlink_url = rel._target if hasattr(rel, '_target') else ""
 
-                # Process runs inside hyperlink
                 for hc_child in child:
                     hc_tag = hc_child.tag.split('}')[1] if '}' in hc_child.tag else hc_child.tag
                     if hc_tag == 'r':
-                        # Create Run object directly from CT_R element within hyperlink
-                        run = Run(hc_child, paragraph)
-                        run_text = run.text or ""
-                        all_runs.append({
-                            'run': run,
-                            'text': run_text,
-                            'is_hyperlink': True,
-                            'hyperlink_url': hyperlink_url,
-                            'is_merge_field': False,
-                            'start_offset': char_offset,
-                            'end_offset': char_offset + len(run_text),
-                            'element': hc_child,
-                            'hyperlink_element': child
-                        })
-                        char_offset += len(run_text)
+                        char_offset += _add_run(hc_child, child, is_hyperlink=True,
+                                                hyperlink_url=hyperlink_url)
 
             elif tag_name == 'fldSimple':
                 # Merge field element (w:fldSimple) - extract run inside it
-                # This handles placeholders like «field_name»
                 for mf_child in child:
                     mf_tag = mf_child.tag.split('}')[1] if '}' in mf_child.tag else mf_child.tag
                     if mf_tag == 'r':
-                        # Create Run object directly from CT_R element within merge field
-                        run = Run(mf_child, paragraph)
-                        run_text = run.text or ""
-                        all_runs.append({
-                            'run': run,
-                            'text': run_text,
-                            'is_hyperlink': False,
-                            'hyperlink_url': None,
-                            'is_merge_field': True,
-                            'start_offset': char_offset,
-                            'end_offset': char_offset + len(run_text),
-                            'element': mf_child,
-                            'merge_field_element': child
-                        })
-                        char_offset += len(run_text)
+                        char_offset += _add_run(mf_child, child, is_merge_field=True,
+                                                merge_field_element=child)
 
         return all_runs
-
-    def _find_text_with_normalized_search(self, full_text: str, text: str):
-        """
-        Helper: Find text position using normalized (whitespace-collapsed) search.
-        Returns (start_idx, end_idx) or (None, None) if not found.
-        """
-        import re
-        search_text_normalized = re.sub(r'\s+', ' ', text.strip())
-        full_text_normalized = re.sub(r'\s+', ' ', full_text.strip())
-
-        if search_text_normalized not in full_text_normalized:
-            return None, None
-
-        start_idx_normalized = full_text_normalized.find(search_text_normalized)
-        end_idx_normalized = start_idx_normalized + len(search_text_normalized)
-
-        # Map normalized position back to original text position
-        norm_to_orig = []
-        norm_pos = 0
-        for orig_idx, char in enumerate(full_text):
-            if not char.isspace():
-                norm_to_orig.append((norm_pos, orig_idx))
-                norm_pos += 1
-
-        if start_idx_normalized >= len(norm_to_orig):
-            return None, None
-
-        start_idx = norm_to_orig[start_idx_normalized][1]
-        if end_idx_normalized <= len(norm_to_orig):
-            end_idx = norm_to_orig[end_idx_normalized - 1][1] + 1
-        else:
-            end_idx = start_idx + len(text)
-
-        return start_idx, end_idx
 
     def apply_format_at_position(
         self,
@@ -805,18 +757,18 @@ class DocxFullEditor:
         """
         Apply formatting to text at a specific paragraph position
         Splits runs if needed to format only the target text, not the entire run
-        NOW SUPPORTS formatting text inside hyperlinks
+        Supports formatting text inside hyperlinks
 
         Args:
             text: Text to format
             paragraph_index: Index of paragraph containing the text
             bold, italic, underline, strikethrough, subscript, superscript, color, highlight, font_name, font_size: Format options
             all_caps: All caps formatting
-            start_offset: Start character offset for precise targeting (optional, for duplicate words)
-            end_offset: End character offset for precise targeting (optional, for duplicate words)
+            start_offset: Start character offset (REQUIRED - no fallback for safety)
+            end_offset: End character offset (REQUIRED - no fallback for safety)
 
         Returns:
-            True if found and formatted, False otherwise
+            True if found and formatted, False if offsets invalid/missing
         """
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if p_idx != paragraph_index:
@@ -827,32 +779,19 @@ class DocxFullEditor:
 
             print(f"[DEBUG] apply_format_at_position: p_idx={p_idx}, len={len(full_text)}, offsets={start_offset}-{end_offset}, text='{text}'")
 
-            # Find text position using offset or search
-            if start_offset is not None and end_offset is not None:
-                # Use provided offsets if valid
-                if 0 <= start_offset < end_offset <= len(full_text):
-                    start_idx, end_idx = start_offset, end_offset
-                else:
-                    # Offsets invalid, fallback to text search
-                    print(f"[DEBUG] Offsets out of bounds, using text search")
-                    start_idx = full_text.find(text)
-                    if start_idx == -1:
-                        start_idx, end_idx = self._find_text_with_normalized_search(full_text, text)
-                        if start_idx is None:
-                            return False
-                    else:
-                        end_idx = start_idx + len(text)
-            else:
-                # No offsets provided, use text search
-                start_idx = full_text.find(text)
-                if start_idx == -1:
-                    start_idx, end_idx = self._find_text_with_normalized_search(full_text, text)
-                    if start_idx is None:
-                        return False
-                else:
-                    end_idx = start_idx + len(text)
+            # CRITICAL: Offsets are REQUIRED for precise formatting
+            # No fallback to text search - it can format wrong occurrence of duplicate text
+            if start_offset is None or end_offset is None:
+                print(f"[ERROR] Offsets not provided - cannot format safely")
+                return False
 
-            print(f"[DEBUG] Found at start_idx={start_idx}, end_idx={end_idx}")
+            # Validate offsets
+            if not (0 <= start_offset < end_offset <= len(full_text)):
+                print(f"[ERROR] Invalid offsets: {start_offset}-{end_offset}, text_len={len(full_text)}")
+                return False
+
+            start_idx, end_idx = start_offset, end_offset
+            print(f"[DEBUG] Using offsets: start_idx={start_idx}, end_idx={end_idx}")
 
             # Find runs that overlap with target text
             runs_to_format = []
@@ -893,7 +832,7 @@ class DocxFullEditor:
 
     def _calculate_text_segments(self, run, overlap_start: int, overlap_end: int, run_start: int, run_end: int) -> tuple:
         """
-        Calculate text segments for run splitting
+        Calculate text segments for run splitting (3 parts)
 
         Returns:
             (text_before, text_to_format, text_after)
@@ -903,20 +842,54 @@ class DocxFullEditor:
         text_after = run.text[overlap_end - run_start:]
         return text_before, text_to_format, text_after
 
-    def _determine_skip_props(self, bold: bool, italic: bool, underline: bool) -> list:
+    def _split_run_at_offset(self, run, offset: int, run_start: int) -> tuple:
         """
-        Determine which properties to skip when copying format
+        Split run text at a global offset position (2 parts)
+
+        Use when inserting something at a specific position (placeholder, table, image).
+
+        Args:
+            run: The run to split
+            offset: Global offset position in paragraph
+            run_start: Start position of this run in paragraph
 
         Returns:
-            List of property tags to skip (e.g., ['b', 'i', 'u'])
+            (text_before, text_after)
         """
+        split_pos = offset - run_start
+        text_before = run.text[:split_pos]
+        text_after = run.text[split_pos:]
+        return text_before, text_after
+
+    def _handle_boolean_formats(self, bold=None, italic=None, underline=None,
+                                strikethrough=None, all_caps=None, *, rpr=None):
+        """
+        Handle boolean format properties - either return skip props or apply to rpr
+
+        Args:
+            rpr: If provided, apply formats to rpr. If None, return list of tags to skip (keyword-only)
+
+        Returns:
+            List of property tags to skip (when rpr is None)
+        """
+        formats = [
+            ('b', bold),
+            ('i', italic),
+            ('u', underline, 'single'),
+            ('strike', strikethrough),
+            ('caps', all_caps),
+        ]
+
         skip_props = []
-        if bold is not None:
-            skip_props.append('b')
-        if italic is not None:
-            skip_props.append('i')
-        if underline is not None:
-            skip_props.append('u')
+        for spec in formats:
+            tag = spec[0]
+            value = spec[1]
+            if value is not None:
+                if rpr is not None:
+                    attr_value = spec[2] if len(spec) > 2 else '1'
+                    self._toggle_boolean_format(rpr, tag, value, attr_value=attr_value)
+                else:
+                    skip_props.append(tag)
         return skip_props
 
     def _format_text_in_runs(
@@ -950,7 +923,7 @@ class DocxFullEditor:
         paragraph_alignment = paragraph.alignment
         paragraph_format = paragraph.paragraph_format
 
-        skip_props = self._determine_skip_props(bold, italic, underline)
+        skip_props = self._handle_boolean_formats(bold, italic, underline)
 
         # Process runs in reverse order to maintain indices
         for run_info in reversed(runs_to_format):
@@ -1033,7 +1006,7 @@ class DocxFullEditor:
         """
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
-        skip_props = self._determine_skip_props(bold, italic, underline)
+        skip_props = self._handle_boolean_formats(bold, italic, underline)
 
         # Group runs by hyperlink element
         hyperlink_groups = {}
@@ -1171,7 +1144,7 @@ class DocxFullEditor:
             new_rpr = new_run._r.get_or_add_rPr()
 
             # Properties to skip when copying (default: empty list, not None)
-            # Use _determine_skip_props helper to normalize the parameter
+            # Use _handle_boolean_formats helper to normalize the parameter
             if skip_props is None:
                 skip_props = []
 
@@ -1224,39 +1197,26 @@ class DocxFullEditor:
         """Apply formatting to a run - handles removing format when set to False"""
         rpr = run._r.get_or_add_rPr()
 
-        # Handle boolean formats using helper
-        if bold is not None:
-            self._toggle_boolean_format(rpr, 'b', bold)
-        if italic is not None:
-            self._toggle_boolean_format(rpr, 'i', italic)
-        if underline is not None:
-            self._toggle_boolean_format(rpr, 'u', underline, attr_value='single')
-        if strikethrough is not None:
-            self._toggle_boolean_format(rpr, 'strike', strikethrough)
+        # Handle boolean formats
+        self._handle_boolean_formats(bold, italic, underline, strikethrough, all_caps, rpr=rpr)
 
         # Handle vertical alignment (subscript/superscript) - mutually exclusive
-        # Remove old element first if setting any vertical alignment
-        if (subscript or superscript) and (subscript is not None or superscript is not None):
-            # Remove existing vertAlign element
-            existing_vertAlign = rpr.find(f'{self.w_ns}vertAlign')
-            if existing_vertAlign is not None:
-                rpr.remove(existing_vertAlign)
+        # Determine desired value: subscript wins if both True, otherwise remove
+        valignment = None
+        if subscript and not superscript:
+            valignment = 'subscript'
+        elif superscript and not subscript:
+            valignment = 'superscript'
 
-            # Create new vertAlign element based on which one is True
-            if subscript and not superscript:
-                vertAlign_elem = rpr.makeelement(f'{self.w_ns}vertAlign')
-                rpr.append(vertAlign_elem)
-                vertAlign_elem.set(f'{self.w_ns}val', 'subscript')
-            elif superscript and not subscript:
-                vertAlign_elem = rpr.makeelement(f'{self.w_ns}vertAlign')
-                rpr.append(vertAlign_elem)
-                vertAlign_elem.set(f'{self.w_ns}val', 'superscript')
-            # If both True or both False, do nothing (no vertical alignment)
-        elif subscript is False or superscript is False:
-            # Explicitly remove vertAlign if explicitly set to False
-            existing_vertAlign = rpr.find(f'{self.w_ns}vertAlign')
-            if existing_vertAlign is not None:
-                rpr.remove(existing_vertAlign)
+        # Always remove existing first, then add new if needed
+        existing = rpr.find(f'{self.w_ns}vertAlign')
+        if existing is not None:
+            rpr.remove(existing)
+
+        if valignment:
+            elem = rpr.makeelement(f'{self.w_ns}vertAlign')
+            elem.set(f'{self.w_ns}val', valignment)
+            rpr.append(elem)
 
         # Handle color (frontend always sends hex: #RRGGBB)
         if color:
@@ -1297,10 +1257,6 @@ class DocxFullEditor:
                 sz_elem = rpr.makeelement(f'{self.w_ns}sz')
                 rpr.append(sz_elem)
             sz_elem.set(f'{self.w_ns}val', str(font_size * 2))  # Stored in half-points
-
-        # Handle all caps - remove element when False, set when True
-        if all_caps is not None:
-            self._toggle_boolean_format(rpr, 'caps', all_caps)
 
     def _restore_paragraph_formatting(self, paragraph, alignment, paragraph_format):
         """Restore paragraph-level formatting after splitting runs"""
@@ -1439,45 +1395,7 @@ class DocxFullEditor:
             True nếu thành công, False nếu thất bại
         """
         try:
-            w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-
-            # Extract full text and segments (similar to _extract_paragraph_full_text)
-            text_segments = []
-            current_pos = 0
-
-            # Process paragraph element children in order
-            for child in paragraph._element:
-                tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
-
-                if tag_name == 'r':
-                    # Regular run
-                    run_text = "".join(t.text for t in child.findall(f"{w_ns}t") if t.text)
-                    if run_text:
-                        text_segments.append({
-                            'text': run_text,
-                            'is_field': False,
-                            'element': child,
-                            'start_pos': current_pos,
-                            'end_pos': current_pos + len(run_text)
-                        })
-                        current_pos += len(run_text)
-
-                elif tag_name == 'fldSimple':
-                    # MERGEFIELD field
-                    instr = child.get(f"{w_ns}instr", "")
-                    match = re.search(r'MERGEFIELD\s+(\S+)', instr)
-                    if match:
-                        field_name = match.group(1)
-                        field_text = f"«{field_name}»"
-                        text_segments.append({
-                            'text': field_text,
-                            'is_field': True,
-                            'element': child,
-                            'field_name': field_name,
-                            'start_pos': current_pos,
-                            'end_pos': current_pos + len(field_text)
-                        })
-                        current_pos += len(field_text)
+            text_segments = self._collect_paragraph_text_segments(paragraph)
 
             full_text_before = "".join(seg['text'] for seg in text_segments)
             print(
@@ -1601,7 +1519,7 @@ class DocxFullEditor:
             if deleted:
                 # Clean up empty runs left behind after field deletion
                 # Điều này đảm bảo không có runs rỗng gây lỗi DOCX
-                for para in self.doc.paragraphs:
+                for para in self._iterate_paragraphs_in_doc_order():
                     self._remove_empty_runs(para)
 
                 print(f"[SUCCESS] Placeholder '{field_name}' deleted successfully")
@@ -1655,18 +1573,22 @@ class DocxFullEditor:
             print(f"[ERROR] Failed to rename placeholder '{old_name}': {e}")
             return False
 
-    def insert_paragraph_after(self, target_paragraph, text: str = ""):
+    def insert_paragraph(self, target_paragraph, text: str = "", position: str = "after"):
         """
-        Thêm paragraph mới sau một paragraph cụ thể
+        Thêm paragraph mới trước hoặc sau một paragraph cụ thể
 
         Args:
-            target_paragraph: Paragraph object để thêm mới sau nó
+            target_paragraph: Paragraph object để thêm mới
             text: Nội dung text cho paragraph mới
+            position: "after" (sau) hoặc "before" (trước)
 
         Returns:
             Paragraph object mới được tạo
         """
-        print(f"[DEBUG] insert_paragraph_after called: text={repr(text[:50])}")
+        if position not in ("after", "before"):
+            raise ValueError('position phải là "after" hoặc "before"')
+
+        print(f"[DEBUG] insert_paragraph called: position={position}, text={repr(text[:50])}")
 
         # Lấy paragraph element
         target_p_element = target_paragraph._p
@@ -1712,84 +1634,29 @@ class DocxFullEditor:
         new_r.append(new_t)
         new_p.append(new_r)
 
-        # Insert new paragraph sau target paragraph
+        # Insert tại vị trí phù hợp
         parent_index = list(parent).index(target_p_element)
-        parent.insert(parent_index + 1, new_p)
+        insert_index = parent_index + 1 if position == "after" else parent_index
+        parent.insert(insert_index, new_p)
 
         # Convert to Paragraph object
         from docx.text.paragraph import Paragraph
         new_para = Paragraph(new_p, self.doc)
 
-        print(f"[DEBUG] New paragraph inserted after target")
+        print(f"[DEBUG] New paragraph inserted {position} target")
         return new_para
+
+    def insert_paragraph_after(self, target_paragraph, text: str = ""):
+        """
+        Wrapper: Thêm paragraph mới sau một paragraph cụ thể
+        """
+        return self.insert_paragraph(target_paragraph, text, "after")
 
     def insert_paragraph_before(self, target_paragraph, text: str = ""):
         """
-        Thêm paragraph mới trước một paragraph cụ thể
-
-        Args:
-            target_paragraph: Paragraph object để thêm mới trước nó
-            text: Nội dung text cho paragraph mới
-
-        Returns:
-            Paragraph object mới được tạo
+        Wrapper: Thêm paragraph mới trước một paragraph cụ thể
         """
-        print(f"[DEBUG] insert_paragraph_before called: text={repr(text[:50])}")
-
-        # Lấy paragraph element
-        target_p_element = target_paragraph._p
-        parent = target_p_element.getparent()
-
-        # Tạo new paragraph element
-        new_p = OxmlElement('w:p')
-
-        # Copy paragraph properties từ target paragraph (indentation, alignment, etc.)
-        pPr = target_p_element.find(f"{self.w_ns}pPr")
-        if pPr is not None:
-            new_p.append(copy.deepcopy(pPr))
-            print(f"[DEBUG] Copied paragraph properties from target")
-
-        # Copy run properties (rPr) from target paragraph if it has runs
-        source_run_props = None
-        if target_paragraph.runs:
-            # Find the last non-empty run to copy formatting from
-            for run in reversed(target_paragraph.runs):
-                if run.text and run.text.strip():
-                    run_element = run._element
-                    rPr = run_element.find(f"{self.w_ns}rPr")
-                    if rPr is not None:
-                        source_run_props = rPr
-                        print(f"[DEBUG] Found source run properties: font={run.font.name}, size={run.font.size}")
-                    break
-
-        # TẠO RUN LUÔN - kể cả khi text rỗng (quan trọng!)
-        # Phải tạo run với formatting ngay từ đầu để khi thêm text sau sẽ kế thừa đúng
-        new_r = OxmlElement('w:r')
-
-        # Copy run properties if available
-        if source_run_props is not None:
-            new_r.append(copy.deepcopy(source_run_props))
-            print(f"[DEBUG] Copied run properties to new run")
-        else:
-            print(f"[DEBUG] No source run props found, using default")
-
-        # Tạo text element - có thể rỗng
-        new_t = OxmlElement('w:t')
-        new_t.set(qn('xml:space'), 'preserve')
-        new_t.text = text
-        new_r.append(new_t)
-        new_p.append(new_r)
-
-        # Insert new paragraph TRƯỚC target paragraph (không +1)
-        parent_index = list(parent).index(target_p_element)
-        parent.insert(parent_index, new_p)
-
-        # Convert to Paragraph object
-        from docx.text.paragraph import Paragraph
-        new_para = Paragraph(new_p, self.doc)
-
-        print(f"[DEBUG] New paragraph inserted before target")
-        return new_para
+        return self.insert_paragraph(target_paragraph, text, "before")
 
     def add_paragraph_in_table_cell(
         self,
@@ -2170,10 +2037,8 @@ class DocxFullEditor:
         target_run = target_run_info['run']
         original_rpr = target_run._r.get_or_add_rPr()
 
-        # Calculate split position within the run
-        split_pos = offset - target_run_info['start']
-        text_before = target_run.text[:split_pos]
-        text_after = target_run.text[split_pos:]
+        # Split run at offset position
+        text_before, text_after = self._split_run_at_offset(target_run, offset, target_run_info['start'])
 
         # Create placeholder text
         placeholder_text = f"«{field_name}»"
@@ -2374,10 +2239,8 @@ class DocxFullEditor:
         target_run = target_run_info['run']
         original_rpr = target_run._r.get_or_add_rPr()
 
-        # Calculate split position within the run
-        split_pos = offset - target_run_info['start']
-        text_before = target_run.text[:split_pos]
-        text_after = target_run.text[split_pos:]
+        # Split run at offset position
+        text_before, text_after = self._split_run_at_offset(target_run, offset, target_run_info['start'])
 
         # Update original run to only contain text_before
         target_run.text = text_before
@@ -2840,13 +2703,9 @@ class DocxFullEditor:
         target_run = target_run_info['run']
         original_rpr = target_run._r.get_or_add_rPr()
 
-        # Calculate split position and text_before/after (only for non-empty case)
+        # Split run at offset position (only for non-empty case)
         if total_text_length > 0:
-            # Calculate split position within the run
-            split_pos = offset - target_run_info['start']
-            text_before = target_run.text[:split_pos]
-            text_after = target_run.text[split_pos:]
-
+            text_before, text_after = self._split_run_at_offset(target_run, offset, target_run_info['start'])
             # Update original run to only contain text_before
             target_run.text = text_before
 
@@ -3470,6 +3329,80 @@ class DocxFullEditor:
                         return fmt
 
                 return formats_found[0]
+
+        return None
+
+    def get_format_at_offset(
+        self,
+        paragraph_index: int = None,
+        offset: int = None,
+        end_offset: int = None,
+        para_in_cell: int = None
+    ) -> Optional[Dict]:
+        """
+        Extract formatting information using precise offset within paragraph.
+
+        This is more accurate than get_format_at_position which uses text search,
+        especially for duplicate words where we need to target a specific occurrence.
+
+        Args:
+            paragraph_index: Index of paragraph containing the text
+            offset: Starting character offset within the paragraph
+            end_offset: Ending character offset within the paragraph
+            para_in_cell: Paragraph index within table cell (optional)
+
+        Returns:
+            Dict with format info or None if not found
+        """
+        if offset is None or paragraph_index is None:
+            return None
+
+        # Handle table cells with para_in_cell
+        actual_para_index = paragraph_index
+        if para_in_cell is not None:
+            # For table cells, we need to find the specific paragraph
+            # The paragraph_index in this case refers to the table's paragraph
+            # and para_in_cell is the index within the cell
+            pass  # The iteration will handle this correctly
+
+        for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
+            if p_idx != paragraph_index:
+                continue
+
+            # Use new helper to extract ALL runs including hyperlinks
+            all_runs = self._extract_all_text_runs(paragraph)
+
+            # Find runs that overlap with the target offset range
+            formats_found = []
+
+            for run_info in all_runs:
+                run_start = run_info['start_offset']
+                run_end = run_info['end_offset']
+
+                # Check if this run overlaps with the target offset range
+                # A run overlaps if: run_end > offset AND run_start < end_offset
+                if end_offset is not None:
+                    if run_end > offset and run_start < end_offset:
+                        # This run contains part of the target text
+                        if run_info['text'].strip():
+                            format_info = self._extract_run_format(run_info['run'])
+                            formats_found.append(format_info)
+                else:
+                    # Only have start offset, find run containing this position
+                    if run_start <= offset < run_end:
+                        if run_info['text'].strip():
+                            format_info = self._extract_run_format(run_info['run'])
+                            formats_found.append(format_info)
+                            break
+
+            if formats_found:
+                # Return format from the first non-empty run with actual content
+                for fmt in formats_found:
+                    if fmt:
+                        return fmt
+                return formats_found[0]
+
+            break  # Found the paragraph, no need to continue
 
         return None
 

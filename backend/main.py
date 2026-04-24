@@ -568,7 +568,10 @@ def map_camel_to_snake(format_data: dict) -> dict:
 async def get_selection_format(
     template_id: str = Form(...),
     selected_text: str = Form(...),
-    block_index: int = Form(None)
+    block_index: int = Form(None),
+    offset: int = Form(None),
+    end_offset: int = Form(None),
+    para_in_cell: int = Form(None)
 ):
     """
     Extract accurate formatting information for selected text from DOCX
@@ -577,6 +580,9 @@ async def get_selection_format(
         template_id: Template ID
         selected_text: Text to extract format from
         block_index: Block index in HTML preview (for precision, optional)
+        offset: Character offset within paragraph for precise targeting (optional)
+        end_offset: End character offset for precise targeting (optional)
+        para_in_cell: Paragraph index within table cell (optional)
 
     Returns:
         JSON with accurate format info from DOCX:
@@ -601,13 +607,31 @@ async def get_selection_format(
         # Map block_index to paragraph_index if provided
         actual_para_index = None
         if block_index is not None:
-            actual_para_index = editor.get_paragraph_index_from_block(block_index)
+            # CRITICAL FIX: For table cells with para_in_cell, use get_table_cell_paragraph_index
+            # This correctly maps to the specific paragraph within the cell, not just the first one
+            if para_in_cell is not None:
+                actual_para_index = editor.get_table_cell_paragraph_index(block_index, para_in_cell)
+            else:
+                actual_para_index = editor.get_paragraph_index_from_block(block_index)
 
-        # Extract format from DOCX
-        format_info = editor.get_format_at_position(
-            text=selected_text,
-            paragraph_index=actual_para_index
-        ) or {}
+        # CRITICAL FIX: Use offset for precise format detection when available
+        # This fixes bug where duplicate words always get format from first occurrence
+        format_info = None
+        if offset is not None and end_offset is not None:
+            # Use offset-based format extraction (more precise)
+            format_info = editor.get_format_at_offset(
+                paragraph_index=actual_para_index,
+                offset=offset,
+                end_offset=end_offset,
+                para_in_cell=para_in_cell
+            )
+
+        # Fallback to text-based search if offset method didn't work or wasn't provided
+        if format_info is None:
+            format_info = editor.get_format_at_position(
+                text=selected_text,
+                paragraph_index=actual_para_index
+            ) or {}
 
         # Convert to frontend format
         frontend_format = {

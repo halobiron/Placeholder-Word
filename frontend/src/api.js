@@ -166,26 +166,43 @@ export const editSelection = async (templateId, editData) => {
   return await batchUpdate(templateId, operations)
 }
 
-export const updateTextInTemplate = async (templateId, { blockIndex, oldText, newText }) => {
+export const updateTextInTemplate = async (templateId, { blockIndex, oldText, newText, paraInCell = null }) => {
   // Validate blockIndex before making the request
   if (isNaN(blockIndex) || blockIndex === null || blockIndex === undefined) {
     throw new Error(`Invalid blockIndex: ${blockIndex}`)
   }
 
-  return await batchUpdate(templateId, [{
+  const operation = {
     type: 'update_text',
     block_index: blockIndex,
     old_text: oldText || '',
     new_text: newText || ''
-  }])
+  }
+
+  if (paraInCell !== null && paraInCell !== undefined) {
+    operation.para_in_cell = paraInCell
+  }
+
+  return await batchUpdate(templateId, [operation])
 }
 
-export const getSelectionFormat = async (templateId, selectedText, blockIndex) => {
+export const getSelectionFormat = async (templateId, selectedText, blockIndex, offset = null, endOffset = null, paraInCell = null) => {
   const formData = new FormData()
   formData.append('template_id', templateId)
   formData.append('selected_text', selectedText)
   if (blockIndex !== null && blockIndex !== undefined) {
     formData.append('block_index', blockIndex)
+  }
+  // CRITICAL: Send offset information for precise format detection
+  // This fixes bug where duplicate words always get format from first occurrence
+  if (offset !== null && offset !== undefined) {
+    formData.append('offset', offset)
+  }
+  if (endOffset !== null && endOffset !== undefined) {
+    formData.append('end_offset', endOffset)
+  }
+  if (paraInCell !== null && paraInCell !== undefined) {
+    formData.append('para_in_cell', paraInCell)
   }
 
   const response = await axios.post(`${API_BASE}/get-selection-format`, formData, {
