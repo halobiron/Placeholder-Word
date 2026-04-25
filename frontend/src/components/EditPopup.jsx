@@ -86,7 +86,7 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
         {/* Selected text preview */}
         <div>
           <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Văn bản đang chọn</label>
-          <div className="bg-slate-50 px-4 py-3 rounded-xl text-sm text-slate-600 border border-slate-100 italic font-medium leading-relaxed">
+          <div className="bg-slate-50 px-4 py-3 rounded-xl text-sm text-slate-600 border border-slate-100 italic font-medium leading-relaxed whitespace-pre-wrap">
             "{selectedText?.text || '...'}"
           </div>
         </div>

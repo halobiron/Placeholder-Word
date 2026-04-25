@@ -2,10 +2,10 @@ import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate } from './api'
+import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate, downloadFile } from './api'
 
 function App() {
-  const [step, setStep] = useState('upload') // upload, preview, preview_result, download
+  const [step, setStep] = useState('upload') // upload, preview, preview_result
   const [templateId, setTemplateId] = useState(null)
   const [editorHtml, setEditorHtml] = useState(null)
   const [fields, setFields] = useState([])
@@ -20,6 +20,7 @@ function App() {
   const [suggestions, setSuggestions] = useState([]) // AI suggestions for missing placeholders
   const [analyzing, setAnalyzing] = useState(false) // AI analysis in progress
   const [selectedSuggestions, setSelectedSuggestions] = useState([]) // Suggestions user wants to apply
+  const [showAISuggestionPanel, setShowAISuggestionPanel] = useState(false) // Show AI suggestion list panel
   const [isAddMode, setIsAddMode] = useState(false) // Manual add placeholder mode
   const [selectedBlockIndex, setSelectedBlockIndex] = useState(null) // Selected block for adding placeholder
   const [selectedCellIndex, setSelectedCellIndex] = useState(null) // Selected cell index within table (for table cells)
@@ -92,6 +93,29 @@ function App() {
     () => fields.filter((field) => !lockedFields.includes(field)),
     [fields, lockedFields]
   )
+
+  const getNotificationTone = (message) => {
+    if (!message) return 'default'
+    if (message.startsWith('⚠️')) return 'warning'
+    if (message.startsWith('💡') || message.startsWith('Đã chọn') || message.startsWith('⏳') || message.startsWith('ℹ️')) return 'info'
+    if (message.startsWith('✅') || (message.startsWith('Đã ') && !message.startsWith('Đã chọn'))) return 'success'
+    return 'error'
+  }
+
+  const getNotificationText = (message) => {
+    if (!message) return message
+    return message.replace(/^[✅⚠️💡⏳ℹ️❌]\s*/, '')
+  }
+
+  const getSuggestionKey = (suggestion) => {
+    return [
+      suggestion.block_index ?? 'na',
+      suggestion.context ?? '',
+      JSON.stringify(suggestion.before_context ?? []),
+      JSON.stringify(suggestion.after_context ?? []),
+      suggestion.insert_after ?? ''
+    ].join('::')
+  }
 
   // Extract placeholders from HTML
   const extractFields = (html) => {
@@ -1042,7 +1066,7 @@ function App() {
         toggleFieldLock(currentField)
         e.preventDefault()
         e.stopPropagation()
-        setError(`🔒 Đã ${wasLocked ? 'mở khóa' : 'khóa'} «${currentField}»`)
+        setError(`Đã ${wasLocked ? 'mở khóa' : 'khóa'} «${currentField}»`)
         setTimeout(() => setError(null), 1500)
       }
     }
@@ -1231,8 +1255,12 @@ function App() {
         setPreviewHtml(previewData.html_preview)
         setStep('preview_result')
       } catch (previewErr) {
-        console.warn('Preview fetch failed, skipping preview:', previewErr)
-        setStep('download')
+        console.warn('Preview fetch failed, downloading directly:', previewErr)
+        downloadFile(result.result_id)
+        setError('✅ Xử lý thành công! Đang tải xuống...')
+        setTimeout(() => {
+          handleReset()
+        }, 2000)
       }
     } catch (err) {
       setError(err.response?.data?.detail || 'Merge thất bại')
@@ -1245,13 +1273,16 @@ function App() {
   const handleAIAnalyze = async () => {
     if (!templateId) return
 
+    setShowAISuggestionPanel(true)
     setAnalyzing(true)
     setError(null)
+    setSuggestions([])
+    setSelectedSuggestions([])
+    setEditedSuggestions({})
 
     try {
       const result = await suggestPlaceholders(templateId)
       setSuggestions(result.suggestions || [])
-      setSelectedSuggestions([]) // Reset selection
     } catch (err) {
       setError(err.response?.data?.detail || 'AI phân tích thất bại. Kiểm tra GEMINI_API_KEY.')
     } finally {
@@ -1269,7 +1300,7 @@ function App() {
     try {
       // Apply edits to selected suggestions before sending
       const editedSuggestionsToApply = selectedSuggestions.map(s => {
-        const uniqueId = `${s.block_index}-${s.suggested_name}-${s.position}`
+        const uniqueId = s.sourceKey || getSuggestionKey(s)
         const edits = editedSuggestions[uniqueId]
         return {
           ...s,
@@ -1288,6 +1319,7 @@ function App() {
       setSuggestions([])
       setSelectedSuggestions([])
       setEditedSuggestions({})
+      setShowAISuggestionPanel(false)
 
       // Show success message
       setError(`✅ Đã thêm thành công ${result.successful} placeholder!`)
@@ -1301,7 +1333,7 @@ function App() {
 
   // Update suggestion edit
   const updateSuggestionEdit = (suggestion, field, value) => {
-    const uniqueId = `${suggestion.block_index}-${suggestion.suggested_name}-${suggestion.position}`
+    const uniqueId = getSuggestionKey(suggestion)
     setEditedSuggestions(prev => ({
       ...prev,
       [uniqueId]: {
@@ -1313,24 +1345,23 @@ function App() {
 
   // Get edited suggestion (with user edits applied)
   const getEditedSuggestion = (suggestion) => {
-    const uniqueId = `${suggestion.block_index}-${suggestion.suggested_name}-${suggestion.position}`
+    const uniqueId = getSuggestionKey(suggestion)
     const edits = editedSuggestions[uniqueId]
     return {
       ...suggestion,
       suggested_name: edits?.suggested_name || suggestion.suggested_name,
-      position: edits?.position || suggestion.position
+      position: edits?.position || suggestion.position,
+      sourceKey: uniqueId
     }
   }
 
   // Toggle suggestion selection
   const toggleSuggestion = (suggestion) => {
-    // Use unique identifier: block_index + suggested_name + position
-    // This handles multiple suggestions in the same block (e.g., table cells)
-    const uniqueId = `${suggestion.block_index}-${suggestion.suggested_name}-${suggestion.position}`
+    const uniqueId = getSuggestionKey(suggestion)
     const editedSuggestion = getEditedSuggestion(suggestion)
 
     const index = selectedSuggestions.findIndex(s =>
-      `${s.block_index}-${s.suggested_name}-${s.position}` === uniqueId
+      (s.sourceKey || getSuggestionKey(s)) === uniqueId
     )
     if (index >= 0) {
       setSelectedSuggestions(prev => prev.filter((_, i) => i !== index))
@@ -1414,7 +1445,7 @@ function App() {
       setNewFieldPosition('right')
 
       // Show success message
-      setError(`✅ Đã thêm placeholder «${result.field_name}» thành công!`)
+      setError(`✅ Đã thêm placeholder thành công!`)
       setTimeout(() => setError(null), 3000)
     } catch (err) {
       setError(err.response?.data?.detail || 'Thêm placeholder thất bại')
@@ -1455,6 +1486,9 @@ function App() {
     setResultId(null)
     setPreviewHtml(null)
     setError(null)
+    setSuggestions([])
+    setSelectedSuggestions([])
+    setShowAISuggestionPanel(false)
     setEditedSuggestions({}) // Clear suggestion edits
     setShowEditPopup(false)
     setSelectedTextForEdit(null)
@@ -2015,14 +2049,17 @@ function App() {
     return (
       <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 max-w-md animate-in fade-in slide-in-from-top-4 duration-300">
         {error && (
-          <div className={`p-4 rounded-2xl shadow-xl border flex items-center gap-3 backdrop-blur-md ${error.startsWith('✅') ? 'bg-emerald-50/90 border-emerald-100 text-emerald-800' :
-              error.startsWith('⚠️') ? 'bg-amber-50/90 border-amber-100 text-amber-800' :
-                error.startsWith('💡') || error.includes('Đã chọn ô') ? 'bg-indigo-50/90 border-indigo-100 text-indigo-800 shadow-indigo-100/50' :
-                  'bg-rose-50/90 border-rose-100 text-rose-800'
+          <div className={`p-4 rounded-2xl shadow-xl border flex items-center gap-3 backdrop-blur-md ${getNotificationTone(error) === 'success' ? 'bg-emerald-50/90 border-emerald-100 text-emerald-800' :
+            getNotificationTone(error) === 'warning' ? 'bg-amber-50/90 border-amber-100 text-amber-800' :
+              getNotificationTone(error) === 'info' ? 'bg-indigo-50/90 border-indigo-100 text-indigo-800 shadow-indigo-100/50' :
+                'bg-rose-50/90 border-rose-100 text-rose-800'
             }`}>
             <div className="flex-1 text-sm font-bold flex items-center gap-2">
-              {!error.startsWith('✅') && !error.startsWith('⚠️') && !error.startsWith('💡') && !error.includes('Đã chọn ô') && <span className="text-lg">🚫</span>}
-              {error.replace(/^[✅⚠️💡]/, '')}
+              {getNotificationTone(error) === 'success' && <span className="text-lg">✅</span>}
+              {getNotificationTone(error) === 'warning' && <span className="text-lg">⚠️</span>}
+              {getNotificationTone(error) === 'info' && <span className="text-lg">ℹ️</span>}
+              {getNotificationTone(error) === 'error' && <span className="text-lg">🚫</span>}
+              {getNotificationText(error)}
             </div>
             <button onClick={() => setError(null)} className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-black/5 text-gray-400 hover:text-gray-600 transition-colors">×</button>
           </div>
@@ -2081,7 +2118,7 @@ function App() {
                 </button>
               </div>
             )}
-            {step === 'download' && (
+            {step === 'preview_result' && (
               <button onClick={handleReset} className="px-4 py-2 bg-slate-800 text-white rounded-lg text-sm font-medium hover:bg-slate-900 transition-colors">Bắt đầu lại</button>
             )}
           </div>
@@ -2241,7 +2278,7 @@ function App() {
                   </div>
                 )}
 
-                <div 
+                <div
                   id="document-editor"
 
                   contentEditable
@@ -2419,7 +2456,7 @@ function App() {
             </div>
 
             {/* RIGHT: SIDEBAR (DATA & AI) */}
-            <div 
+            <div
               id="right-sidebar-container"
               className="lg:col-span-4 space-y-6 sticky top-20 self-start max-h-[calc(100vh-120px)] overflow-y-auto pr-2 custom-sidebar-scroll"
             >
@@ -2432,7 +2469,7 @@ function App() {
                       <span className="text-lg">✍️</span> Chèn placeholder
                     </h3>
                     <button onClick={handleCancelAddMode} className="text-indigo-200 hover:text-white">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                     </button>
                   </div>
                   <div className="p-4 space-y-4">
@@ -2475,6 +2512,134 @@ function App() {
                     >
                       {analyzing ? "Đang xử lý..." : "Xác nhận chèn"}
                     </button>
+                  </div>
+                </div>
+              )}
+
+              {/* AI SUGGESTION PANEL */}
+              {showAISuggestionPanel && (
+                <div className="bg-white border-2 border-purple-500 rounded-2xl shadow-xl overflow-hidden animate-in slide-in-from-right-4 duration-300">
+                  <div className="bg-purple-600 px-4 py-3 flex items-center justify-between">
+                    <h3 className="text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
+                      <span className="text-lg">✨</span> Gợi ý AI
+                    </h3>
+                    <button onClick={() => setShowAISuggestionPanel(false)} className="text-purple-200 hover:text-white">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                    </button>
+                  </div>
+
+                  <div className="p-4 space-y-3">
+                    <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      <span>{suggestions.length} gợi ý</span>
+                      <span>{analyzing ? 'Đang phân tích' : `${selectedSuggestions.length} đã chọn`}</span>
+                    </div>
+
+                    <div className="max-h-[320px] overflow-y-auto space-y-2 pr-1">
+                      {analyzing && suggestions.length === 0 ? (
+                        <div className="py-8 text-center text-slate-400">
+                          <div className="w-8 h-8 rounded-full border-2 border-purple-200 border-t-purple-600 animate-spin mx-auto mb-2"></div>
+                          <p className="text-sm">Đang tìm gợi ý...</p>
+                        </div>
+                      ) : suggestions.length === 0 ? (
+                        <div className="py-6 text-center text-slate-400 text-sm">
+                          Chưa có gợi ý. Hãy chạy lại AI.
+                        </div>
+                      ) : (
+                        suggestions.map((suggestion, index) => {
+                          const suggestionKey = getSuggestionKey(suggestion)
+                          const editedSuggestion = getEditedSuggestion(suggestion)
+                          const isSelected = selectedSuggestions.some((selected) => {
+                            return (selected.sourceKey || getSuggestionKey(selected)) === suggestionKey
+                          })
+
+                          return (
+                            <div
+                              key={suggestionKey}
+                              className={`rounded-xl border p-3 ${isSelected ? 'border-purple-300 bg-purple-50/70' : 'border-slate-100 bg-white'}`}
+                            >
+                              <div className="flex items-start gap-3">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleSuggestion(suggestion)}
+                                  className={`mt-1 w-5 h-5 rounded border flex items-center justify-center text-[11px] ${isSelected ? 'bg-purple-600 border-purple-600 text-white' : 'bg-white border-slate-300 text-transparent'}`}
+                                  aria-label="Chọn suggestion"
+                                >
+                                  ✓
+                                </button>
+
+                                <div className="flex-1 space-y-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div>
+                                      <div className="text-xs font-bold text-slate-800">
+                                        Gợi ý #{index + 1}
+                                      </div>
+                                      <div className="text-[10px] text-slate-400">
+                                        Block #{suggestion.block_index}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleSuggestion(suggestion)}
+                                      className="text-[10px] font-bold uppercase tracking-wider text-purple-600"
+                                    >
+                                      {isSelected ? 'Bỏ chọn' : 'Chọn'}
+                                    </button>
+                                  </div>
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-[1fr_120px] gap-2">
+                                    <input
+                                      type="text"
+                                      value={editedSuggestion.suggested_name || ''}
+                                      onChange={(e) => updateSuggestionEdit(suggestion, 'suggested_name', e.target.value)}
+                                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:border-purple-500 outline-none font-bold"
+                                      placeholder="Tên placeholder"
+                                    />
+                                    <select
+                                      value={editedSuggestion.position || 'right'}
+                                      onChange={(e) => updateSuggestionEdit(suggestion, 'position', e.target.value)}
+                                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:border-purple-500 outline-none bg-white"
+                                    >
+                                      <option value="left">left</option>
+                                      <option value="right">right</option>
+                                      <option value="new_line">new_line</option>
+                                      <option value="inline">inline</option>
+                                    </select>
+                                  </div>
+
+                                  <div className="text-[11px] text-slate-500 bg-slate-50 rounded-lg px-3 py-2 border border-slate-100 truncate" title={suggestion.context || ''}>
+                                    {suggestion.context || 'Không có context'}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        onClick={() => setSelectedSuggestions(suggestions.map((suggestion) => getEditedSuggestion(suggestion)))}
+                        disabled={suggestions.length === 0 || analyzing}
+                        className="flex-1 py-2 text-[10px] font-bold uppercase tracking-wider text-purple-700 hover:bg-purple-50 rounded-lg transition-colors disabled:text-slate-300 disabled:hover:bg-transparent"
+                      >
+                        Chọn tất cả
+                      </button>
+                      <button
+                        onClick={() => setSelectedSuggestions([])}
+                        disabled={selectedSuggestions.length === 0 || analyzing}
+                        className="flex-1 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:bg-slate-100 rounded-lg transition-colors disabled:text-slate-300 disabled:hover:bg-transparent"
+                      >
+                        Bỏ chọn
+                      </button>
+                      <button
+                        onClick={handleApplySuggestions}
+                        disabled={selectedSuggestions.length === 0 || analyzing}
+                        className="flex-[1.3] py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-black text-[10px] uppercase tracking-widest transition-all disabled:bg-slate-200"
+                      >
+                        {analyzing ? '...' : `Áp dụng (${selectedSuggestions.length})`}
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -2554,35 +2719,6 @@ function App() {
           </div>
         )}
 
-        {/* STEP: DOWNLOAD / SUCCESS */}
-        {step === 'download' && (
-          <div className="max-w-xl mx-auto mt-12 text-center animate-in fade-in zoom-in-95 duration-500">
-            <div className="bg-white rounded-2xl shadow-2xl border border-slate-100 p-12 relative overflow-hidden">
-              <div className="absolute top-0 left-0 right-0 h-2 bg-green-500"></div>
-              <div className="w-24 h-24 bg-green-50 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6">
-                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></svg>
-              </div>
-              <h2 className="text-3xl font-extrabold text-slate-900 mb-4">Hoàn tất thành công!</h2>
-              <p className="text-slate-500 mb-10 leading-relaxed">Tài liệu của bạn đã được Gemini xử lý và điền dữ liệu hoàn chỉnh. Bạn có thể tải xuống ngay bây giờ.</p>
-
-              <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                <a
-                  href={`${import.meta.env.VITE_API_BASE || 'http://localhost:8000'}/download/${resultId}`}
-                  download
-                  className="flex-1 px-8 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold flex items-center justify-center gap-3 transition-all hover:scale-[1.02] shadow-xl shadow-indigo-100"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                  Tải xuống kết quả
-                </a>
-                <button
-                  onClick={handleReset}
-                  className="px-8 py-4 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition-all"
-                >Quay lại</button>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* STEP: PREVIEW RESULT */}
         {step === 'preview_result' && previewHtml && (
           <div className="max-w-[1200px] mx-auto space-y-6">
@@ -2593,7 +2729,16 @@ function App() {
               </div>
               <div className="flex gap-2">
                 <button onClick={() => setStep('preview')} className="px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-lg text-sm font-bold hover:bg-slate-50 transition-colors">Quay lại sửa</button>
-                <button onClick={() => setStep('download')} className="px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-md shadow-indigo-100 transition-all">Xác nhận & Tải xuống</button>
+                <button 
+                  onClick={() => {
+                    downloadFile(resultId);
+                    setError('✅ Đang tải xuống tài liệu...');
+                    setTimeout(() => setError(null), 5000);
+                  }} 
+                  className="px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-md shadow-indigo-100 transition-all"
+                >
+                  Xác nhận & Tải xuống
+                </button>
               </div>
             </div>
 

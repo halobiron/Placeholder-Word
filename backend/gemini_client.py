@@ -21,6 +21,23 @@ class GeminiClient:
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('models/gemini-3.1-flash-lite-preview')
 
+    @staticmethod
+    def parse_gemini_json_response(response_text: str) -> dict:
+        """Parse JSON text returned by Gemini, stripping markdown fences first."""
+        result = (response_text or "").strip()
+
+        if result.startswith("```json"):
+            result = result[7:]
+        if result.startswith("```"):
+            result = result[3:]
+        if result.endswith("```"):
+            result = result[:-3]
+
+        try:
+            return json.loads(result.strip())
+        except json.JSONDecodeError:
+            return {}
+
     def extract_data_from_context(
         self,
         context: str,
@@ -54,22 +71,16 @@ Yêu cầu:
 - Format: {{"field1": "value1", "field2": "value2", ...}}
 - Giữ nguyên tên trường chính xác
 - Nếu không tìm thấy giá trị, để chuỗi rỗng ""
+- Nếu trường nằm sau một nhãn cố định trong form, chỉ trả về phần biến đổi của dữ liệu.
+- Không lặp lại tiền tố đã có sẵn trong template, ví dụ:
+  - "Kính gửi: TÒA ÁN NHÂN DÂN [trường]" -> chỉ trả về phần sau "TÒA ÁN NHÂN DÂN"
+  - "Người khởi kiện: [trường]" -> chỉ trả về tên người, không lặp lại "Người khởi kiện"
 
 JSON:"""
 
         try:
             response = self.model.generate_content(prompt)
-            result = response.text.strip()
-
-            # Clean up response
-            if result.startswith("```json"):
-                result = result[7:]
-            if result.startswith("```"):
-                result = result[3:]
-            if result.endswith("```"):
-                result = result[:-3]
-
-            data = json.loads(result.strip())
+            data = self.parse_gemini_json_response(response.text)
 
             # Ensure all fields exist
             for field in template_fields:
@@ -125,9 +136,11 @@ JSON:"""
                 if block_type == "table_cell":
                     row = block.get("table_row", "?")
                     col = block.get("table_col", "?")
-                    content_text.append(f"[TABLE_CELL - Row {row}, Col {col}] #{i+1}{context_str}\n{text_marked}")
+                    content_text.append(
+                        f"[block_index={i}] [TABLE_CELL - Row {row}, Col {col}]{context_str}\n{text_marked}"
+                    )
                 else:
-                    content_text.append(f"[{block_type}] #{i+1}{context_str}\n{text_marked}")
+                    content_text.append(f"[block_index={i}] [{block_type}]{context_str}\n{text_marked}")
 
         full_content = "\n\n".join(content_text)
         existing_fields_str = ", ".join(existing_fields) if existing_fields else "không có"
@@ -141,6 +154,12 @@ CÁC PLACEHOLDER ĐÃ CÓ (được đánh dấu ✓ trong nội dung):
 {existing_fields_str}
 
 NHIỆM VỤ: TÌM CÁC VÙNG CHƯA CÓ PLACEHOLDER.
+
+QUY TẮC QUAN TRỌNG:
+- Mỗi block trong danh sách đã có `block_index` rõ ràng.
+- Khi đề xuất một vùng, PHẢI trả về đúng `block_index` của block đó.
+- KHÔNG tự suy luận lại bằng mô tả text nếu đã có chỉ số block.
+- Chỉ chọn block có chỉ số trong danh sách đầu vào, bắt đầu từ 0.
 
 QUAN TRỌNG - BỎ QUA VỊ TRÍ ĐÃ CÓ PLACEHOLDER:
 - Nếu block đã có 【«field_name»】✓ → ĐÃ HOÀN TẤT, BỎ QUA
@@ -156,12 +175,18 @@ QUAN TRỌNG - BỎ QUA VỊ TRÍ ĐÃ CÓ PLACEHOLDER:
 - Mỗi ô chỉ nên có MỘT placeholder
 
 CÁC VÙNG CẦN TÌM:
-1. Vùng ngày tháng (ngày ... tháng ... năm ...)
-2. Vùng chứa tên người điền (tôi tên, họ và tên, signatory, etc.)
-3. Vùng chứa số liệu/CMND/mã số (số, mã, ID, etc.)
-4. Vùng chứa địa chỉ/đơn vị (address, company, etc.)
-5. Vùng checkbox/trắc nghiệm (□, [ ], etc.)
-6. Các vùng trống rõ ràng khác (dấu __, nhiều chấm, khoảng trắng lớn)
+1. Vùng khoảng trắng lớn (GAPS): Bất kỳ nơi nào có 2 hoặc nhiều hơn dấu cách liên tiếp giữa các từ mà không có dấu câu. Đây là dấu hiệu mạnh nhất của một placeholder bị thiếu (VD: "ngày  tháng", "Họ tên  địa chỉ").
+2. Vùng ngày tháng (ngày ... tháng ... năm ...).
+3. Vùng chứa tên người điền (tôi tên, họ và tên, signatory, etc.)
+4. Vùng chứa số liệu/CMND/mã số (số, mã, ID, etc.)
+5. Vùng chứa địa chỉ/đơn vị (address, company, etc.)
+6. Vùng checkbox/trắc nghiệm (□, [ ], etc.)
+7. Các ký tự trống truyền thống: dấu __, nhiều chấm (...), hoặc khoảng trắng bất thường giữa các nhãn dữ liệu.
+
+NGUYÊN TẮC "KHOẢNG TRẮNG" (WHITESPACE RULE):
+- Trong văn bản hành chính tiếng Việt, "ngày  tháng" (2 spaces) CHẮC CHẮN là thiếu placeholder ngày.
+- "Tháng  năm" (2 spaces) CHẮC CHẮN là thiếu placeholder tháng.
+- Bất kỳ nhãn dữ liệu nào (Họ tên, Số điện thoại,...) theo sau bởi 2+ spaces rồi đến một text khác đều cần chèn placeholder vào giữa.
 
 VỊ TRÍ PLACEHOLDER:
 - "left": Chèn TRƯỚC text (VD: "«ho_ten» Nguyễn Văn A")
@@ -170,12 +195,14 @@ VỊ TRÍ PLACEHOLDER:
 - "inline": Chèn GIỮA text - PHẢI cung cấp "insert_after" (VD: "Ngày 20 tháng <<thang>> năm 2024" → position: "inline", insert_after: "Ngày 20 tháng ")
   * Khi dùng "inline", PHẢI thêm "insert_after": "<text cần chèn sau đó>"
   * VD: "Họ và tên: Nguyễn Văn A" → position: "inline", insert_after: "Họ và tên: "
+  * VD: "ngày  tháng 12" (có 2 spaces sau ngày) → suggested_name: "ngay_lap", position: "inline", insert_after: "ngày "
 
 YÊU CẦU ĐẦU RA:
 Trả về JSON với format sau:
 {{
   "suggestions": [
     {{
+      "block_index": <số nguyên của block trong danh sách đầu vào>,
       "context": "<toàn bộ text chính xác của block đó - PHẢI COPY Y NGUYÊN từ danh sách trên>",
       "before_context": [<nội dung 2 blocks trước đó để phân biệt>],
       "after_context": [<nội dung 2 blocks sau đó để phân biệt>],
@@ -193,106 +220,42 @@ Chỉ trả về JSON, không có text khác."""
 
         try:
             response = self.model.generate_content(prompt)
-            result = response.text.strip()
+            analysis = self.parse_gemini_json_response(response.text)
 
-            # Clean up response
-            if result.startswith("```json"):
-                result = result[7:]
-            if result.startswith("```"):
-                result = result[3:]
-            if result.endswith("```"):
-                result = result[:-3]
-
-            analysis = json.loads(result.strip())
-
-            # Verify and enhance context matching
-            print("=== VERIFYING GEMINI SUGGESTIONS ===")
+            # Normalize suggestions using the explicit block_index returned by Gemini.
+            # This is stricter and more accurate than re-matching by similarity.
+            print("=== VALIDATING GEMINI SUGGESTIONS ===")
+            validated_suggestions = []
             for suggestion in analysis.get("suggestions", []):
-                suggested_context = suggestion.get("context", "")
-                suggested_before = suggestion.get("before_context", [])
-                suggested_after = suggestion.get("after_context", [])
+                raw_index = suggestion.get("block_index")
 
-                print(f"Suggestion: {suggested_context[:60]}...")
-                print(f"  Before: {suggested_before}")
-                print(f"  After: {suggested_after}")
+                try:
+                    block_index = int(raw_index)
+                except (TypeError, ValueError):
+                    print(f"  → Skipping suggestion with invalid block_index: {raw_index}")
+                    continue
 
-                # Find best match using both text AND surrounding context
-                best_match = None
-                best_score = 0
+                if block_index < 0 or block_index >= len(structured_content):
+                    print(f"  → Skipping suggestion with out-of-range block_index: {block_index}")
+                    continue
 
-                for i, block in enumerate(structured_content):
-                    block_text = block.get("text", "")
-                    block_before = block.get("before_context", [])
-                    block_after = block.get("after_context", [])
+                block = structured_content[block_index]
+                matched_text = block.get("text", "")
 
-                    # Calculate combined similarity
-                    text_sim = self._calculate_text_similarity(block_text, suggested_context)
-                    context_sim = self._calculate_context_list_similarity(
-                        suggested_before, suggested_after,
-                        block_before, block_after
-                    )
+                print(f"  → Accepted block_index [{block_index}]: {matched_text[:60]}...")
+                suggestion["block_index"] = block_index
+                suggestion["context"] = matched_text
+                suggestion["before_context"] = block.get("before_context", [])
+                suggestion["after_context"] = block.get("after_context", [])
+                validated_suggestions.append(suggestion)
 
-                    # Weight: 70% text, 30% context
-                    combined_score = 0.7 * text_sim + 0.3 * context_sim
-
-                    if combined_score > best_score:
-                        best_score = combined_score
-                        best_match = (i, block_text, combined_score)
-
-                if best_match:
-                    idx, matched_text, score = best_match
-                    print(f"  → Best match [{idx}]: {matched_text[:60]}... (score: {score:.2f})")
-                    # Update with actual block data
-                    suggestion["block_index"] = idx
-                    suggestion["context"] = matched_text
-                    suggestion["before_context"] = structured_content[idx].get("before_context", [])
-                    suggestion["after_context"] = structured_content[idx].get("after_context", [])
-
-            print("=== END VERIFICATION ===")
+            analysis["suggestions"] = validated_suggestions
+            print("=== END VALIDATION ===")
             return analysis
 
         except Exception as e:
             print(f"Gemini analysis error: {e}")
             return {"suggestions": []}
-
-    def _calculate_text_similarity(self, text1: str, text2: str) -> float:
-        """Calculate similarity between two texts"""
-        import re
-        words1 = set(re.findall(r'\w+', text1.lower()))
-        words2 = set(re.findall(r'\w+', text2.lower()))
-        if not words1 or not words2:
-            return 0.0
-        intersection = words1 & words2
-        union = words1 | words2
-        return len(intersection) / len(union) if union else 0.0
-
-    def _calculate_context_list_similarity(
-        self,
-        suggested_before: list,
-        suggested_after: list,
-        block_before: list,
-        block_after: list
-    ) -> float:
-        """Calculate similarity between surrounding context lists"""
-        import re
-
-        # Convert lists to text for comparison
-        s_before = " ".join(suggested_before).lower()
-        s_after = " ".join(suggested_after).lower()
-        b_before = " ".join(block_before).lower()
-        b_after = " ".join(block_after).lower()
-
-        # Extract words
-        s_words = set(re.findall(r'\w+', s_before + " " + s_after))
-        b_words = set(re.findall(r'\w+', b_before + " " + b_after))
-
-        if not s_words or not b_words:
-            return 0.0
-
-        intersection = s_words & b_words
-        union = s_words | b_words
-
-        return len(intersection) / len(union) if union else 0.0
 
     def suggest_better_field_names(
         self,
@@ -367,15 +330,16 @@ QUY TẮC ĐẶT TÊN:
 - Ví dụ: "chu_ky_truong_phong_row2_col1" cho ô ở hàng 2 cột 1
 
 ĐẶC BIỆT - XỬ LÝ NGÀY THÁNG (QUAN TRỌNG):
-- Pattern "ngày... tháng... năm..." hoặc "ngày... tháng... năm 20..." có 3 placeholder LIÊN TIẾP
-- Phải TÁCH thành 3 trường riêng: ngay_<context>, thang_<context>, nam_<context>
+- Pattern "ngày... tháng... năm..." thường có 3 placeholder.
+- Nếu đủ 3 placeholder: TÁCH thành 3 trường riêng: ngay_<context>, thang_<context>, nam_<context>
+- Nếu CHỈ CÓ 1 hoặc 2 placeholder: PHẢI dựa vào từ khóa ĐỨNG TRƯỚC placeholder đó để gán nhãn.
+  * Ví dụ: "ngày 15 tháng «field_1» năm «field_2»" -> field_1 là thang_..., field_2 là nam_... (KHÔNG được gán ngay_... cho field_1)
+  * Ví dụ: "ngày «field_1» tháng 12 năm «field_2»" -> field_1 là ngay_..., field_2 là nam_...
 - Context lấy từ text gần nhất (VD: "Từ ngày:", "Ngày sinh:", "ngày lập:")
 - ĐỪNG đặt tên: ngay_1, ngay_2, ngay_3 hoặc ngay_bat_dau, ngay_2, ngay_3
-- VÍ DỤ:
-  * "Từ ngày: «field_1» tháng «field_2» năm «field_3»" → ngay_bat_dau, thang_bat_dau, nam_bat_dau
-  * "Đến ngày: «field_4» tháng «field_5» năm «field_6»" → ngay_ket_thuc, thang_ket_thuc, nam_ket_thuc
-  * "[Hà Nội], ngày «field_7» tháng «field_8» năm «field_9»" → ngay_lap, thang_lap, nam_lap
-  * "Ngày sinh: «field_10» tháng «field_11» năm «field_12»" → ngay_sinh, thang_sinh, nam_sinh
+- XỬ LÝ TRƯỜNG HỢP THIẾU PLACEHOLDER:
+  * Nếu bạn thấy "ngày (trống) tháng 【«field_1»】 năm 【«field_2»】" -> field_1 PHẢI là "thang_...", field_2 PHẢI là "nam_...". KHÔNG được gán "ngay_..." cho field_1.
+  * Tuyệt đối không gán nhãn "ngay_..." cho placeholder đứng sau từ "tháng" hoặc "năm".
 - Nếu có 2 trường ngày tháng giống nhau → dùng số thứ tự: ngay_bat_dau_1, thang_bat_dau_1, nam_bat_dau_1
 
 VÍ DỤ KHÁC:
@@ -401,17 +365,7 @@ Chỉ trả về JSON, không có text khác."""
 
         try:
             response = self.model.generate_content(prompt)
-            result = response.text.strip()
-
-            # Clean up response
-            if result.startswith("```json"):
-                result = result[7:]
-            if result.startswith("```"):
-                result = result[3:]
-            if result.endswith("```"):
-                result = result[:-3]
-
-            analysis = json.loads(result.strip())
+            analysis = self.parse_gemini_json_response(response.text)
 
             # Convert to mapping
             rename_map = {}
