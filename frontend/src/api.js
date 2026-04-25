@@ -302,13 +302,6 @@ export const deleteParagraph = async (templateId, blockIndex, tableIndex = null,
   }])
 }
 
-export const deleteMultipleParagraphs = async (templateId, blocks) => {
-  return await batchUpdate(templateId, [{
-    type: 'delete_multiple_paragraphs',
-    blocks: blocks
-  }])
-}
-
 export const addTableAtCursor = async (templateId, blockIndex, offset, rows = 3, cols = 3) => {
   return await batchUpdate(templateId, [{
     type: 'add_table_at_cursor',

@@ -1,8 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
-import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate, downloadFile } from './api'
+import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate, downloadFile } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result
@@ -2736,12 +2735,12 @@ function App() {
               </div>
               <div className="flex gap-2">
                 <button onClick={() => setStep('preview')} className="px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-lg text-sm font-bold hover:bg-slate-50 transition-colors">Quay lại sửa</button>
-                <button 
+                <button
                   onClick={() => {
                     downloadFile(resultId);
                     setError('✅ Đang tải xuống tài liệu...');
                     setTimeout(() => setError(null), 5000);
-                  }} 
+                  }}
                   className="px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-md shadow-indigo-100 transition-all"
                 >
                   Xác nhận & Tải xuống
