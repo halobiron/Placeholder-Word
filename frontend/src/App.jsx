@@ -179,7 +179,16 @@ function App() {
    * @param {Object} oldRenameMap - Previous rename mapping
    * @returns {Array} List of operations to execute via batchUpdate
    */
-  const buildOperationsFromChanges = (oldHtml, newHtml, oldFields, newFields) => {
+  const buildOperationsFromChanges = (
+    oldHtml,
+    newHtml,
+    oldFields,
+    newFields,
+    options = {}
+  ) => {
+    const {
+      includePlaceholderDeletes = true
+    } = options
     const operations = []
 
     // =======================================================================
@@ -188,14 +197,6 @@ function App() {
 
     // Find deleted fields (fields in old but not in new)
     const deletedFields = oldFields.filter(f => !newFields.includes(f))
-
-    // Add delete operations for deleted placeholders
-    deletedFields.forEach(fieldName => {
-      operations.push({
-        type: 'delete_placeholder',
-        field_name: fieldName
-      })
-    })
 
     // =======================================================================
     // 2. DETECT TEXT CHANGES
@@ -234,18 +235,11 @@ function App() {
         continue
       }
 
-      // Check if there are placeholders in this block that were deleted
-      // If placeholders were deleted, don't add update_text operation
-      // (the delete_placeholder operation will handle it)
-      const oldPlaceholders = oldBlock ? oldBlock.querySelectorAll('.mail-merge-placeholder') : []
-      const newPlaceholders = newBlock ? newBlock.querySelectorAll('.mail-merge-placeholder') : []
-
-      const placeholderDeleted = oldPlaceholders.length > newPlaceholders.length
-
-      // Add text update operation only if:
-      // - Text actually changed
-      // - No placeholders were deleted (avoid conflict)
-      if (oldText !== newText && !placeholderDeleted) {
+      // Check if there are placeholders in this block that were deleted.
+      // Add text update operation when text actually changed.
+      // Placeholder deletions are appended after text updates so the backend
+      // can still resolve the paragraph text before the field is removed.
+      if (oldText !== newText) {
         operations.push({
           type: 'update_text',
           block_index: i,
@@ -253,6 +247,16 @@ function App() {
           new_text: newText
         })
       }
+    }
+
+    // Add delete operations for deleted placeholders after text updates.
+    if (includePlaceholderDeletes) {
+      deletedFields.forEach(fieldName => {
+        operations.push({
+          type: 'delete_placeholder',
+          field_name: fieldName
+        })
+      })
     }
 
     return operations
@@ -2422,32 +2426,35 @@ function App() {
                   onInput={async (e) => {
                     const newHtml = e.target.innerHTML
                     const newFields = extractFields(newHtml)
-                    const deletedFields = fields.filter(f => !newFields.includes(f))
+                    if (window.textUpdateTimeout) clearTimeout(window.textUpdateTimeout)
 
-                    if (newFields.length !== fields.length) setFields(newFields)
+                    window.textUpdateTimeout = setTimeout(async () => {
+                      try {
+                        const operations = buildOperationsFromChanges(editorHtml, newHtml, fields, newFields, {
+                          includePlaceholderDeletes: true
+                        })
 
-                    if (deletedFields.length > 0) {
-                      const operations = deletedFields.map(f => ({ type: 'delete_placeholder', field_name: f }))
-                      const result = await batchUpdate(templateId, operations, false, true)
-                      updateEditorHtmlWithPreservation(result.html_preview, result.fields)
-                      setError(`✅ Đã xóa placeholder`)
-                    } else {
-                      // Text update logic
-                      const selection = window.getSelection()
-                      if (selection.rangeCount > 0) {
-                        const range = selection.getRangeAt(0)
-                        const startElement = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer
-                        const editedBlock = startElement?.closest('[data-block-index], .cell-paragraph')
-
-                        if (editedBlock) {
-                          // Handle text update debounced (simplified)
-                          if (window.textUpdateTimeout) clearTimeout(window.textUpdateTimeout)
-                          window.textUpdateTimeout = setTimeout(async () => {
-                            // Actual text update call would go here
-                          }, 1000)
+                        if (operations.length === 0) {
+                          return
                         }
+
+                        const result = await batchUpdate(templateId, operations, false, true)
+                        updateEditorHtmlWithPreservation(result.html_preview, result.fields)
+
+                        const hasTextUpdate = operations.some((op) => op.type === 'update_text')
+                        const hasPlaceholderDelete = operations.some((op) => op.type === 'delete_placeholder')
+                        if (hasTextUpdate) {
+                          setError('✅ Đã cập nhật text')
+                        } else if (hasPlaceholderDelete) {
+                          setError('✅ Đã xóa placeholder')
+                        }
+                        setTimeout(() => setError(null), 2000)
+                      } catch (err) {
+                        console.error('Batch update failed:', err)
+                        setError('⚠️ Cập nhật thất bại: ' + (err.response?.data?.detail || err.message))
+                        setTimeout(() => setError(null), 3000)
                       }
-                    }
+                    }, 1000)
                   }}
                   className="p-8 sm:p-16 min-h-[1056px] w-full max-w-[816px] mx-auto focus:outline-none bg-white shadow-2xl doc-editor-surface mb-8 mt-4"
                   dangerouslySetInnerHTML={{ __html: editorHtml }}
