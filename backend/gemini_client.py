@@ -74,7 +74,7 @@ Yêu cầu:
 - Nếu trường nằm sau một nhãn cố định trong form, chỉ trả về phần biến đổi của dữ liệu.
 - Không lặp lại tiền tố đã có sẵn trong template, ví dụ:
   - "Kính gửi: TÒA ÁN NHÂN DÂN [trường]" -> chỉ trả về phần sau "TÒA ÁN NHÂN DÂN"
-  - "Người khởi kiện: [trường]" -> chỉ trả về tên người, không lặp lại "Người khởi kiện"
+  - "Ban Giám đốc Công ty: [trường]" -> chỉ trả về tên công ty, không lặp lại "Ban Giám đốc Công ty" hay "Công ty"
 
 JSON:"""
 
@@ -182,11 +182,6 @@ CÁC VÙNG CẦN TÌM:
 5. Vùng chứa địa chỉ/đơn vị (address, company, etc.)
 6. Vùng checkbox/trắc nghiệm (□, [ ], etc.)
 7. Các ký tự trống truyền thống: dấu __, nhiều chấm (...), hoặc khoảng trắng bất thường giữa các nhãn dữ liệu.
-
-NGUYÊN TẮC "KHOẢNG TRẮNG" (WHITESPACE RULE):
-- Trong văn bản hành chính tiếng Việt, "ngày  tháng" (2 spaces) CHẮC CHẮN là thiếu placeholder ngày.
-- "Tháng  năm" (2 spaces) CHẮC CHẮN là thiếu placeholder tháng.
-- Bất kỳ nhãn dữ liệu nào (Họ tên, Số điện thoại,...) theo sau bởi 2+ spaces rồi đến một text khác đều cần chèn placeholder vào giữa.
 
 VỊ TRÍ PLACEHOLDER:
 - "left": Chèn TRƯỚC text (VD: "«ho_ten» Nguyễn Văn A")
@@ -319,9 +314,12 @@ NHIỆM VỤ: Phân tích từng placeholder và đề xuất TÊN TỐT HƠN b�
 QUY TẮC ĐẶT TÊN:
 1. Tên phải phản ánh Ý NGHĨA của trường (VD: "ho_ten", "ngay_sinh", "so_cmnd")
 2. Dựa vào NGỮ CẢNH xung quanh (text trước/sau) để hiểu ý nghĩa
-3. Tên ngắn gọn, rõ ràng, tiếng Việt không dấu
-4. Nếu 2 placeholder giống hệt nhau nhưng ở vị trí khác nhau → dùng context để phân biệt (VD: "nguoi_khoi_kien_1", "nguoi_bi_bien_2")
-5. Nếu tên hiện tại ĐÃ RẤT TỐT → giữ nguyên
+3. Cấm lấy ngữ cảnh cách bởi từ 2 kí tự đặc biệt trở lên hay thiết placeholder ở gần
+  * Nếu bạn thấy "ngày (trống) tháng 【«field_1»】 năm 【«field_2»】" -> field_1 PHẢI là "thang_...", field_2 PHẢI là "nam_...". KHÔNG được gán "ngay_..." cho field_1.
+  * Tuyệt đối không gán nhãn "ngay_..." cho placeholder đứng sau từ "tháng" hoặc "năm".
+4. Tên ngắn gọn, rõ ràng, tiếng Việt không dấu
+5. Nếu 2 placeholder giống hệt nhau nhưng ở vị trí khác nhau → dùng context để phân biệt (VD: "nguoi_khoi_kien_1", "nguoi_bi_bien_2")
+6. Nếu tên hiện tại ĐÃ RẤT TỐT → giữ nguyên
 
 ĐẶC BIỆT - XỬ LÝ BẢNG (TABLE_CELL):
 - Mỗi [TABLE_CELL - Row X, Col Y] là một Ô RIÊNG BIỆT
@@ -330,16 +328,9 @@ QUY TẮC ĐẶT TÊN:
 - Ví dụ: "chu_ky_truong_phong_row2_col1" cho ô ở hàng 2 cột 1
 
 ĐẶC BIỆT - XỬ LÝ NGÀY THÁNG (QUAN TRỌNG):
-- Pattern "ngày... tháng... năm..." thường có 3 placeholder.
-- Nếu đủ 3 placeholder: TÁCH thành 3 trường riêng: ngay_<context>, thang_<context>, nam_<context>
-- Nếu CHỈ CÓ 1 hoặc 2 placeholder: PHẢI dựa vào từ khóa ĐỨNG TRƯỚC placeholder đó để gán nhãn.
-  * Ví dụ: "ngày 15 tháng «field_1» năm «field_2»" -> field_1 là thang_..., field_2 là nam_... (KHÔNG được gán ngay_... cho field_1)
-  * Ví dụ: "ngày «field_1» tháng 12 năm «field_2»" -> field_1 là ngay_..., field_2 là nam_...
+- Pattern "ngày... tháng... năm..." thường có 3 placeholder, nếu có placeholder trước "ngày " thì thường là địa điểm.
 - Context lấy từ text gần nhất (VD: "Từ ngày:", "Ngày sinh:", "ngày lập:")
 - ĐỪNG đặt tên: ngay_1, ngay_2, ngay_3 hoặc ngay_bat_dau, ngay_2, ngay_3
-- XỬ LÝ TRƯỜNG HỢP THIẾU PLACEHOLDER:
-  * Nếu bạn thấy "ngày (trống) tháng 【«field_1»】 năm 【«field_2»】" -> field_1 PHẢI là "thang_...", field_2 PHẢI là "nam_...". KHÔNG được gán "ngay_..." cho field_1.
-  * Tuyệt đối không gán nhãn "ngay_..." cho placeholder đứng sau từ "tháng" hoặc "năm".
 - Nếu có 2 trường ngày tháng giống nhau → dùng số thứ tự: ngay_bat_dau_1, thang_bat_dau_1, nam_bat_dau_1
 
 VÍ DỤ KHÁC:

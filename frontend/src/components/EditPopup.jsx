@@ -23,6 +23,7 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
     firstLineIndent: 0
   })
   const [showParagraphOptions, setShowParagraphOptions] = useState(false)
+  const [paragraphFormatChanged, setParagraphFormatChanged] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   // Initialize format from selectedText when component mounts or selectedText changes
@@ -34,12 +35,14 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
   }, [selectedText])
 
   const hasFormatChanged = () => {
-    if (!originalFormat) return true 
-    return Object.keys(format).some(key => format[key] !== (originalFormat[key] ?? (key === 'highlight' ? null : key === 'alignment' ? 'left' : false)))
+    const textFormatChanged = !originalFormat || Object.keys(format).some(key => 
+      format[key] !== (originalFormat[key] ?? (key === 'highlight' ? null : key === 'alignment' ? 'left' : false))
+    )
+    return textFormatChanged || paragraphFormatChanged
   }
 
   const handleApplyFormat = async () => {
-    if (!hasFormatChanged() && !showParagraphOptions) {
+    if (!hasFormatChanged()) {
       onClose()
       return
     }
@@ -185,6 +188,96 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
               ))}
            </div>
         </div>
+
+        {/* Paragraph Options Toggle */}
+        <div className="pt-2">
+          <button 
+            onClick={() => setShowParagraphOptions(!showParagraphOptions)}
+            className="flex items-center gap-2 text-indigo-600 text-xs font-bold hover:text-indigo-700 transition-colors"
+          >
+            <svg 
+              xmlns="http://www.w3.org/2000/svg" 
+              width="14" height="14" 
+              viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" 
+              className={`transition-transform duration-200 ${showParagraphOptions ? 'rotate-90' : ''}`}
+            >
+              <path d="m9 18 6-6-6-6"/>
+            </svg>
+            TÙY CHỌN ĐOẠN VĂN (DÃN DÒNG, THỤT LỀ...)
+          </button>
+        </div>
+
+        {/* Paragraph Advanced Options */}
+        {showParagraphOptions && (
+          <div className="space-y-4 p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100/50 animate-in fade-in zoom-in-95 duration-200">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-2">Dãn dòng</label>
+                <select
+                  value={paragraphFormat.lineSpacing}
+                  onChange={(e) => {
+                    setParagraphFormat({ ...paragraphFormat, lineSpacing: parseFloat(e.target.value) });
+                    setParagraphFormatChanged(true);
+                  }}
+                  className="w-full bg-white border border-indigo-100 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                >
+                  <option value="1.0">Đơn (1.0)</option>
+                  <option value="1.15">1.15</option>
+                  <option value="1.5">1.5</option>
+                  <option value="2.0">Kép (2.0)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-2">Thụt lề đầu</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    value={paragraphFormat.firstLineIndent}
+                    onChange={(e) => {
+                      setParagraphFormat({ ...paragraphFormat, firstLineIndent: parseInt(e.target.value) || 0 });
+                      setParagraphFormatChanged(true);
+                    }}
+                    className="w-full bg-white border border-indigo-100 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all pr-8"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-400">pt</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-2">Cách trên</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    value={paragraphFormat.spaceBefore}
+                    onChange={(e) => {
+                      setParagraphFormat({ ...paragraphFormat, spaceBefore: parseInt(e.target.value) || 0 });
+                      setParagraphFormatChanged(true);
+                    }}
+                    className="w-full bg-white border border-indigo-100 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all pr-8"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-400">pt</span>
+                </div>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-2">Cách dưới</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    value={paragraphFormat.spaceAfter}
+                    onChange={(e) => {
+                      setParagraphFormat({ ...paragraphFormat, spaceAfter: parseInt(e.target.value) || 0 });
+                      setParagraphFormatChanged(true);
+                    }}
+                    className="w-full bg-white border border-indigo-100 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all pr-8"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-400">pt</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Hyperlink */}
         <button
