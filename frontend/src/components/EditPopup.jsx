@@ -34,47 +34,28 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
   }, [selectedText])
 
   const hasFormatChanged = () => {
-    if (!originalFormat) return true // No original format, apply current format
-    return (
-      format.bold !== originalFormat.bold ||
-      format.italic !== originalFormat.italic ||
-      format.underline !== originalFormat.underline ||
-      format.strikethrough !== (originalFormat.strikethrough || false) ||
-      format.subscript !== (originalFormat.subscript || false) ||
-      format.superscript !== (originalFormat.superscript || false) ||
-      format.color !== originalFormat.color ||
-      format.highlight !== (originalFormat.highlight || null) ||
-      format.fontSize !== originalFormat.fontSize ||
-      format.fontName !== originalFormat.fontName ||
-      format.allCaps !== (originalFormat.allCaps || false) ||
-      format.alignment !== (originalFormat.alignment || 'left')
-    )
+    if (!originalFormat) return true 
+    return Object.keys(format).some(key => format[key] !== (originalFormat[key] ?? (key === 'highlight' ? null : key === 'alignment' ? 'left' : false)))
   }
 
   const handleApplyFormat = async () => {
     if (!hasFormatChanged() && !showParagraphOptions) {
-      // No format changes, just close
       onClose()
       return
     }
 
     setSubmitting(true)
-
     try {
       const formatData = {
         selectedText: selectedText?.text,
         format: format,
         type: 'format',
         blockIndex: selectedText?.blockIndex,
-        // CRITICAL FIX: Include offset information for precise targeting
-        // This fixes bug where duplicate words always format the first occurrence
         startOffset: selectedText?.offset,
         endOffset: selectedText?.endOffset,
-        // CRITICAL FIX: Include para_in_cell for table cells with multiple paragraphs
         paraInCell: selectedText?.paraInCell
       }
 
-      // Include paragraph format if options are shown
       if (showParagraphOptions) {
         formatData.paragraphFormat = paragraphFormat
       }
@@ -83,334 +64,154 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
       onClose()
     } catch (error) {
       console.error('Format application failed:', error)
-      alert('Áp dụng định dạng thất bại: ' + error.message)
     } finally {
       setSubmitting(false)
     }
   }
 
   return (
-    <div className="fixed bottom-4 right-4 bg-white shadow-lg rounded-lg p-4 w-[450px] z-50 max-h-[80vh] overflow-y-auto">
-      <div className="flex justify-between items-center mb-3">
-        <h3 className="font-bold text-lg">Định dạng văn bản</h3>
-        <button
-          onClick={onClose}
-          className="text-gray-500 hover:text-gray-700 text-xl"
-        >
-          ×
-        </button>
+    <div className="fixed bottom-6 right-6 bg-white shadow-2xl rounded-2xl border border-slate-100 w-[420px] z-50 animate-in slide-in-from-bottom-4 duration-300 flex flex-col max-h-[85vh]">
+      {/* Header */}
+      <div className="px-5 py-4 border-b border-slate-50 flex justify-between items-center bg-slate-50/50 rounded-t-2xl">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
+          </div>
+          <h3 className="font-bold text-slate-800 tracking-tight">Định dạng văn bản</h3>
+        </div>
+        <button onClick={onClose} className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-all">✕</button>
       </div>
 
-      {/* Selected text preview */}
-      <div className="mb-3">
-        <label className="block text-sm font-medium mb-1 text-gray-700">
-          Văn bản đã chọn:
-        </label>
-        <div className="bg-gray-100 p-2 rounded text-sm text-gray-600">
-          {selectedText?.text || 'Không có văn bản nào được chọn'}
-        </div>
-      </div>
-
-      {/* Format options */}
-      <div className="mb-3">
-        <label className="block text-sm font-medium mb-2 text-gray-700">
-          Định dạng:
-        </label>
-
-        {/* Text style toggles */}
-        <div className="grid grid-cols-2 gap-2 mb-2">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={format.bold}
-              onChange={(e) => setFormat({ ...format, bold: e.target.checked })}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">Đậm (B)</span>
-          </label>
-
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={format.italic}
-              onChange={(e) => setFormat({ ...format, italic: e.target.checked })}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">Nghiêng (I)</span>
-          </label>
-
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={format.underline}
-              onChange={(e) => setFormat({ ...format, underline: e.target.checked })}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">Gạch chân (U)</span>
-          </label>
-
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={format.strikethrough}
-              onChange={(e) => setFormat({ ...format, strikethrough: e.target.checked })}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">Gạch ngang</span>
-          </label>
-
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={format.subscript}
-              onChange={(e) => {
-                setFormat({ ...format, subscript: e.target.checked, superscript: false })
-              }}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">Chỉ số dưới (x₂)</span>
-          </label>
-
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={format.superscript}
-              onChange={(e) => {
-                setFormat({ ...format, superscript: e.target.checked, subscript: false })
-              }}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">Chỉ số trên (x²)</span>
-          </label>
-
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={format.allCaps}
-              onChange={(e) => setFormat({ ...format, allCaps: e.target.checked })}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">HOA</span>
-          </label>
-        </div>
-
-        {/* Color and font size */}
-        <div className="grid grid-cols-2 gap-2 mb-2">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-600">Màu chữ:</span>
-            <input
-              type="color"
-              value={format.color}
-              onChange={(e) => setFormat({ ...format, color: e.target.value })}
-              className="w-10 h-8 rounded cursor-pointer border"
-            />
-            <span className="text-xs text-gray-500">{format.color}</span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-600">Tô nền:</span>
-            <input
-              type="color"
-              value={format.highlight || '#ffffff'}
-              onChange={(e) => setFormat({ ...format, highlight: e.target.value })}
-              className="w-10 h-8 rounded cursor-pointer border"
-            />
-            <span className="text-xs text-gray-500">{format.highlight || 'Không'}</span>
-            {format.highlight && (
-              <button
-                type="button"
-                onClick={() => setFormat({ ...format, highlight: null })}
-                className="text-xs text-red-500 hover:text-red-700"
-                title="Xóa tô nền"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-600">Cỡ chữ:</span>
-            <input
-              type="number"
-              value={format.fontSize}
-              onChange={(e) => setFormat({ ...format, fontSize: parseInt(e.target.value) || 12 })}
-              className="w-16 border rounded px-2 py-1 text-sm"
-              min={8}
-              max={72}
-            />
-            <span className="text-xs text-gray-500">pt</span>
+      <div className="p-5 overflow-y-auto space-y-6">
+        {/* Selected text preview */}
+        <div>
+          <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Văn bản đang chọn</label>
+          <div className="bg-slate-50 px-4 py-3 rounded-xl text-sm text-slate-600 border border-slate-100 italic font-medium leading-relaxed">
+            "{selectedText?.text || '...'}"
           </div>
         </div>
 
-        {/* Font family */}
-        <div className="mb-2">
-          <span className="text-xs text-gray-600">Font chữ:</span>
-          <select
-            value={format.fontName}
-            onChange={(e) => setFormat({ ...format, fontName: e.target.value })}
-            className="ml-2 border rounded px-2 py-1 text-sm"
-          >
-            <option value="Times New Roman">Times New Roman</option>
-            <option value="Arial">Arial</option>
-            <option value="Calibri">Calibri</option>
-            <option value="Verdana">Verdana</option>
-            <option value="Georgia">Georgia</option>
-          </select>
-        </div>
-
-        {/* Text alignment */}
-        <div className="mb-2">
-          <span className="text-xs text-gray-600">Căn lề:</span>
-          <div className="ml-2 inline-flex gap-1">
-            <button
-              type="button"
-              onClick={() => setFormat({ ...format, alignment: 'left' })}
-              className={`px-2 py-1 border rounded text-xs ${format.alignment === 'left' ? 'bg-blue-100 border-blue-500' : 'hover:bg-gray-100'}`}
-              title="Trái"
-            >
-              ⬅️
-            </button>
-            <button
-              type="button"
-              onClick={() => setFormat({ ...format, alignment: 'center' })}
-              className={`px-2 py-1 border rounded text-xs ${format.alignment === 'center' ? 'bg-blue-100 border-blue-500' : 'hover:bg-gray-100'}`}
-              title="Giữa"
-            >
-              ⬌
-            </button>
-            <button
-              type="button"
-              onClick={() => setFormat({ ...format, alignment: 'right' })}
-              className={`px-2 py-1 border rounded text-xs ${format.alignment === 'right' ? 'bg-blue-100 border-blue-500' : 'hover:bg-gray-100'}`}
-              title="Phải"
-            >
-              ➡️
-            </button>
-            <button
-              type="button"
-              onClick={() => setFormat({ ...format, alignment: 'justify' })}
-              className={`px-2 py-1 border rounded text-xs ${format.alignment === 'justify' ? 'bg-blue-100 border-blue-500' : 'hover:bg-gray-100'}`}
-              title="Đều"
-            >
-              ≡
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Paragraph Formatting - Collapsible */}
-      <div className="mb-3">
-        <button
-          onClick={() => setShowParagraphOptions(!showParagraphOptions)}
-          className="w-full flex items-center justify-between text-sm font-medium text-gray-700 hover:text-gray-900 transition-colors"
-        >
-          <span>📐 Định dạng đoạn văn</span>
-          <span className="text-gray-500">{showParagraphOptions ? '▼' : '▶'}</span>
-        </button>
-
-        {showParagraphOptions && (
-          <div className="mt-2 p-2 bg-gray-50 rounded border">
-            <div className="grid grid-cols-2 gap-2">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-600">Giãn dòng:</span>
+        {/* Font & Style */}
+        <div className="space-y-4">
+           <div className="flex gap-4">
+              <div className="flex-1">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Phông chữ</label>
                 <select
-                  value={paragraphFormat.lineSpacing}
-                  onChange={(e) => setParagraphFormat({ ...paragraphFormat, lineSpacing: parseFloat(e.target.value) })}
-                  className="flex-1 border rounded px-2 py-1 text-sm"
+                  value={format.fontName}
+                  onChange={(e) => setFormat({ ...format, fontName: e.target.value })}
+                  className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
                 >
-                  <option value={1.0}>1.0 (Simple)</option>
-                  <option value={1.15}>1.15</option>
-                  <option value={1.5}>1.5</option>
-                  <option value={2.0}>2.0 (Double)</option>
+                  <option value="Times New Roman">Times New Roman</option>
+                  <option value="Arial">Arial</option>
+                  <option value="Calibri">Calibri</option>
+                  <option value="Verdana">Verdana</option>
+                  <option value="Georgia">Georgia</option>
                 </select>
               </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-600">Trước (pt):</span>
+              <div className="w-24">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Cỡ chữ</label>
                 <input
                   type="number"
-                  value={paragraphFormat.spaceBefore}
-                  onChange={(e) => setParagraphFormat({ ...paragraphFormat, spaceBefore: parseInt(e.target.value) || 0 })}
-                  className="flex-1 border rounded px-2 py-1 text-sm"
-                  min={0}
-                  max={72}
+                  value={format.fontSize}
+                  onChange={(e) => setFormat({ ...format, fontSize: parseInt(e.target.value) || 12 })}
+                  className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
                 />
               </div>
+           </div>
 
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-600">Sau (pt):</span>
-                <input
-                  type="number"
-                  value={paragraphFormat.spaceAfter}
-                  onChange={(e) => setParagraphFormat({ ...paragraphFormat, spaceAfter: parseInt(e.target.value) || 0 })}
-                  className="flex-1 border rounded px-2 py-1 text-sm"
-                  min={0}
-                  max={72}
-                />
+           <div className="flex flex-wrap gap-2">
+              {[
+                { id: 'bold', label: 'B', icon: 'M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z' },
+                { id: 'italic', label: 'I', icon: 'M19 4h-9M14 20H5M15 4L9 20' },
+                { id: 'underline', label: 'U', icon: 'M6 3v7a6 6 0 0 0 12 0V3M4 21h16' },
+                { id: 'strikethrough', label: 'S', icon: 'M5 12h14M4 19c2 0 5-1 5-4s-3-4-5-4 5-1 5-4-3-4-5-4 11 0 11 0' }
+              ].map(style => (
+                <button
+                  key={style.id}
+                  onClick={() => setFormat({ ...format, [style.id]: !format[style.id] })}
+                  className={`w-10 h-10 flex items-center justify-center rounded-xl border transition-all ${format[style.id] ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-100' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                >
+                  <span className={`text-sm font-bold ${style.id === 'italic' ? 'italic' : style.id === 'underline' ? 'underline' : ''}`}>{style.label}</span>
+                </button>
+              ))}
+              <div className="w-px h-10 bg-slate-100 mx-1"></div>
+              {['subscript', 'superscript'].map(type => (
+                <button
+                  key={type}
+                  onClick={() => setFormat({ ...format, subscript: type === 'subscript' ? !format.subscript : false, superscript: type === 'superscript' ? !format.superscript : false })}
+                  className={`w-10 h-10 flex items-center justify-center rounded-xl border transition-all ${format[type] ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                >
+                  <span className="text-[10px] font-bold">x{type === 'subscript' ? '₂' : '²'}</span>
+                </button>
+              ))}
+           </div>
+        </div>
+
+        {/* Colors */}
+        <div className="grid grid-cols-2 gap-4">
+           <div>
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Màu chữ</label>
+              <div className="flex items-center gap-2 p-1.5 bg-white border border-slate-200 rounded-xl">
+                <input type="color" value={format.color} onChange={(e) => setFormat({ ...format, color: e.target.value })} className="w-8 h-8 rounded-lg cursor-pointer border-0 bg-transparent" />
+                <span className="text-xs font-mono font-bold text-slate-500 uppercase">{format.color}</span>
               </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-600">Indent đầu (pt):</span>
-                <input
-                  type="number"
-                  value={paragraphFormat.firstLineIndent}
-                  onChange={(e) => setParagraphFormat({ ...paragraphFormat, firstLineIndent: parseInt(e.target.value) || 0 })}
-                  className="flex-1 border rounded px-2 py-1 text-sm"
-                  min={0}
-                  max={144}
-                />
+           </div>
+           <div>
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Màu nền</label>
+              <div className="flex items-center gap-2 p-1.5 bg-white border border-slate-200 rounded-xl">
+                <input type="color" value={format.highlight || '#ffffff'} onChange={(e) => setFormat({ ...format, highlight: e.target.value })} className="w-8 h-8 rounded-lg cursor-pointer border-0 bg-transparent" />
+                <button onClick={() => setFormat({ ...format, highlight: null })} className="p-1 hover:bg-red-50 text-red-400 rounded transition-colors ml-auto"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
               </div>
-            </div>
-          </div>
-        )}
-      </div>
+           </div>
+        </div>
 
-      {/* Hyperlink section */}
-      <div className="mb-3 p-2 bg-blue-50 rounded border border-blue-200">
+        {/* Alignment */}
+        <div>
+           <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Căn lề</label>
+           <div className="flex p-1 bg-slate-100 rounded-xl gap-1">
+              {[
+                { id: 'left', icon: 'M4 6h16M4 12h10M4 18h16' },
+                { id: 'center', icon: 'M4 6h16M7 12h10M4 18h16' },
+                { id: 'right', icon: 'M4 6h16M10 12h10M4 18h16' },
+                { id: 'justify', icon: 'M4 6h16M4 12h16M4 18h16' }
+              ].map(align => (
+                <button
+                  key={align.id}
+                  onClick={() => setFormat({ ...format, alignment: align.id })}
+                  className={`flex-1 py-2 flex items-center justify-center rounded-lg transition-all ${format.alignment === align.id ? 'bg-white text-indigo-600 shadow-sm ring-1 ring-slate-200' : 'text-slate-400 hover:text-slate-600'}`}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d={align.icon}/></svg>
+                </button>
+              ))}
+           </div>
+        </div>
+
+        {/* Hyperlink */}
         <button
           onClick={() => {
-            if (selectedText?.blockIndex !== undefined && selectedText?.offset !== undefined && selectedText?.endOffset !== undefined) {
-              // Get the callback function from selectedText
-              const onOpenHyperlink = selectedText.onOpenHyperlink
-              if (onOpenHyperlink && typeof onOpenHyperlink === 'function') {
-                // Close edit popup first
-                if (onClose) {
-                  onClose()
-                }
-                // Trigger hyperlink dialog through parent callback with selection range
-                onOpenHyperlink(selectedText.blockIndex, selectedText.offset, selectedText.endOffset, selectedText.text)
-              }
+            if (selectedText?.blockIndex !== undefined && selectedText?.offset !== undefined) {
+               onClose()
+               selectedText.onOpenHyperlink(selectedText.blockIndex, selectedText.offset, selectedText.endOffset, selectedText.text)
             }
           }}
-          className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors font-medium text-sm"
+          className="w-full py-3 px-4 bg-blue-50 text-blue-700 rounded-xl border border-blue-100 font-bold text-sm flex items-center justify-center gap-2 hover:bg-blue-100 transition-all active:scale-95"
         >
-          🔗 Thêm Hyperlink
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          Chèn Hyperlink
         </button>
-        <p className="text-xs text-gray-500 mt-1 text-center">
-          Thêm hyperlink vào văn bản đã chọn: "{selectedText?.text || ''}"
-        </p>
       </div>
 
-      {/* Actions */}
-      <div className="flex gap-2">
+      {/* Footer Actions */}
+      <div className="p-5 border-t border-slate-50 flex gap-3">
         <button
           onClick={handleApplyFormat}
           disabled={submitting || !hasFormatChanged()}
-          className="flex-1 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-medium text-sm"
+          className="flex-[2] bg-indigo-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-indigo-700 disabled:bg-slate-200 transition-all shadow-lg shadow-indigo-100 active:scale-95"
         >
-          {submitting ? 'Đang áp dụng...' : 'Áp dụng định dạng'}
+          {submitting ? 'Đang lưu...' : 'Lưu thay đổi'}
         </button>
-        <button
-          onClick={onClose}
-          className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 transition-colors font-medium text-sm"
-        >
-          Hủy
-        </button>
+        <button onClick={onClose} className="flex-1 bg-slate-100 text-slate-600 py-3 rounded-xl font-bold text-sm hover:bg-slate-200 transition-all active:scale-95">Hủy</button>
       </div>
-
-      <p className="text-xs text-gray-500 mt-2 text-center">
-        💡 Text editing có thể thực hiện trực tiếp trên tài liệu
-      </p>
     </div>
   )
 }

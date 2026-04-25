@@ -120,9 +120,6 @@ export const suggestFieldName = async (templateId, blockIndex, paraInCell = null
 
 // Apply formatting to selected text - using batch-update
 export const editSelection = async (templateId, editData) => {
-  console.log('=== editSelection called ===')
-  console.log('editData:', editData)
-
   // blockIndex is required for precise editing
   if (editData.blockIndex === undefined || editData.blockIndex === null) {
     throw new Error('blockIndex is required for editing')
@@ -141,8 +138,6 @@ export const editSelection = async (templateId, editData) => {
   if (alignment !== undefined && alignment !== 'left') {
     paragraphFormat.alignment = alignment
   }
-
-  console.log('format_config (text-level):', textFormat)
 
   // Build operations array
   const operations = []

@@ -107,7 +107,7 @@ class MailMergeProcessor:
             direct_border = tc_borders.find(f"{self.w_ns}{side}")
             css_border = self._word_border_to_css(direct_border)
             if css_border == "__NONE__":
-                return None
+                return "none"
             if css_border:
                 return css_border
 
@@ -121,7 +121,8 @@ class MailMergeProcessor:
         elif side == "right":
             table_border = table_borders.get("right") if col_idx == last_col_idx else table_borders.get("insideV")
 
-        return self._word_border_to_css(table_border)
+        res = self._word_border_to_css(table_border)
+        return "none" if res == "__NONE__" else res
 
     def _clean_gemini_json_response(self, response_text: str) -> dict:
         """Clean Gemini JSON response by removing markdown code blocks
