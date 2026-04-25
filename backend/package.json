@@ -1,6 +1,0 @@
-{
-  "dependencies": {
-    "@microsoft/office-js": "^1.1.110",
-    "docx-preview": "^0.3.7"
-  }
-}

@@ -121,7 +121,7 @@ VITE_API_BASE=http://localhost:8000
 placeholder/
 ├── backend/
 │   ├── main.py                    # FastAPI app
-│   ├── mail_merge_processor.py    # Core logic
+│   ├── template_manager.py    # Core logic
 │   ├── gemini_client.py           # Gemini integration
 │   ├── merge_executor.py          # Mail merge execution
 │   └── requirements.txt

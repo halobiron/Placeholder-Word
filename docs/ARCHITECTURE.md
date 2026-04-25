@@ -58,7 +58,7 @@ React + Vite
 placeholder/
 ├── backend/
 │   ├── main.py                    # FastAPI standalone (cho demo)
-│   ├── mail_merge_processor.py    # Core logic từ instructions.md
+│   ├── template_manager.py    # Core logic từ instructions.md
 │   │                              # → Sau này vào: utils/mail_merge/
 │   ├── gemini_client.py           # Gemini integration
 │   │                              # → Tái sử dụng từ core/config.py
@@ -86,7 +86,7 @@ ai-server-xbot/modules/
 ├── utils/
 │   └── mail_merge/
 │       ├── __init__.py
-│       ├── processor.py           # Từ mail_merge_processor.py
+│       ├── processor.py           # Từ template_manager.py
 │       │                          # Logic: Word → Mail Merge
 │       ├── field_analyzer.py      # Field naming với Gemini
 │       └── executor.py            # docx-mailmerge2 execution

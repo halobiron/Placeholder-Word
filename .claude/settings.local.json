@@ -1,44 +1,114 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -c \"import main\")",
-      "Bash(chmod +x:*)",
-      "Bash(python3 -m pip install --upgrade pip)",
-      "Bash(python3:*)",
-      "Bash(/Users/aiot/workspace/placeholder/backend/setup.sh)",
-      "Bash(ls -la *.py)",
-      "Bash(./venv/bin/python3:*)",
-      "Bash(python test_conversion.py)",
-      "Bash(python:*)",
+      "Bash(wc:*)",
+      "Bash(python -c \"from smart_mail_merge_converter import SmartMailMergeConverter; print\\(''✓ Module import OK''\\)\")",
+      "Bash(npm run:*)",
+      "Bash(python -c \":*)",
+      "Bash(python -m py_compile main.py)",
       "Bash(curl -s http://localhost:8000/health)",
-      "Bash(ls -la test*)",
-      "Bash(ls -la *.py *.docx)",
-      "Bash(curl:*)",
-      "Bash(npm install:*)",
+      "Bash(timeout 5 python main.py)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(cd:*)",
+      "Bash(find E:WorkPhenikaaXPlaceholder-Wordbackenduploads -name *.docx -type f)",
+      "Bash(ls:*)",
+      "Bash(python3 -m py_compile gemini_client.py template_manager.py main.py)",
+      "Bash(chmod +x:*)",
       "Bash(lsof -ti:8000)",
       "Bash(xargs kill:*)",
-      "Bash(pip3 install:*)",
-      "Bash(pkill -f \"uvicorn main:app\")",
-      "Bash(nohup uvicorn:*)",
-      "Bash(pip install:*)",
-      "Bash(cp -r node_modules/tinymce/icons public/tinymce/)",
-      "Bash(cp -r node_modules/tinymce/themes public/tinymce/)",
-      "Bash(cp -r node_modules/tinymce/skins public/tinymce/)",
-      "Bash(cp -r node_modules/tinymce/plugins public/tinymce/)",
-      "Bash(cp -r node_modules/tinymce/models public/tinymce/)",
-      "Bash([ -d node_modules/tinymce/langs ])",
-      "Bash(cp -r node_modules/tinymce/langs public/tinymce/)",
-      "Bash(ls -d public/tinymce/plugins/*/)",
-      "Bash(pkill -9 -f \"uvicorn main:app\")",
-      "Bash(npm uninstall:*)",
-      "Bash(PYTHONPATH=/Users/aiot/workspace/placeholder/backend python3:*)",
+      "Bash(python3)",
+      "Bash(python3:*)",
+      "Bash(tail -50 backend/logs/*.log)",
+      "Bash(find E:/Work/PhenikaaX/Placeholder-Word/backend -name *.py -not -path */.venv/* -not -path */__pycache__/*)",
+      "Bash(grep -n \"class DocxFullEditor\" *.py)",
+      "Bash(grep -n \"^class\\\\|^    def\\\\|^$\" /Users/aiot/workspace/placeholder/backend/template_manager.py)",
+      "Bash(npx eslint:*)",
+      "Bash(node -c /Users/aiot/workspace/placeholder/frontend/src/components/EditPopup.jsx)",
+      "Bash(grep:*)",
+      "Bash(curl -s http://localhost:8000/docs)",
+      "Bash(curl -X POST http://localhost:8000/edit-selection -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -X POST http://localhost:8000/edit-selection -F template_id=test -F edit_type=format -F selected_text=test -F 'format_config={}')",
+      "Bash(curl -X OPTIONS http://localhost:8000/edit-selection -H \"Origin: http://localhost:5173\" -H \"Access-Control-Request-Method: POST\" -v)",
+      "Bash(cp /tmp/new_app.jsx /Users/aiot/workspace/placeholder/frontend/src/App.jsx)",
+      "Read(//tmp/**)",
+      "Bash(mv /tmp/edit_new.jsx /Users/aiot/workspace/placeholder/frontend/src/components/EditPopup.jsx)",
+      "Bash(git checkout:*)",
+      "Read(//Users/aiot/.claude/plugins/marketplaces/minimax-skills/skills/minimax-docx/**)",
+      "Bash(bash scripts/env_check.sh)",
+      "Bash(unzip:*)",
+      "Bash(bash scripts/docx_preview.sh /Users/aiot/workspace/placeholder/backend/uploads/templates/6aa2e209-babd-4ae5-81e4-a2beac08e048.docx)",
+      "Bash(curl -s -X POST http://localhost:8000/get-selection-format -F template_id=75a39dce-6b73-460d-ab47-2dfcaf403ac9 -F 'selected_text=Người khởi kiện' -F block_index=34)",
+      "Bash(curl -s -X POST http://localhost:8000/get-selection-format -F template_id=6aa2e209-babd-4ae5-81e4-a2beac08e048 -F 'selected_text=Người khởi kiện' -F block_index=34)",
+      "Bash(pkill -f \"uvicorn.*main:app\")",
+      "Bash(rg -U \"block_index|blockIndex|data-type.*table|data-row|data-col\" /Users/aiot/workspace/placeholder/frontend --type js --type ts --type html)",
+      "Bash(find:*)",
+      "Bash(curl -s \"http://localhost:8000/template-info/079eda8c-e12c-473a-8d51-d7b4fde1c135\")",
+      "Bash(pkill:*)",
+      "Bash(curl -s \"http://localhost:8000/\")",
+      "Bash(curl -s http://localhost:8000/)",
+      "Bash(curl -s \"http://localhost:8000/template-info/079eda8c-e12c-473a-8d51-d7b4fde1c135\" grep -o 'data-table-index[^ >]*' /tmp/response.html)",
+      "Bash(timeout 5 uvicorn main:app --port 8000)",
+      "Bash(uvicorn main:app:*)",
+      "Bash(cp:*)",
+      "Bash(curl -X POST http://localhost:8000/delete-line -F template_id=1c36b319-2937-4e2a-b7ff-68becc8789d9 -F 'line_text=Test delete' -F location=document -v)",
+      "Bash(lsof -ti:5173)",
+      "Bash(curl -s http://localhost:5173)",
+      "Bash(echo \"Frontend started with PID: $!\")",
+      "Read(//Users/aiot/.claude/plugins/cache/minimax-skills/minimax-skills/1.0.0/skills/minimax-docx/**)",
+      "Bash(scripts/docx_preview.sh /Users/aiot/workspace/placeholder/backend/uploads/templates/40e17d9f-70f0-4b7e-b24d-ab4517721b41.docx)",
+      "Bash(dotnet run:*)",
+      "Bash(curl:*)",
+      "Read(//c/Users/DELL/.claude/plugins/cache/minimax-skills/minimax-skills/1.0.0/skills/minimax-docx/**)",
+      "Bash(bash scripts/docx_preview.sh \"E:/Work/PhenikaaX/Placeholder-Word/backend/uploads/templates/f804889f-c4fa-4042-a080-80c032af7f45.docx\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill:*)",
+      "Bash(tasklist)",
+      "Bash(kill:*)",
+      "Bash(lsof:*)",
+      "Bash(npx gitnexus:*)",
+      "mcp__code-review-graph__semantic_search_nodes_tool",
+      "mcp__code-review-graph__query_graph_tool",
+      "mcp__code-review-graph__get_review_context_tool",
+      "Bash(git restore:*)",
+      "Bash(pip list:*)",
       "Bash(pip show:*)",
-      "Bash(unzip -p \"uploads/templates/54002ea2-1719-43f1-b849-7fc2a77b2cf5.docx\" word/document.xml)",
-      "Bash(rm:*)",
-      "Bash(xargs -I {} basename {})",
-      "Bash(du -sh /Users/aiot/workspace/placeholder/backend/uploads/*)",
-      "Bash(ls -1 /Users/aiot/workspace/placeholder/frontend/src/components/*.jsx)",
-      "Bash(ls -1 /Users/aiot/workspace/placeholder/backend/*.py)"
+      "mcp__plugin_everything-claude-code_sequential-thinking__sequentialthinking",
+      "Bash(cp main.py main.py.bak)",
+      "Bash(sed -i '858,975d' main.py)",
+      "mcp__code-review-graph__get_minimal_context_tool"
     ]
+  },
+  "enabledMcpjsonServers": [
+    "code-review-graph"
+  ],
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "code-review-graph update --skip-flows",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "code-review-graph status",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "everything-claude-code@everything-claude-code": true
   }
 }

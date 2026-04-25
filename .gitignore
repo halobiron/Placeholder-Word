@@ -1,3 +1,11 @@
 */.env
 */node_modules
 */venv
+*/__pycache__
+*/dist
+.gitnexus
+.claude/skills/gitnexus
+backend/uploads.DS_Store
+backend/uploads/
+# Added by code-review-graph
+.code-review-graph/

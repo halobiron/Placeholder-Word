@@ -53,56 +53,78 @@ function FileUpload({ onComplete }) {
   })
 
   return (
-    <div className="space-y-6">
-      <div className="text-center">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">
-          Bước 1: Tải lên tài liệu
-        </h2>
-        <p className="text-gray-600">
-          Tải lên file .docx có chứa dấu chấm hoặc gạch dưới
-        </p>
-      </div>
-
+    <div className="w-full">
       <div
         {...getRootProps()}
-        className={`border-2 border-dashed rounded-lg p-12 text-center cursor-pointer transition-all
-          ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}
-          ${uploading ? 'opacity-50 cursor-not-allowed' : ''}
+        className={`relative border-2 border-dashed rounded-3xl p-12 text-center cursor-pointer transition-all duration-300 group
+          ${isDragActive 
+            ? 'border-indigo-500 bg-indigo-50/50 scale-[1.01]' 
+            : 'border-slate-200 hover:border-indigo-400 hover:bg-slate-50'
+          }
+          ${uploading ? 'opacity-70 cursor-not-allowed pointer-events-none' : ''}
         `}
       >
         <input {...getInputProps()} />
 
         {uploading ? (
-          <div className="space-y-4">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-            <p className="text-lg">Đang xử lý...</p>
+          <div className="space-y-6 py-4">
+            <div className="relative w-20 h-20 mx-auto">
+              <div className="absolute inset-0 border-4 border-indigo-100 rounded-full"></div>
+              <div className="absolute inset-0 border-4 border-indigo-600 rounded-full border-t-transparent animate-spin"></div>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xl font-bold text-slate-800">Đang xử lý tài liệu...</p>
+              <p className="text-sm text-slate-500">Gemini đang trích xuất cấu trúc và placeholder</p>
+            </div>
           </div>
         ) : (
-          <div className="space-y-4">
-            <svg className="w-16 h-16 mx-auto text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
+          <div className="space-y-6">
+            <div className={`w-20 h-20 mx-auto rounded-2xl flex items-center justify-center transition-all duration-300
+              ${isDragActive ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-200' : 'bg-slate-100 text-slate-400 group-hover:bg-indigo-50 group-hover:text-indigo-500'}
+            `}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <path d="M12 18v-6"/>
+                <path d="m9 15 3-3 3 3"/>
+              </svg>
+            </div>
+            
             <div>
-              <p className="text-lg font-medium text-gray-700">
-                {isDragActive ? 'Thả file vào đây' : 'Kéo thả file vào đây'}
+              <p className="text-xl font-bold text-slate-800">
+                {isDragActive ? 'Thả file vào đây' : 'Kéo thả Template Word'}
               </p>
-              <p className="text-sm text-gray-500 mt-2">
-                hoặc click để chọn file
+              <p className="text-sm text-slate-500 mt-2">
+                hoặc <span className="text-indigo-600 font-bold underline decoration-2 underline-offset-4">duyệt từ máy tính</span>
               </p>
             </div>
-            <p className="text-xs text-gray-400">
-              Chỉ chấp nhận file .docx, tối đa 10MB
-            </p>
+
+            <div className="pt-4 border-t border-slate-100 flex items-center justify-center gap-6">
+               <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full"></span>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Hỗ trợ .DOCX</span>
+               </div>
+               <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 bg-blue-500 rounded-full"></span>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Tối đa 10MB</span>
+               </div>
+            </div>
           </div>
         )}
       </div>
 
       {error && (
-        <div className="p-4 bg-red-50 text-red-700 rounded-lg flex items-start gap-3">
-          <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-          </svg>
-          <span>{error}</span>
+        <div className="mt-6 p-4 bg-red-50 border border-red-100 text-red-700 rounded-2xl flex items-start gap-3 animate-in slide-in-from-top-2 duration-300">
+          <div className="w-6 h-6 bg-red-100 rounded-lg flex items-center justify-center text-red-600 flex-shrink-0">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          </div>
+          <div>
+            <p className="text-sm font-bold">Lỗi tải lên</p>
+            <p className="text-xs opacity-80">{error}</p>
+          </div>
+          <button onClick={() => setError(null)} className="ml-auto text-red-400 hover:text-red-600">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
         </div>
       )}
     </div>
