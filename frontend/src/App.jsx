@@ -2088,7 +2088,7 @@ function App() {
 
       {/* HEADER */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-40">
-        <div className="max-w-[1600px] mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="max-w-[1800px] mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-indigo-200 shadow-lg">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" /><polyline points="14 2 14 8 20 8" /></svg>
@@ -2129,7 +2129,7 @@ function App() {
         </div>
       </header>
 
-      <main className="max-w-[1600px] mx-auto p-4 md:p-6">
+      <main className="max-w-[1800px] mx-auto p-4 md:p-6">
         {/* STEP: UPLOAD */}
         {step === 'upload' && (
           <div className="max-w-2xl mx-auto mt-12">
@@ -2456,7 +2456,7 @@ function App() {
                       }
                     }, 1000)
                   }}
-                  className="p-8 sm:p-16 min-h-[1056px] w-full max-w-[816px] mx-auto focus:outline-none bg-white shadow-2xl doc-editor-surface mb-8 mt-4"
+                  className="p-8 sm:p-16 min-h-[1056px] w-full max-w-[1500px] mx-auto focus:outline-none bg-white shadow-2xl doc-editor-surface mb-8 mt-4"
                   dangerouslySetInnerHTML={{ __html: editorHtml }}
                 />
               </div>
@@ -2728,7 +2728,7 @@ function App() {
 
         {/* STEP: PREVIEW RESULT */}
         {step === 'preview_result' && previewHtml && (
-          <div className="max-w-[1200px] mx-auto space-y-6">
+          <div className="max-w-[1600px] mx-auto space-y-6">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-2xl font-bold text-slate-800">Kiểm tra kết quả</h2>
@@ -2750,7 +2750,7 @@ function App() {
             </div>
 
             <div className="bg-slate-100 border border-slate-200 rounded-2xl shadow-sm overflow-hidden p-4 sm:p-12 flex justify-center">
-              <div className="bg-white shadow-2xl p-8 sm:p-20 w-full max-w-[816px] min-h-[1056px]">
+              <div className="bg-white shadow-2xl p-8 sm:p-20 w-full max-w-[1200px] min-h-[1056px] overflow-x-auto">
                 <div
                   dangerouslySetInnerHTML={{ __html: previewHtml }}
                   className="prose prose-slate max-w-none"

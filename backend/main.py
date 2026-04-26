@@ -149,11 +149,15 @@ async def root():
 
 
 @app.post("/convert")
-async def convert_to_template(file: UploadFile = File(...)):
+async def convert_to_template(
+    file: UploadFile = File(...),
+    auto_fill_tables: bool = Form(True)
+):
     """Upload .docx and convert to Mail Merge template
 
     Args:
         file: Uploaded .docx file
+        auto_fill_tables: Auto-fill placeholders in empty table cells (default: True)
 
     Returns:
         JSON with template_id and list of detected fields
@@ -179,10 +183,10 @@ async def convert_to_template(file: UploadFile = File(...)):
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+        processor = MailMergeProcessor(gemini_api_key=None)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
-        result = processor.convert_to_mail_merge(str(temp_path), str(output_path))
+        result = processor.convert_to_mail_merge(str(temp_path), str(output_path), auto_fill_tables=auto_fill_tables)
 
         # Build response
         response_data = {
@@ -230,7 +234,8 @@ async def merge_template(
 
     try:
         executor = MergeExecutor()
-        template_fields = executor.get_template_fields(str(template_path))
+        template_field_metadata = executor.get_template_field_metadata(str(template_path))
+        template_fields = [item["field_name"] for item in template_field_metadata]
 
         # Determine data source
         if field_values:
@@ -252,17 +257,23 @@ async def merge_template(
             locked_f = set(parse_json_list(locked_fields))
 
             if active_f:
-                template_fields = [f for f in template_fields if f in active_f]
+                template_field_metadata = [
+                    item for item in template_field_metadata if item["field_name"] in active_f
+                ]
             if locked_f:
-                template_fields = [f for f in template_fields if f not in locked_f]
+                template_field_metadata = [
+                    item for item in template_field_metadata if item["field_name"] not in locked_f
+                ]
+            template_fields = [item["field_name"] for item in template_field_metadata]
 
             logger.debug("=== MERGE DEBUG ===")
             logger.debug(f"Template fields to extract: {template_fields}")
             data = gemini_client.extract_data_from_context(
                 context,
-                template_fields
+                template_fields,
+                template_field_metadata=template_field_metadata,
             )
-            logger.debug("Extracted data: {data}")
+            logger.debug(f"Extracted data: {data}")
             logger.debug("=== END MERGE DEBUG ===")
         else:
             raise HTTPException(
@@ -281,7 +292,7 @@ async def merge_template(
         return JSONResponse(content={
             "result_id": result_id,
             "download_url": f"/download/{result_id}",
-            "fields_filled": len(data)
+            "fields_filled": sum(1 for value in data.values() if str(value).strip())
         })
 
     except ValueError as e:

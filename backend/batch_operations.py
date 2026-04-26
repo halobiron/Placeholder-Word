@@ -247,11 +247,15 @@ def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
         block_map = getattr(editor, "_block_to_para_index_map", None) or {}
         block_data = block_map.get(op.block_index)
         if block_data and block_data.get("type") == "table_cell":
-            cell = None
-            for table in editor.doc.tables:
-                if block_data["row"] < len(table.rows) and block_data["col"] < len(table.rows[block_data["row"]].cells):
-                    cell = table.rows[block_data["row"]].cells[block_data["col"]]
-                    break
+            # CRITICAL FIX: Use the stored cell object directly if available
+            # This works correctly with merged cells
+            cell = block_data.get("cell")
+            if cell is None:
+                # Fallback to old method if cell object is not stored
+                for table in editor.doc.tables:
+                    if block_data["row"] < len(table.rows) and block_data["col"] < len(table.rows[block_data["row"]].cells):
+                        cell = table.rows[block_data["row"]].cells[block_data["col"]]
+                        break
             if cell is not None and len(cell.paragraphs) > 1:
                 logger.warning(
                     "update_text without para_in_cell on multi-paragraph cell: block_index=%s row=%s col=%s para_count=%s",

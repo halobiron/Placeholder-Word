@@ -41,7 +41,8 @@ class GeminiClient:
     def extract_data_from_context(
         self,
         context: str,
-        template_fields: list
+        template_fields: list,
+        template_field_metadata: list | None = None,
     ) -> dict:
         """Extract field values from context text
 
@@ -55,7 +56,20 @@ class GeminiClient:
         if not template_fields:
             return {}
 
-        fields_list = "\n".join([f"- {f}" for f in template_fields])
+        if template_field_metadata:
+            metadata_by_name = {
+                item.get("field_name"): item for item in template_field_metadata if item.get("field_name")
+            }
+            fields_list = "\n".join(
+                [
+                    f'- {field_name} | placeholder_goc="{metadata_by_name.get(field_name, {}).get("original_placeholder", "")}" '
+                    f'| truoc="{metadata_by_name.get(field_name, {}).get("context_before", "")}" '
+                    f'| sau="{metadata_by_name.get(field_name, {}).get("context_after", "")}"'
+                    for field_name in template_fields
+                ]
+            )
+        else:
+            fields_list = "\n".join([f"- {field_name}" for field_name in template_fields])
         prompt = f"""Bạn là chuyên gia trích xuất dữ liệu từ văn bản.
 
 Danh sách trường cần trích xuất:
@@ -71,10 +85,12 @@ Yêu cầu:
 - Format: {{"field1": "value1", "field2": "value2", ...}}
 - Giữ nguyên tên trường chính xác
 - Nếu không tìm thấy giá trị, để chuỗi rỗng ""
-- Nếu trường nằm sau một nhãn cố định trong form, chỉ trả về phần biến đổi của dữ liệu.
-- Không lặp lại tiền tố đã có sẵn trong template, ví dụ:
-  - "Kính gửi: TÒA ÁN NHÂN DÂN [trường]" -> chỉ trả về phần sau "TÒA ÁN NHÂN DÂN"
-  - "Ban Giám đốc Công ty: [trường]" -> chỉ trả về tên công ty, không lặp lại "Ban Giám đốc Công ty" hay "Công ty"
+- Nếu nhiều trường thuộc các phần lặp lại của cùng một mẫu đơn, hãy sử dụng ngữ cảnh, cách xưng hô để phân biệt và trả về giá trị chính xác cho từng trường.
+- QUAN TRỌNG: Không lặp lại tiền tố đã có sẵn trong template. Ví dụ:
+  - Template "Kính gửi: TÒA ÁN NHÂN DÂN «field»" và context có "TÒA ÁN NHÂN DÂN TP.HCM" → chỉ trả về "TP.HCM"
+  - Template "năm 20«field»" và context có "năm 2024" → chỉ trả về "24" (không lặp lại "20")
+  - Template "Ban Giám đốc Công ty: «field»" → chỉ trả về tên công ty, không lặp lại "Ban Giám đốc Công ty"
+  - Template "Họ và tên: «field»" → chỉ trả về tên người, không lặp lại "Họ và tên:"
 
 JSON:"""
 
@@ -327,6 +343,13 @@ QUY TẮC ĐẶT TÊN:
 - Tên placeholder nên phản ánh vị trí hoặc ngữ cảnh cụ thể của ô đó
 - Ví dụ: "chu_ky_truong_phong_row2_col1" cho ô ở hàng 2 cột 1
 
+ĐẶC BIỆT - XỬ LÝ CHECKBOX (QUAN TRỌNG):
+- Nếu placeholder hiện tại BẮT ĐẦU BẰNG "ck_" → đây là trường checkbox
+- PHẢI GIỮ nguyên tiền tố "ck_" trong tên mới
+- Chỉ thay đổi phần sau "ck_", không được xóa tiền tố này
+- VD: "ck_field_1" → "ck_nghi_khong_luong" (đúng), "nghi_khong_luong" (SAI)
+- VD: "ck_loai" → "ck_loai_nghi" (đúng), "loai_nghi" (SAI)
+
 ĐẶC BIỆT - XỬ LÝ NGÀY THÁNG (QUAN TRỌNG):
 - Pattern "ngày... tháng... năm..." thường có 3 placeholder, nếu có placeholder trước "ngày " thì thường là địa điểm.
 - Context lấy từ text gần nhất (VD: "Từ ngày:", "Ngày sinh:", "ngày lập:")
@@ -335,7 +358,7 @@ QUY TẮC ĐẶT TÊN:
 
 VÍ DỤ KHÁC:
 - "Họ tên: «field_1»" → "ho_ten"
-- "□ Nghỉ không lương «field_2»" → "nghi_khong_luong"
+- "□ Nghỉ không lương «ck_field_2»" → "ck_nghi_khong_luong" (giữ ck_)
 - "Số CMND: «field_3»" → "so_cmnd"
 - "[TABLE_CELL - Row 2, Col 1] «field_4»" → "chu_ky_nguoi_lap"
 

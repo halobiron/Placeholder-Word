@@ -10,10 +10,10 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
-from docx.table import Table
+from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 import copy
-from smart_mail_merge_converter import SmartMailMergeConverter
+from smart_mail_merge_converter import PLACEHOLDER_PATTERN, SmartMailMergeConverter
 from gemini_client import GeminiClient
 from docx_editor import DocxFullEditor
 
@@ -208,12 +208,271 @@ class MailMergeProcessor:
         res = self._word_border_to_css(table_border)
         return "none" if res == "__NONE__" else res
 
-    def convert_to_mail_merge(self, docx_path: str, output_path: str = None) -> Dict:
+    def _calculate_rowspan(self, table, start_row_idx: int, col_idx: int) -> int:
+        """Calculate rowspan for a vertically merged cell.
+
+        Counts how many consecutive rows have vMerge="continue" at the same column
+        starting from the row after start_row_idx.
+
+        Args:
+            table: docx Table object
+            start_row_idx: Row index where vMerge="restart" is found
+            col_idx: Column index of the merged cell
+
+        Returns:
+            Number of rows spanned (minimum 1)
+        """
+        rowspan = 1
+        total_rows = len(table.rows)
+
+        for row_idx in range(start_row_idx + 1, total_rows):
+            if row_idx >= total_rows:
+                break
+            row = table.rows[row_idx]
+            cell, _, _ = self._find_row_cell_at_column(row, col_idx)
+            try:
+                if cell is not None:
+                    tcPr = cell._element.find(f"{self.w_ns}tcPr")
+                    if tcPr is not None:
+                        vmerge_elem = tcPr.find(f"{self.w_ns}vMerge")
+                        if vmerge_elem is not None:
+                            vmerge_val = vmerge_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "continue")
+                            if vmerge_val == "continue":
+                                rowspan += 1
+                            else:
+                                # Found "restart" or no vMerge, vertical merge ends
+                                break
+                        else:
+                            # No vMerge element, vertical merge ends
+                            break
+                    else:
+                        # No tcPr, vertical merge ends
+                        break
+                else:
+                    # Column index out of range
+                    break
+            except Exception as e:
+                print(f"[_calculate_rowspan] Error checking row {row_idx}: {e}")
+                break
+
+        return rowspan
+
+    def _iter_xml_row_cells(self, row):
+        """Yield actual XML cells in a row without python-docx merge expansion."""
+        return [_Cell(tc, row) for tc in row._tr.tc_lst]
+
+    def _get_cell_grid_span(self, cell) -> int:
+        tcPr = cell._element.find(f"{self.w_ns}tcPr")
+        if tcPr is None:
+            return 1
+
+        grid_span_elem = tcPr.find(f"{self.w_ns}gridSpan")
+        if grid_span_elem is None:
+            return 1
+
+        grid_span_val = grid_span_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+        if not grid_span_val:
+            return 1
+
+        try:
+            return max(1, int(grid_span_val))
+        except (TypeError, ValueError):
+            return 1
+
+    def _find_row_cell_at_column(self, row, logical_col_idx: int):
+        """Resolve a logical column index to the backing XML cell in that row."""
+        current_col = 0
+        for cell in self._iter_xml_row_cells(row):
+            colspan = self._get_cell_grid_span(cell)
+            if current_col <= logical_col_idx < current_col + colspan:
+                return cell, current_col, colspan
+            current_col += colspan
+        return None, None, None
+
+    def _get_vertical_merge_value(self, cell):
+        tcPr = cell._element.find(f"{self.w_ns}tcPr")
+        if tcPr is None:
+            return None
+
+        vmerge_elem = tcPr.find(f"{self.w_ns}vMerge")
+        if vmerge_elem is None:
+            return None
+
+        return vmerge_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "continue")
+
+    def _iter_visible_table_cells(self, table):
+        """Yield visible table cells with logical column and merge metadata."""
+        for row_idx, row in enumerate(table.rows):
+            logical_col_idx = 0
+            for cell_idx, cell in enumerate(self._iter_xml_row_cells(row)):
+                colspan = self._get_cell_grid_span(cell)
+                vmerge_val = self._get_vertical_merge_value(cell)
+                if vmerge_val == "continue":
+                    logical_col_idx += colspan
+                    continue
+
+                rowspan = self._calculate_rowspan(table, row_idx, logical_col_idx) if vmerge_val == "restart" else 1
+                yield {
+                    "row_idx": row_idx,
+                    "row": row,
+                    "cell_idx": cell_idx,
+                    "cell": cell,
+                    "col_idx": logical_col_idx,
+                    "colspan": colspan,
+                    "rowspan": rowspan,
+                }
+                logical_col_idx += colspan
+
+    def _get_row_style(self, row, row_idx: int) -> str:
+        row_style = ""
+        try:
+            trPr = row._element.find(f"{self.w_ns}trPr")
+            if trPr is None:
+                return row_style
+
+            tr_height = trPr.find(f"{self.w_ns}trHeight")
+            if tr_height is None:
+                return row_style
+
+            h_val = tr_height.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+            if not h_val:
+                return row_style
+
+            h_rule = trPr.find(f"{self.w_ns}hRule")
+            h_rule_val = h_rule.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val") if h_rule is not None else None
+            height_px = int(h_val) / 15
+
+            if h_rule_val == "exact":
+                row_style += f" height: {height_px}px;"
+                print(f"[_process_table_to_html] Row {row_idx} exact height: {h_val} twips ≈ {height_px}px")
+            else:
+                row_style += f" min-height: {height_px}px;"
+                label = "min-height" if h_rule_val == "atLeast" else "auto height"
+                print(f"[_process_table_to_html] Row {row_idx} {label}: {h_val} twips ≈ {height_px}px")
+        except Exception as e:
+            print(f"[_process_table_to_html] Error extracting row {row_idx} height: {e}")
+        return row_style
+
+    def _build_table_cell_paragraphs_html(self, cell, col_idx: int, block_index: int):
+        cell_text_parts = []
+        cell_paragraphs_html = []
+
+        for para_index, para in enumerate(cell.paragraphs):
+            text_from_xml = "".join(
+                t.text for t in para._p.findall(f".//{self.w_ns}t") if t.text
+            )
+            if text_from_xml:
+                cell_text_parts.append(text_from_xml)
+
+            para_content = "".join(self._process_xml_element_to_html(child) for child in para._p)
+            para_metadata = f'data-para-in-cell="{para_index}" data-cell="{col_idx}" data-cell-block-index="{block_index}"'
+
+            pPr = para._p.find(f"{self.w_ns}pPr")
+            indent_styles = self._extract_paragraph_indentation_styles(pPr)
+            jc = pPr.find(f"{self.w_ns}jc") if pPr is not None else None
+            jc_val = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "left") if jc is not None else "left"
+            css_align = {
+                "left": "left",
+                "center": "center",
+                "right": "right",
+                "both": "justify",
+            }.get(jc_val, "left")
+
+            if not para_content.strip():
+                para_style_parts = [
+                    "min-height: 1.2em",
+                    "margin: 2px 0",
+                    f"text-align: {css_align}",
+                    "cursor: crosshair",
+                ]
+                if indent_styles:
+                    para_style_parts.extend(indent_styles)
+                para_style = "; ".join(para_style_parts) + ";"
+                print(f"[_process_table_to_html] Empty Para[{para_index}] horizontal-align: {css_align} (PRESERVED)")
+                cell_paragraphs_html.append(
+                    f'<p {para_metadata} class="cell-paragraph" style="{para_style}" title="Click để thêm placeholder">&nbsp;</p>'
+                )
+                continue
+
+            para_style_parts = ["margin: 2px 0"]
+            if css_align != "left":
+                para_style_parts.append(f"text-align: {css_align}")
+            if indent_styles:
+                para_style_parts.extend(indent_styles)
+
+            text_content = re.sub(r'<[^>]+>', '', para_content)
+            if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
+                para_style_parts.append("white-space: pre-wrap")
+
+            para_style = "; ".join(para_style_parts) + ";"
+            print(f"[_process_table_to_html] Para[{para_index}] horizontal-align: {css_align}")
+            cell_paragraphs_html.append(
+                f'<p {para_metadata} class="cell-paragraph" style="{para_style}">{para_content}</p>'
+            )
+
+        cell_text = "".join(cell_text_parts).strip()
+        return "".join(cell_paragraphs_html) if cell_paragraphs_html else "&nbsp;", cell_text
+
+    def _build_table_cell_style(
+        self,
+        cell,
+        row_idx: int,
+        cell_idx: int,
+        col_idx: int,
+        column_widths,
+        table_borders,
+        last_row_idx: int,
+        last_col_idx: int,
+    ) -> str:
+        cell_style = "padding: 5px; font-weight: normal; font-style: normal; text-decoration: none; text-align: left;"
+
+        if column_widths and col_idx < len(column_widths):
+            cell_style += f" width: {column_widths[col_idx]};"
+
+        try:
+            tcPr = cell._element.find(f"{self.w_ns}tcPr")
+            if tcPr is None:
+                return cell_style
+
+            shd = tcPr.find(f"{self.w_ns}shd")
+            if shd is not None:
+                fill = shd.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}fill")
+                if fill and fill != "auto":
+                    cell_style += f" background-color: #{fill};"
+                    print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] background: #{fill}")
+
+            v_align = tcPr.find(f"{self.w_ns}vAlign")
+            if v_align is not None:
+                v_align_val = v_align.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "top")
+                css_v_align = {"top": "top", "center": "middle", "bottom": "bottom"}.get(v_align_val, "top")
+                cell_style += f" vertical-align: {css_v_align};"
+                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] vertical-align: {css_v_align}")
+
+            for side in ["top", "bottom", "left", "right"]:
+                css_border = self._get_cell_border_css(
+                    tcPr,
+                    table_borders,
+                    side,
+                    row_idx,
+                    cell_idx,
+                    last_row_idx,
+                    last_col_idx,
+                )
+                if css_border:
+                    cell_style += f" border-{side}: {css_border};"
+                    print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] border-{side}: {css_border}")
+        except Exception as e:
+            print(f"[_process_table_to_html] Error extracting cell formatting: {e}")
+
+        return cell_style
+
+    def convert_to_mail_merge(self, docx_path: str, output_path: str = None, auto_fill_tables: bool = True) -> Dict:
         """Convert .docx to Mail Merge template using SmartMailMergeConverter
 
         Args:
             docx_path: Path to input .docx file
             output_path: Path to save template (optional)
+            auto_fill_tables: Auto-fill placeholders in empty table cells (default: True)
 
         Returns:
             Dict with template_id, fields, and HTML preview
@@ -233,7 +492,7 @@ class MailMergeProcessor:
             # Step 1: Use SmartMailMergeConverter to create basic placeholders
             print("=== STEP 1: Creating basic placeholders ===")
             converter = SmartMailMergeConverter(docx_path)
-            fields = converter.convert(str(output_path))
+            fields = converter.convert(str(output_path), auto_fill_tables=auto_fill_tables)
 
             # Step 2: Use Gemini to suggest better names (if API key provided)
             if self.gemini_client and fields:
@@ -878,16 +1137,17 @@ JSON:"""
             last_run = text_runs[-1]
             original_text = last_run.text
 
-            # Check if ends with dots or underscores
-            if re.search(r'[._]{3,}$', original_text):
+            # Reuse the same placeholder detection rules as the main converter.
+            end_match = PLACEHOLDER_PATTERN.search(original_text)
+            if end_match and end_match.end() == len(original_text):
                 # Extract the pattern to use as original text
-                match = re.search(r'([._]{3,})$', original_text)
+                match = end_match
                 original_pattern = match.group(1) if match else "..."
 
                 print(f"  → Found pattern '{original_pattern}' at end, removing and adding placeholder")
 
                 # Remove pattern from run text
-                last_run.text = re.sub(r'[._]{3,}$', '', original_text)
+                last_run.text = original_text[:match.start()]
                 print(f"  → Removed pattern from run text: '{last_run.text}'")
 
                 # Add MERGEFIELD placeholder
@@ -1771,8 +2031,7 @@ JSON:"""
             HTML string for the entire table
         """
         print(f"[_process_table_to_html] START Processing table {table_index} with {len(table.rows)} rows, {len(table.columns)} columns")
-        w_ns = self.w_ns
-        table_html = ['<table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; margin: 10px 0;">']
+        table_html = ['<div style="overflow-x: auto; max-width: 100%;"><table class="docx-table" data-type="table" style="border-collapse: collapse; width: auto; max-width: 100%; table-layout: auto; margin: 10px 0;">']
 
         # Extract column widths from tblGrid to set proper cell proportions
         column_widths = []
@@ -1798,188 +2057,66 @@ JSON:"""
         except Exception as e:
             print(f"[_process_table_to_html] Error extracting column widths: {e}")
 
-        # Track block index for each cell (matching extract_structured_content logic)
         current_cell_block_index = block_index
         cells_processed = 0
         table_borders = self._get_table_borders(table)
         last_row_idx = len(table.rows) - 1
         last_col_idx = len(table.columns) - 1
+        cells_by_row = {}
+        for cell_data in self._iter_visible_table_cells(table):
+            cells_by_row.setdefault(cell_data["row_idx"], []).append(cell_data)
 
         for row_idx, row in enumerate(table.rows):
-            # Extract row height from trPr
-            row_style = ""
-            try:
-                trPr = row._element.find(f"{self.w_ns}trPr")
-                if trPr is not None:
-                    tr_height = trPr.find(f"{self.w_ns}trHeight")
-                    if tr_height is not None:
-                        h_val = tr_height.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
-                        h_rule = trPr.find(f"{self.w_ns}hRule")
-                        h_rule_val = h_rule.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val") if h_rule is not None else None
+            table_html.append(f'<tr style="{self._get_row_style(row, row_idx)}">')
+            for cell_data in cells_by_row.get(row_idx, []):
+                cell = cell_data["cell"]
+                col_idx = cell_data["col_idx"]
+                colspan = cell_data["colspan"]
+                rowspan = cell_data["rowspan"]
 
-                        if h_val:
-                            # Convert twips to pixels (1 twip = 1/20 point, 1 point ≈ 1.333 pixels)
-                            # Or simpler: 1 twip ≈ 0.067em, or use pixels directly
-                            height_px = int(h_val) / 15  # Approximate conversion to pixels
+                if colspan > 1:
+                    print(f"[_process_table_to_html] Cell[{row_idx},{col_idx}] horizontal merge: colspan={colspan}")
+                if rowspan > 1:
+                    print(f"[_process_table_to_html] Cell[{row_idx},{col_idx}] vertical merge: rowspan={rowspan}")
 
-                            if h_rule_val == "exact":
-                                row_style += f" height: {height_px}px;"
-                                print(f"[_process_table_to_html] Row {row_idx} exact height: {h_val} twips ≈ {height_px}px")
-                            elif h_rule_val == "atLeast":
-                                row_style += f" min-height: {height_px}px;"
-                                print(f"[_process_table_to_html] Row {row_idx} min-height: {h_val} twips ≈ {height_px}px")
-                            else:  # auto or unspecified
-                                # For auto, still apply min-height to ensure visibility
-                                row_style += f" min-height: {height_px}px;"
-                                print(f"[_process_table_to_html] Row {row_idx} auto height: {h_val} twips ≈ {height_px}px (as min-height)")
-            except Exception as e:
-                print(f"[_process_table_to_html] Error extracting row {row_idx} height: {e}")
+                cell_content, cell_text = self._build_table_cell_paragraphs_html(
+                    cell,
+                    col_idx,
+                    current_cell_block_index,
+                )
+                print(f"[_process_table_to_html] Cell[{row_idx},{col_idx}]: text=\"{cell_text[:30] if cell_text else '(empty)'}\", has_content={bool(cell_text)}")
 
-            table_html.append(f'<tr style="{row_style}">')
-            for cell_idx, cell in enumerate(row.cells):
-                # Extract cell text while rendering paragraphs so we only walk the XML once.
-                cell_text_parts = []
-                cell_paragraphs_html = []
-                para_index = 0  # Track paragraph index within cell for targeting
+                cell_style = self._build_table_cell_style(
+                    cell,
+                    row_idx,
+                    cell_data["cell_idx"],
+                    col_idx,
+                    column_widths,
+                    table_borders,
+                    last_row_idx,
+                    last_col_idx,
+                )
 
-                # Process paragraphs in cell
-                for para in cell.paragraphs:
-                    text_from_xml = "".join(
-                        t.text for t in para._p.findall(f".//{w_ns}t") if t.text
+                colspan_attr = f' colspan="{colspan}"' if colspan > 1 else ''
+                rowspan_attr = f' rowspan="{rowspan}"' if rowspan > 1 else ''
+                table_html.append(
+                    '<td{0}{1} data-block-index="{2}" data-type="table_cell" data-table-index="{3}" data-row="{4}" data-col="{5}" style="{6}">{7}</td>'.format(
+                        colspan_attr,
+                        rowspan_attr,
+                        current_cell_block_index,
+                        table_index,
+                        row_idx,
+                        col_idx,
+                        cell_style,
+                        cell_content,
                     )
-                    if text_from_xml:
-                        cell_text_parts.append(text_from_xml)
+                )
 
-                    # Process paragraph content
-                    para_content = "".join(self._process_xml_element_to_html(child) for child in para._p)
-
-                    # Add metadata for each paragraph to enable precise targeting
-                    para_metadata = f'data-para-in-cell="{para_index}" data-cell="{cell_idx}" data-cell-block-index="{current_cell_block_index}"'
-
-                    pPr = para._p.find(f"{w_ns}pPr")
-                    indent_styles = self._extract_paragraph_indentation_styles(pPr)
-                    jc = pPr.find(f"{w_ns}jc") if pPr is not None else None
-                    jc_val = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "left") if jc is not None else "left"
-                    align_map = {
-                        "left": "left",
-                        "center": "center",
-                        "right": "right",
-                        "both": "justify"
-                    }
-                    css_align = align_map.get(jc_val, "left")
-
-                    if not para_content.strip():
-                        # Empty paragraph in cell - preserve it but make it clickable
-                        para_style_parts = [
-                            "min-height: 1.2em",
-                            "margin: 2px 0",
-                            f"text-align: {css_align}",
-                            "cursor: crosshair",
-                        ]
-                        if indent_styles:
-                            para_style_parts.extend(indent_styles)
-                        para_style = "; ".join(para_style_parts) + ";"
-
-                        print(f"[_process_table_to_html] Empty Para[{para_index}] horizontal-align: {css_align} (PRESERVED)")
-                        cell_paragraphs_html.append(
-                            f'<p {para_metadata} class="cell-paragraph" style="{para_style}" title="Click để thêm placeholder">&nbsp;</p>'
-                        )
-                    else:
-                        # Non-empty paragraph - wrap in p tag with metadata
-                        para_style_parts = ["margin: 2px 0"]
-                        if css_align != "left":
-                            para_style_parts.append(f"text-align: {css_align}")
-                        if indent_styles:
-                            para_style_parts.extend(indent_styles)
-
-                        text_content = re.sub(r'<[^>]+>', '', para_content)
-                        if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
-                            para_style_parts.append("white-space: pre-wrap")
-
-                        para_style = "; ".join(para_style_parts) + ";"
-                        print(f"[_process_table_to_html] Para[{para_index}] horizontal-align: {css_align}")
-                        cell_paragraphs_html.append(
-                            f'<p {para_metadata} class="cell-paragraph" style="{para_style}">{para_content}</p>'
-                        )
-
-                    para_index += 1
-
-                cell_text = "".join(cell_text_parts).strip()
-                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}]: text=\"{cell_text[:30] if cell_text else '(empty)'}\", has_content={bool(cell_text)}")
-
-                # ALWAYS render cells (even empty ones) to maintain table structure
-                # This ensures HTML preview matches DOCX structure exactly
-                # Create cell content (empty string if no paragraphs)
-                cell_content = "".join(cell_paragraphs_html) if cell_paragraphs_html else "&nbsp;"
-
-                # Use td for all rows to prevent browser default th styling (like centering)
-                # Word tables don't always have a header row, so td is a safer default for preview
-                tag = "td"
-
-                # Extract cell formatting from tcPr (table cell properties)
-                # IMPORTANT: Reset browser defaults to prevent inherited styling
-                # - font-weight: normal prevents TH from being bold by default
-                # - font-style: normal prevents italic inheritance
-                # - text-decoration: none prevents underline inheritance
-                # - text-align: left provides a consistent starting point
-                cell_style = "padding: 5px; font-weight: normal; font-style: normal; text-decoration: none; text-align: left;"
-
-                # Add column width from tblGrid if available
-                if column_widths and cell_idx < len(column_widths):
-                    cell_style += f" width: {column_widths[cell_idx]};"
-
-                try:
-                    tcPr = cell._element.find(f"{self.w_ns}tcPr")
-                    if tcPr is not None:
-                        # Background color
-                        shd = tcPr.find(f"{self.w_ns}shd")
-                        if shd is not None:
-                            fill = shd.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}fill")
-                            if fill and fill != "auto":
-                                cell_style += f" background-color: #{fill};"
-                                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] background: #{fill}")
-
-                        # Vertical alignment (Default to 'top' to match Word)
-                        v_align = tcPr.find(f"{self.w_ns}vAlign")
-                        if v_align is not None:
-                            v_align_val = v_align.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "top")
-                            # Map Word values to CSS
-                            v_align_map = {"top": "top", "center": "middle", "bottom": "bottom"}
-                            css_v_align = v_align_map.get(v_align_val, "top")
-                            cell_style += f" vertical-align: {css_v_align};"
-                            print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] vertical-align: {css_v_align}")
-
-                        # Extract borders from tcBorders element first, then fall back to table borders.
-                        # If no border is defined anywhere, keep the cell borderless instead of inventing
-                        # a black default that does not exist in the DOCX.
-                        for side in ["top", "bottom", "left", "right"]:
-                            css_border = self._get_cell_border_css(
-                                tcPr,
-                                table_borders,
-                                side,
-                                row_idx,
-                                cell_idx,
-                                last_row_idx,
-                                last_col_idx
-                            )
-                            if css_border:
-                                cell_style += f" border-{side}: {css_border};"
-                                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] border-{side}: {css_border}")
-
-                except Exception as e:
-                    print(f"[_process_table_to_html] Error extracting cell formatting: {e}")
-
-                # Add data-block-index for this cell (matching extract_structured_content)
-                table_html.append('<{0} data-block-index="{1}" data-type="table_cell" data-table-index="{4}" data-row="{2}" data-col="{3}" style="{5}">{6}</{0}>'.format(
-                    tag, current_cell_block_index, row_idx, cell_idx, table_index, cell_style, cell_content
-                ))
-
-                # Increment block index for next cell
                 current_cell_block_index += 1
                 cells_processed += 1
 
             table_html.append('</tr>')
-        table_html.append('</table>')
+        table_html.append('</table></div>')
         html_result = "\n".join(table_html)
         print(f"[_process_table_to_html] END Processed {cells_processed} cells, HTML length: {len(html_result)}")
         print(f"[_process_table_to_html] HTML preview: {html_result[:200]}...")
