@@ -18,6 +18,97 @@ class MergeExecutor:
     """Execute mail merge operations with formatting preservation"""
 
     W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    TBL_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+    def _find_ancestor_table(self, element):
+        """Find the ancestor w:tbl element if element is inside a table."""
+        parent = element.getparent()
+        while parent is not None:
+            if parent.tag == f"{self.W_NS}tbl":
+                return parent
+            parent = parent.getparent()
+        return None
+
+    def _get_table_header_rpr(self, tbl_element, field_cell):
+        """
+        Get run properties from the header cell of the column containing the field.
+
+        Args:
+            tbl_element: The w:tbl element
+            field_cell: The w:tc element containing the merge field
+
+        Returns:
+            rPr element from the header cell, or None if not found
+        """
+        # Find all rows in the table
+        rows = tbl_element.findall(f"{self.W_NS}tr")
+        if len(rows) < 2:
+            return None  # No header row or only one row
+
+        # Assume first row is header
+        header_row = rows[0]
+
+        # Find the column index of the field cell
+        field_row = field_cell.getparent()
+        if field_row is None or field_row.tag != f"{self.W_NS}tr":
+            return None
+
+        cells_in_field_row = field_row.findall(f"{self.W_NS}tc")
+        field_col_idx = None
+        for idx, cell in enumerate(cells_in_field_row):
+            if cell == field_cell:
+                field_col_idx = idx
+                break
+
+        if field_col_idx is None:
+            return None
+
+        # Handle gridSpan for merged cells - calculate logical column index
+        logical_col_idx = 0
+        for idx, cell in enumerate(cells_in_field_row):
+            if idx == field_col_idx:
+                break
+            grid_span_elem = cell.find(f"{self.W_NS}tcPr/{self.W_NS}gridSpan")
+            if grid_span_elem is not None:
+                span = int(grid_span_elem.get(f"{self.W_NS}val", "1"))
+                logical_col_idx += span - 1
+            logical_col_idx += 1
+
+        # Find the corresponding header cell, accounting for gridSpan
+        header_col_idx = 0
+        target_header_cell = None
+        for cell in header_row.findall(f"{self.W_NS}tc"):
+            if header_col_idx == logical_col_idx:
+                target_header_cell = cell
+                break
+
+            grid_span_elem = cell.find(f"{self.W_NS}tcPr/{self.W_NS}gridSpan")
+            if grid_span_elem is not None:
+                span = int(grid_span_elem.get(f"{self.W_NS}val", "1"))
+                header_col_idx += span
+            else:
+                header_col_idx += 1
+
+        if target_header_cell is None:
+            return None
+
+        # Find rPr in header cell - check paragraphs and runs
+        for paragraph in target_header_cell.findall(f"{self.W_NS}p"):
+            for run in paragraph.findall(f"{self.W_NS}r"):
+                rpr = run.find(f"{self.W_NS}rPr")
+                if rpr is not None:
+                    return rpr
+
+        return None
+
+    def _get_field_cell(self, fld):
+        """Find the w:tc element containing the merge field."""
+        parent = fld.getparent()
+        while parent is not None:
+            if parent.tag == f"{self.W_NS}tc":
+                return parent
+            parent = parent.getparent()
+        return None
 
     def _iter_merge_fields(self, doc: Document):
         for fld in doc.element.iter(f"{self.W_NS}fldSimple"):
@@ -166,11 +257,28 @@ class MergeExecutor:
 
             # Create new run with replacement value
             new_run = OxmlElement('w:r')
-            nested_run = fld.find(f"{self.W_NS}r")
-            if nested_run is not None:
-                rPr = nested_run.find(f"{self.W_NS}rPr")
-                if rPr is not None:
-                    new_run.append(copy.deepcopy(rPr))
+
+            # Priority order for formatting:
+            # 1. If field is in a table, use formatting from the header cell of that column
+            # 2. Otherwise, use formatting from the field's own nested run
+            rPr = None
+
+            # Check if field is in a table
+            tbl_element = self._find_ancestor_table(fld)
+            if tbl_element is not None:
+                # Get formatting from table header
+                field_cell = self._get_field_cell(fld)
+                if field_cell is not None:
+                    rPr = self._get_table_header_rpr(tbl_element, field_cell)
+
+            # Fallback to field's own formatting if no table formatting found
+            if rPr is None:
+                nested_run = fld.find(f"{self.W_NS}r")
+                if nested_run is not None:
+                    rPr = nested_run.find(f"{self.W_NS}rPr")
+
+            if rPr is not None:
+                new_run.append(copy.deepcopy(rPr))
 
             # Add text with space preservation
             t = OxmlElement('w:t')

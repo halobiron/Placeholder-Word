@@ -1,6 +1,8 @@
 """
 Smart Mail Merge Converter - Full implementation per INSTRUCTIONS.md
 Handles Vietnamese forms with XML surgical injection, offset mapping, and smart field naming
+
+Now uses Gemini for intelligent table analysis instead of complex rule-based code.
 """
 import re
 import unicodedata
@@ -9,6 +11,8 @@ from lxml import etree
 from docx import Document
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+from docx.text.paragraph import Paragraph
+from typing import List, Dict, Optional
 
 # Treat placeholder-like dot runs broadly:
 # - ASCII dot/underscore runs need at least 2 chars
@@ -22,13 +26,16 @@ PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?:[
 class SmartMailMergeConverter:
     """Convert Vietnamese .docx forms to Mail Merge templates with intelligent field naming"""
 
-    def __init__(self, doc_path):
+    def __init__(self, doc_path, gemini_api_key: Optional[str] = None):
         """Initialize converter with document
 
         Args:
             doc_path: Path to input .docx file
+            gemini_api_key: Optional Gemini API key for intelligent table analysis
         """
         self.doc = Document(doc_path)
+        self.gemini_api_key = gemini_api_key
+        self._gemini_client = None
         self.used_labels = {}   # base_label -> count of times used
         self.all_field_names = []  # ordered list of all generated field names (incl. _2, _3)
         self.last_section_label = "field"
@@ -36,8 +43,20 @@ class SmartMailMergeConverter:
         # Namespace chuẩn cho Word
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
+    @property
+    def gemini_client(self):
+        """Lazy-load Gemini client only when needed"""
+        if self._gemini_client is None and self.gemini_api_key:
+            from gemini_client import GeminiClient
+            try:
+                self._gemini_client = GeminiClient(self.gemini_api_key)
+            except ValueError:
+                # API key not configured, fall back to rule-based
+                pass
+        return self._gemini_client
+
     def _slugify(self, text):
-        """Chuyển đổi tiếng Việt có dấu thành snake_case không dấu, tối đa 4 từ
+        """Chuyển đổi tiếng Việt có dấu thành snake_case không dấu, tối đa 6 từ
 
         Args:
             text: Vietnamese text with accents
@@ -48,18 +67,28 @@ class SmartMailMergeConverter:
         if not text or not text.strip():
             return None
 
-        # Loại bỏ nhiễu: (nếu có), (ghi rõ...), các ký tự đặc biệt
-        text = re.sub(r'\(.*?\)|[:\-–—\._…□■]', ' ', text)
+        # Loại bỏ nhiễu: (ghi rõ...), nhưng giữ lại %, ( ) trong context hợp lý
+        # Dùng regex case-insensitive cho "(ghi rõ..."
+        text = re.sub(r'\(ghi rõ.*?\)', ' ', text, flags=re.IGNORECASE)
+        # Giữ lại các ký tự quan trọng: %, VND, USD
+        text = re.sub(r'[:\-–—\._…□]', ' ', text)
 
         # Xử lý chữ đ/Đ đặc biệt trước khi normalize
         text = text.replace('đ', 'd').replace('Đ', 'D')
 
         # Bình thường hóa tiếng Việt
         text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-        words = re.findall(r'\w+', text.lower())
 
-        # Lấy tối đa 4 từ quan trọng ở cuối (sát với placeholder nhất)
-        slug = "_".join(words[-4:]) if len(words) > 4 else "_".join(words)
+        # Tìm tất cả words và các token quan trọng (VND, USD, %)
+        words = re.findall(r'\w+|%|VND|USD|EUR|GBP|JPY', text.lower())
+
+        # Lấy tất cả các từ (tối đa 10 để tránh quá dài)
+        slug = "_".join(words[-10:]) if len(words) > 10 else "_".join(words)
+
+        # Clean up: loại bỏ dấu _ ở đầu/cuối và _ liên tiếp
+        slug = re.sub(r'^_+|_+$', '', slug)
+        slug = re.sub(r'_+', '_', slug)
+
         return slug if slug else None
 
     def _get_unique_label(self, base_label):
@@ -144,100 +173,6 @@ class SmartMailMergeConverter:
                 fld.append(run)
                 p_element.append(fld)
 
-    def _is_header_row(self, row):
-        """Detect nếu row là header row
-
-        Args:
-            row: Table row object
-
-        Returns:
-            True nếu row là header row
-        """
-        # Check row đầu tiên của table
-        if row._element.getparent().index(row._element) == 0:
-            return True
-
-        # Check nếu cell nào đó có bold text hoặc background color
-        for cell in row.cells:
-            for para in cell.paragraphs:
-                for run in para.runs:
-                    if run.bold:
-                        return True
-                    # Check shading/background color
-                    rPr = run.element.find(f"{self.w_ns}rPr")
-                    if rPr is not None:
-                        shd = rPr.find(f"{self.w_ns}shd")
-                        if shd is not None and shd.get(f"{{{self.w_ns}}}fill") != "auto":
-                            return True
-
-        return False
-
-    def _get_header_text(self, cell):
-        """Extract text từ header cell, xử lý merged cells
-
-        Args:
-            cell: Table cell object
-
-        Returns:
-            Header text or None
-        """
-        text = cell.text.strip()
-        if text:
-            return text
-
-        # For merged cells, check if this cell is part of a merge
-        tc = cell._element
-        tcPr = tc.find(f"{self.w_ns}tcPr")
-        if tcPr is not None:
-            # Check if this is a continuation of a merged cell (no content)
-            vMerge = tcPr.find(f"{self.w_ns}vMerge")
-            if vMerge is not None and vMerge.get(f"{{{self.w_ns}}}val") == "continue":
-                return None  # This cell is part of a merge, find the parent
-        return text if text else None
-
-    def _find_header_for_column(self, table, row_idx, cell_idx):
-        """Tìm header text cho một cột cụ thể
-
-        Args:
-            table: Table object
-            row_idx: Row index hiện tại
-            cell_idx: Cell index hiện tại
-
-        Returns:
-            Header text hoặc None
-        """
-        # Duyệt từ trên xuống để tìm header
-        for r in range(row_idx):
-            row = table.rows[r]
-            if self._is_header_row(row):
-                # Handle merged cells - check if this cell aligns with our column
-                current_col = 0
-                for c, cell in enumerate(row.cells):
-                    # Check grid span for horizontal merge
-                    tc = cell._element
-                    tcPr = tc.find(f"{self.w_ns}tcPr")
-                    grid_span = 1
-                    if tcPr is not None:
-                        gridSpan = tcPr.find(f"{self.w_ns}gridSpan")
-                        if gridSpan is not None:
-                            grid_span = int(gridSpan.get(f"{{{self.w_ns}}}val", 1))
-
-                    if current_col <= cell_idx < current_col + grid_span:
-                        header_text = self._get_header_text(cell)
-                        if header_text:
-                            return header_text
-
-                    # Check if this cell continues from above (vertical merge)
-                    if tcPr is not None:
-                        vMerge = tcPr.find(f"{self.w_ns}vMerge")
-                        if vMerge is not None and vMerge.get(f"{{{self.w_ns}}}val") == "continue":
-                            # This cell is merged vertically, skip it
-                            pass
-
-                    current_col += grid_span
-
-        return None
-
     def _is_cell_empty(self, cell):
         """Check nếu cell trống hoặc chỉ có whitespace
 
@@ -295,7 +230,7 @@ class SmartMailMergeConverter:
         p_element.append(fld)
 
     def _process_table_auto_fill(self, table):
-        """Xử lý bảng: detect header và auto-fill placeholder vào empty cells
+        """Xử lý bảng: dùng Gemini để analyze và auto-fill placeholders vào empty cells
 
         Args:
             table: Table object
@@ -303,31 +238,120 @@ class SmartMailMergeConverter:
         if len(table.rows) <= 1:
             return  # Table chỉ có header, không có data rows
 
-        # Find header row index
-        header_row_idx = None
-        for idx, row in enumerate(table.rows):
-            if self._is_header_row(row):
-                header_row_idx = idx
-                break
+        # Try Gemini first if available
+        if self.gemini_client:
+            try:
+                self._process_table_with_gemini(table)
+                return
+            except Exception as e:
+                print(f"  → Gemini table analysis failed: {e}, falling back to rule-based")
+                # Fall through to rule-based
 
-        if header_row_idx is None:
-            header_row_idx = 0  # Assume first row is header
+        # Fallback: simple rule-based (simplified version)
+        self._process_table_rule_based(table)
+
+    def _process_table_with_gemini(self, table):
+        """Dùng Gemini để analyze table và suggest placeholders
+
+        Args:
+            table: Table object
+        """
+        # Extract table data for Gemini
+        table_data = []
+        for row_idx, row in enumerate(table.rows):
+            row_data = []
+            for cell in row.cells:
+                text = cell.text.strip()
+                # Check if cell already has merge field or is truly empty
+                is_empty = self._is_cell_empty(cell)
+                row_data.append({
+                    "text": text,
+                    "is_empty": is_empty,
+                    "row": row_idx,
+                    "col": len(row_data)
+                })
+            table_data.append(row_data)
+
+        # Get document context (paragraphs before/after table)
+        context_parts = []
+        table_element = table._element
+        found_table = False
+
+        for child in self.doc.element.body.iterchildren():
+            if child == table_element:
+                found_table = True
+                break
+            if child.tag.endswith("p"):
+                para = Paragraph(child, self.doc)
+                if para.text.strip():
+                    context_parts.append(para.text.strip())
+                    if len(context_parts) >= 2:
+                        break
+
+        document_context = " | ".join(context_parts[-2:]) if context_parts else ""
+
+        # Ask Gemini for suggestions
+        result = self.gemini_client.analyze_table_for_placeholders(
+            table_data=table_data,
+            document_context=document_context
+        )
+
+        # Apply suggestions
+        for suggestion in result.get("suggestions", []):
+            row = suggestion.get("row")
+            col = suggestion.get("col")
+            field_name = suggestion.get("field_name")
+
+            if row is not None and col is not None and field_name:
+                if 0 <= row < len(table.rows):
+                    row_obj = table.rows[row]
+                    # Handle merged cells - find actual cell at column
+                    current_col = 0
+                    for cell in row_obj.cells:
+                        # Check grid span for merged cells
+                        tc = cell._element
+                        tcPr = tc.find(f"{self.w_ns}tcPr")
+                        grid_span = 1
+                        if tcPr is not None:
+                            gridSpan = tcPr.find(f"{self.w_ns}gridSpan")
+                            if gridSpan is not None:
+                                grid_span = int(gridSpan.get(f"{{{self.w_ns}}}val", 1))
+
+                        if current_col <= col < current_col + grid_span:
+                            if self._is_cell_empty(cell):
+                                self._insert_field_in_cell(cell, field_name)
+                                reason = suggestion.get("reason", "")
+                                print(f"  → Gemini auto-fill: «{field_name}» at row={row}, col={col} ({reason})")
+                            break
+                        current_col += grid_span
+
+    def _process_table_rule_based(self, table):
+        """Simple rule-based fallback for table auto-fill
+
+        Args:
+            table: Table object
+        """
+        # Assume row 0 is header
+        if len(table.rows) < 2:
+            return
+
+        header_row = table.rows[0]
+        header_texts = [cell.text.strip() for cell in header_row.cells]
 
         # Process data rows
-        for row_idx in range(header_row_idx + 1, len(table.rows)):
+        for row_idx in range(1, len(table.rows)):
             row = table.rows[row_idx]
 
-            for cell_idx, cell in enumerate(row.cells):
-                if self._is_cell_empty(cell):
-                    # Find header text cho column này
-                    header_text = self._find_header_for_column(table, row_idx, cell_idx)
-
+            for col_idx, cell in enumerate(row.cells):
+                if self._is_cell_empty(cell) and col_idx < len(header_texts):
+                    header_text = header_texts[col_idx]
                     if header_text:
-                        # Slugify header text để làm field name
                         field_name = self._slugify(header_text)
                         if field_name:
+                            # Add row suffix to avoid duplicates
+                            field_name = f"{field_name}_row_{row_idx}"
                             self._insert_field_in_cell(cell, field_name)
-                            print(f"  → Auto-fill: «{field_name}» (from header: '{header_text}')")
+                            print(f"  → Rule-based auto-fill: «{field_name}» (from header: '{header_text}')")
 
     def convert(self, output_path, auto_fill_tables=True):
         """Duyệt toàn bộ tài liệu để thực thi chuyển đổi

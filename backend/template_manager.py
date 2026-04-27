@@ -29,6 +29,7 @@ class MailMergeProcessor:
             timeout: Not used, kept for backward compatibility
         """
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        self._gemini_api_key = gemini_api_key
         self.gemini_client = GeminiClient(gemini_api_key) if gemini_api_key else None
 
     def _extract_xml_text(self, element) -> str:
@@ -491,7 +492,12 @@ class MailMergeProcessor:
         try:
             # Step 1: Use SmartMailMergeConverter to create basic placeholders
             print("=== STEP 1: Creating basic placeholders ===")
-            converter = SmartMailMergeConverter(docx_path)
+            # Pass gemini_api_key to converter for intelligent table analysis
+            gemini_key = None
+            if hasattr(self, '_gemini_api_key'):
+                gemini_key = self._gemini_api_key
+
+            converter = SmartMailMergeConverter(docx_path, gemini_api_key=gemini_key)
             fields = converter.convert(str(output_path), auto_fill_tables=auto_fill_tables)
 
             # Step 2: Use Gemini to suggest better names (if API key provided)

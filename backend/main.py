@@ -183,7 +183,7 @@ async def convert_to_template(
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        processor = MailMergeProcessor(gemini_api_key=None)
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path), auto_fill_tables=auto_fill_tables)

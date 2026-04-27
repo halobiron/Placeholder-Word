@@ -403,3 +403,138 @@ Chỉ trả về JSON, không có text khác."""
         except Exception as e:
             print(f"Gemini rename suggestion error: {e}")
             return {}
+
+    def analyze_table_for_placeholders(
+        self,
+        table_data: list,
+        document_context: str = ""
+    ) -> dict:
+        """Phân tích bảng và đề xuất placeholders cho các ô trống
+
+        Args:
+            table_data: List của rows, mỗi row là list của cells
+                [{text: str, is_empty: bool, row: int, col: int}, ...]
+            document_context: Ngữ cảnh xung quanh bảng (optional)
+
+        Returns:
+            Dict với suggestions cho các ô cần placeholder:
+            {
+                "suggestions": [
+                    {"row": int, "col": int, "field_name": str, "reason": str}
+                ]
+            }
+        """
+        # Format table for Gemini
+        table_repr = []
+        for row_data in table_data:
+            row_repr = []
+            for cell in row_data:
+                text = cell.get("text", "")
+                if text:
+                    row_repr.append(f'"{text}"')
+                else:
+                    row_repr.append("[EMPTY]")
+            table_repr.append(" | ".join(row_repr))
+
+        table_str = "\n".join([f"Row {i}: {row}" for i, row in enumerate(table_repr)])
+
+        prompt = f"""Bạn là chuyên gia phân tích biểu mẫu tiếng Việt.
+
+BẢNG CẦN PHÂN TÍCH:
+{table_str}
+
+NGỮ CẢNH TÀI LIỆU:
+{document_context}
+
+NHIỆM VỤ: Xác định các ô TRỐNG cần điền placeholder và đặt tên phù hợp.
+
+QUY TẮC QUAN TRỌNG - BẮT BUỘC:
+1. **PHÁT HIỆN CONTEXT CHUNG CỦA BẢNG** trước khi đặt tên cho ô nào
+   - Xem các header CỐT LỚN (merged cells, text dài) để hiểu bảng này nói về gì
+   - Ví dụ: Nếu thấy header "Tên nhà đầu tư nước ngoài" → context là "nha_dau_tu_nuoc_ngoai"
+   - Ví dụ: Nếu thấy header "Thông tin người lao động" → context là "nguoi_lao_dong"
+
+2. **KẾT HỢP CONTEXT CHUNG + HEADER CỘT** cho từng placeholder
+   - KHÔNG bao giờ dùng chỉ header cột đơn lẻ
+   - Phải có: context_bảng + header_cột
+   - Ví dụ Bảng "Nhà đầu tư nước ngoài":
+     * Cột "Quốc tịch" → "quoc_tich_nha_dau_tu_nuoc_ngoai" (KHÔNG phải "quoc_tich_row_2")
+     * Cột "VNĐ" → "so_von_gop_vnd_nha_dau_tu_nuoc_ngoai"
+     * Cột "Tỷ lệ (%)" → "ty_le_von_nha_dau_tu_nuoc_ngoai"
+
+3. **ƯU TIÊN HEADER GẦN NHẤT** cho sub-header cụ thể
+   - Row 1 có "VNĐ" → dùng "VNĐ" thay vì "Số vốn góp" từ row 0
+   - Row 1 có "Tương đương USD" → dùng đó thay vì "Số vốn góp"
+
+4. **TUYỆT ĐỐI KHÔNG DÙNG SỐ THỨ TỤ ROW** - CẤM BẤT KỲ suffix nào như "_row_1", "_row_2", "_row_3"
+   - TÊN KHÔNG ĐƯỢC CHỨA SỐ ở cuối (trừ khi là phần của tên như "ngay_2", "thang_3")
+   - MẶC ĐỊNH: Tên đơn giản, không có số thứ tự
+   - SAU KHI TẠO TÊN: Kiểm tra lại, nếu tên có "_row_X" thì XÓA NGAY
+
+5. CHỈ thêm số thứ tự khi CÓ >1 ROW DATA CÙNG LOẠI CẦN PHÂN BIỆT
+   - Ví dụ CẦN: Bảng có 3 rows điền 3 cổ đông khác nhau → "ten_co_dong_1", "ten_co_dong_2"
+   - Ví dụ KHÔNG CẦN: Bảng chỉ có 1-2 rows data rỗng → không cần số thứ tự
+
+5. **RÚT GỌN TÊN** - không được quá dài
+   - "nha_dau_tu_nuoc_ngoai" là đủ, không cần "thong_tin_nha_dau_tu_nuoc_ngoai"
+   - "so_von_gop_vnd" là đủ, không cần "so_von_gop_vnd_nha_dau_tu"
+
+VÍ DỤ ĐÚNG:
+- Bảng "Nhà đầu tư nước ngoài" (chỉ 1 row data):
+  Row 0: "STT" | "Tên nhà đầu tư nước ngoài" | "Quốc tịch" | "Số vốn góp" | "Số vốn góp"
+  Row 1: "STT" | "Tên nhà đầu tư nước ngoài" | "Quốc tịch" | "VNĐ" | "Tương đương USD"
+  Row 2: [EMPTY] | [EMPTY] | [EMPTY] | [EMPTY] | [EMPTY]
+
+  → Context bảng: "nha_dau_tu_nuoc_ngoai"
+  → Col 0: "stt_nha_dau_tu_nuoc_ngoai"  ← KHÔNG "_row_2"
+  → Col 1: "ten_nha_dau_tu_nuoc_ngoai"  ← KHÔNG "_row_2"
+  → Col 2: "quoc_tich_nha_dau_tu_nuoc_ngoai"  ← ĐÚNG!
+  → Col 3: "so_von_gop_vnd_nha_dau_tu_nuoc_ngoai"
+  → Col 4: "so_von_gop_usd_nha_dau_tu_nuoc_ngoai"
+
+VÍ DỤ CẦN SỐ THỨ TỰ:
+- Bảng "Danh sách cổ đông" có 3 rows:
+  → "ten_co_dong_1", "so_co_phan_1" (row 1)
+  → "ten_co_dong_2", "so_co_phan_2" (row 2)
+  → "ten_co_dong_3", "so_co_phan_3" (row 3)
+
+ĐẶC BIỆT:
+- Nếu ô trống nằm ở cột checkbox (□, [ ]) → thêm prefix "ck_"
+- Nếu ô trống là ngày tháng → tên: "ngay_...", "thang_...", "nam_..."
+- Nếu ô trống là số tiền/mức lương → tên: "muc_luong_...", "so_tien_..."
+- Nếu ô trống trong row data (có số thứ tự) → thêm suffix "_row_X" để phân biệt (X là số thứ tự row)
+
+YÊU CẦU ĐẦU RA (JSON chỉ):
+{{
+  "suggestions": [
+    {{"row": 1, "col": 1, "field_name": "ho_ten_nguoi_lap", "reason": "cột Họ tên, row data đầu tiên"}},
+    {{"row": 1, "col": 2, "field_name": "dia_chi_nguoi_lap", "reason": "cột Địa chỉ"}}
+  ]
+}}
+
+Chỉ trả về JSON, không có text khác."""
+
+        try:
+            response = self.model.generate_content(prompt)
+            result = self.parse_gemini_json_response(response.text)
+
+            # Validate row/col indices
+            validated = []
+            num_rows = len(table_data)
+            num_cols = len(table_data[0]) if table_data else 0
+
+            for suggestion in result.get("suggestions", []):
+                row = suggestion.get("row")
+                col = suggestion.get("col")
+
+                if isinstance(row, int) and isinstance(col, int):
+                    if 0 <= row < num_rows and 0 <= col < num_cols:
+                        validated.append(suggestion)
+                    else:
+                        print(f"  Skipping invalid position: row={row}, col={col}")
+
+            return {"suggestions": validated}
+
+        except Exception as e:
+            print(f"Gemini table analysis error: {e}")
+            return {"suggestions": []}
