@@ -18,9 +18,10 @@ from typing import List, Dict, Optional
 # - ASCII dot/underscore runs need at least 2 chars
 # - Unicode ellipsis/dot-leader chars count as a placeholder by themselves
 # - Mixed runs such as "...…‥⋯..." stay a single placeholder
-# - Dots separated by spaces: ". . . ." or ". . . . . . ."
-# - Pattern: (dot followed by optional spaces) repeated 2+ times, must contain at least 2 dots/underscores
-PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?:[._]\s*){2,}|[□■]+)')
+# - Dots separated by spaces: ". . . ." or ". . . . . . ." or "... ..." (ALL treated as ONE field)
+# - Pattern: dots/underscores with optional spaces between, must contain at least 2 dots/underscores total
+# - Updated: (?:[._][.\s]*)*[._]+ to greedily match dots with any spaces in between
+PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?:[._][.\s]*)*[._]{2,}|[□■]+)')
 
 
 class SmartMailMergeConverter:
@@ -124,43 +125,98 @@ class SmartMailMergeConverter:
         return unique_label, sw
 
     def _process_paragraph(self, paragraph):
-        """Xử lý paragraph: inject Mail Merge field với định dạng chính xác"""
+        """Xử lý paragraph: inject Mail Merge field với định dạng chính xác
+
+        CRITICAL FIX: Preserve run-level formatting (superscript, subscript, etc.)
+        by tracking original run boundaries and splitting text segments accordingly.
+        """
         p_element, pattern = paragraph._p, PLACEHOLDER_PATTERN
         if not pattern.search(paragraph.text): return
 
-        # Map định dạng và thu thập text
-        full_text, offset_map = "", []
+        # Map định dạng với tracking run boundaries
+        # Instead of per-character map, we track: (run_index, start_pos, end_pos, rPr)
+        run_ranges = []  # List of (start_pos, end_pos, rPr) tuples
+        full_text = ""
+        current_pos = 0
+
         for run in paragraph.runs:
             rPr = run.element.find(f"{self.w_ns}rPr")
-            for char in run.text:
-                full_text += char
-                offset_map.append(rPr)
+            run_text = run.text
+            text_len = len(run_text)
+            if text_len > 0:
+                run_ranges.append((current_pos, current_pos + text_len, rPr))
+                full_text += run_text
+                current_pos += text_len
+
+        # Helper: find which run a position belongs to
+        def get_rpr_at_position(pos):
+            for start, end, rPr in run_ranges:
+                if start <= pos < end:
+                    return rPr
+            return None
+
+        # Helper: split a text range at run boundaries to preserve formatting
+        def split_text_by_runs(start_pos, end_pos):
+            """Split a text range into sub-ranges that respect original run boundaries"""
+            result = []  # List of (text, rPr) tuples
+            current = start_pos
+
+            while current < end_pos:
+                rPr = get_rpr_at_position(current)
+
+                # Find where this run ends (or where our range ends)
+                run_end = None
+                for r_start, r_end, _ in run_ranges:
+                    if r_start <= current < r_end:
+                        run_end = min(r_end, end_pos)
+                        break
+
+                if run_end is None:
+                    run_end = end_pos
+
+                text_segment = full_text[current:run_end]
+                if text_segment:
+                    # FIX: Append text segment even if rPr is None
+                    # Don't skip text just because formatting info is missing
+                    result.append((text_segment, rPr))
+
+                current = run_end
+
+            return result
 
         # Phân mảnh paragraph
         segments, last_idx = [], 0
         for match in pattern.finditer(full_text):
             s, e = match.start(), match.end()
-            if s > last_idx: segments.append(('text', full_text[last_idx:s], last_idx))
+            if s > last_idx:
+                # Text segment - will be split by runs later
+                segments.append(('text', full_text[last_idx:s], last_idx))
             segments.append(('field', full_text[s:e], s))
             last_idx = e
-        if last_idx < len(full_text): segments.append(('text', full_text[last_idx:], last_idx))
+        if last_idx < len(full_text):
+            segments.append(('text', full_text[last_idx:], last_idx))
 
-        # Rebuild XML
+        # Rebuild XML - text segments are split by original run boundaries
         for r in p_element.findall(f"{self.w_ns}r"): p_element.remove(r)
 
         for kind, content, offset in segments:
-            original_rPr = offset_map[offset] if offset < len(offset_map) else None
             if kind == 'text':
-                run = OxmlElement('w:r')
-                if original_rPr is not None: run.append(copy.deepcopy(original_rPr))
-                t = OxmlElement('w:t')
-                # Preserve whitespace at start OR end (handles tabs, spaces, etc.)
-                if content and (content[0].isspace() or (len(content) > 1 and content[-1].isspace())):
-                    t.set(qn('xml:space'), 'preserve')
-                t.text = content
-                run.append(t)
-                p_element.append(run)
+                # Split text content by original run boundaries to preserve formatting
+                text_parts = split_text_by_runs(offset, offset + len(content))
+
+                for text_part, rPr in text_parts:
+                    run = OxmlElement('w:r')
+                    if rPr is not None: run.append(copy.deepcopy(rPr))
+                    t = OxmlElement('w:t')
+                    # Preserve whitespace at start OR end (handles tabs, spaces, etc.)
+                    if text_part and (text_part[0].isspace() or (len(text_part) > 1 and text_part[-1].isspace())):
+                        t.set(qn('xml:space'), 'preserve')
+                    t.text = text_part
+                    run.append(t)
+                    p_element.append(run)
             else:
+                # For fields, use rPr from the first character of the matched content
+                original_rPr = get_rpr_at_position(offset)
                 text_no_dots = pattern.sub('', paragraph.text).strip()
                 ctx = paragraph.text if len(text_no_dots) > 5 else self.last_meaningful_text
                 label, sw = self._generate_label(full_text[:offset], ctx, content)

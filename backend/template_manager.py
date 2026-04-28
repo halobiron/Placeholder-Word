@@ -1576,13 +1576,11 @@ JSON:"""
 
         vertAlign = rPr.find(f"{self.w_ns}vertAlign")
         if vertAlign is not None:
-            val = vertAlign.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "")
+            val = vertAlign.get(f"{self.w_ns}val", "")
             if val == "superscript":
                 styles.append("vertical-align: super")
-                styles.append("font-size: smaller")
             elif val == "subscript":
                 styles.append("vertical-align: sub")
-                styles.append("font-size: smaller")
 
         return "; ".join(styles)
 
@@ -2037,7 +2035,7 @@ JSON:"""
             HTML string for the entire table
         """
         print(f"[_process_table_to_html] START Processing table {table_index} with {len(table.rows)} rows, {len(table.columns)} columns")
-        table_html = ['<div style="overflow-x: auto; max-width: 100%;"><table class="docx-table" data-type="table" style="border-collapse: collapse; width: auto; max-width: 100%; table-layout: auto; margin: 10px 0;">']
+        table_html = ['<div style="overflow-x: auto; max-width: 100%;"><table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; max-width: 100%; table-layout: auto; margin: 10px 0;">']
 
         # Extract column widths from tblGrid to set proper cell proportions
         column_widths = []
