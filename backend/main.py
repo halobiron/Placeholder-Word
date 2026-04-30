@@ -6,10 +6,11 @@ import tempfile
 import shutil
 from functools import wraps
 from pathlib import Path
-from typing import Dict, Literal, Callable
+from typing import Dict, Literal, Callable, Optional, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, ConfigDict
 from dotenv import load_dotenv
 import json
 from docx import Document
@@ -21,6 +22,7 @@ from gemini_client import GeminiClient
 from docx_editor import DocxFullEditor
 from batch_update_models import BatchUpdateRequest, Operation, BatchUpdateResponse
 from batch_operations import validate_operation, execute_operation
+from smart_mail_merge_converter import SmartMailMergeConverter
 import traceback
 
 # Configure logging
@@ -205,7 +207,7 @@ async def convert_to_template(
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        processor = MailMergeProcessor(gemini_api_key=None)
+        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path), auto_fill_tables=auto_fill_tables)
@@ -791,6 +793,91 @@ async def add_image_at_cursor(request: Request):
 
 
 # =============================================================================
+# PYDANTIC MODELS FOR TABLE EXPANSION
+# =============================================================================
+
+class TableExpansionPreviewRequest(BaseModel):
+    """Request model cho table expansion preview"""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "template_id": "778c04c8-d477-49ff-a791-274bc4ee9a9e",
+                "context_data": {
+                    "thong_tin_nha_dau_tu": ["ho_ten", "ngay_sinh", "quoc_tich"],
+                    "ty_le_gop_von": ["nha_dau_tu_1", "nha_dau_tu_2", "nha_dau_tu_3"]
+                },
+                "auto_expand": True
+            }
+        }
+    )
+
+    template_id: str = Field(..., description="Template ID from /convert endpoint")
+    context_data: Dict[str, List[str]] = Field(..., description="Context data với field names organized by sections")
+    auto_expand: bool = Field(True, description="Tự động expand tables nếu cần")
+
+
+class TableExpansionRequest(BaseModel):
+    """Request model cho merge với table expansion"""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "template_id": "778c04c8-d477-49ff-a791-274bc4ee9a9e",
+                "context_data": {
+                    "thong_tin_nha_dau_tu": ["ho_ten", "ngay_sinh", "quoc_tich"],
+                    "ty_le_gop_von": ["nha_dau_tu_1", "nha_dau_tu_2", "nha_dau_tu_3"]
+                },
+                "field_values": {
+                    "ho_ten": "Nguyễn Văn A",
+                    "ngay_sinh": "01/01/1990"
+                },
+                "auto_expand": True,
+                "preview_only": False
+            }
+        }
+    )
+
+    template_id: str = Field(..., description="Template ID from /convert endpoint")
+    context_data: Dict[str, List[str]] = Field(..., description="Context data organized by sections")
+    field_values: Optional[Dict[str, str]] = Field(None, description="Optional field values để merge")
+    auto_expand: bool = Field(True, description="Tự động expand tables nếu cần")
+    preview_only: bool = Field(False, description="Nếu True, chỉ preview mà không execute")
+
+
+class TableAnalysis(BaseModel):
+    """Model cho table analysis result"""
+    table_index: int
+    total_rows: int
+    data_rows: int
+    columns: int
+    empty_cells: int
+    needs_expansion: bool
+    rows_to_add: int
+    empty_cells_after_expansion: int
+
+
+class TableExpansionPreviewResponse(BaseModel):
+    """Response model cho table expansion preview"""
+    template_id: str
+    needs_expansion: bool
+    total_fields_required: int
+    table_fields_required: int
+    tables_analysis: List[TableAnalysis]
+    summary: str
+
+
+class TableExpansionResponse(BaseModel):
+    """Response model cho merge với expansion"""
+    template_id: str
+    result_id: Optional[str] = None
+    success: Optional[bool] = None  # None for preview mode
+    message: str
+    tables_expanded: int
+    total_rows_added: int
+    fields_filled: int
+    download_url: Optional[str] = None
+
+
+# =============================================================================
 # BATCH UPDATE ENDPOINT
 # =============================================================================
 
@@ -984,6 +1071,228 @@ async def batch_update(request: Request):
         "html_preview": html_preview,
         "message": f"Batch update completed: {results['successful']} succeeded, {results['failed']} failed"
     }
+
+
+# =============================================================================
+# TABLE EXPANSION ENDPOINTS
+# =============================================================================
+
+@app.post("/api/preview-table-expansion")
+@handle_endpoint_errors("preview table expansion")
+async def preview_table_expansion(request: TableExpansionPreviewRequest):
+    """
+    Preview table expansion plan trước khi execute
+
+    Analyzes context data và table structure để determine:
+    - Có cần expansion không?
+    - Bao nhiêu rows cần thêm?
+    - Bảng nào sẽ được expanded?
+
+    Args:
+        request: TableExpansionPreviewRequest với template_id và context_data
+
+    Returns:
+        TableExpansionPreviewResponse với detailed analysis
+    """
+    template_path = validate_template_path(request.template_id)
+
+    # Initialize converter
+    converter = SmartMailMergeConverter(str(template_path), gemini_api_key=GEMINI_API_KEY)
+
+    # Analyze context requirements
+    requirements = converter._analyze_context_requirements(request.context_data)
+
+    # Analyze each table
+    tables_analysis = []
+    total_rows_to_add = 0
+    needs_expansion = False
+
+    for table_idx, table in enumerate(converter.doc.tables):
+        structure = converter._get_table_structure(table)
+        empty_cells = converter._count_empty_cells_in_table(table)
+
+        # Determine if this table needs expansion
+        # Use table_fields if available, otherwise use total_fields
+        table_required_fields = len(requirements["table_fields"]) if requirements["table_fields"] else 0
+
+        # For preview, we'll show what WOULD happen if we expanded
+        # Calculate expansion needed
+        if empty_cells < table_required_fields:
+            expansion_result = converter._expand_table_for_context(table, table_required_fields)
+            needs_expansion_table = True
+        else:
+            expansion_result = {
+                "rows_added": 0,
+                "total_rows": len(table.rows),
+                "empty_cells": empty_cells
+            }
+            needs_expansion_table = False
+
+        if needs_expansion_table:
+            needs_expansion = True
+            total_rows_to_add += expansion_result["rows_added"]
+
+        table_analysis = TableAnalysis(
+            table_index=table_idx,
+            total_rows=structure["data_rows"] + (1 if structure["has_header"] else 0),
+            data_rows=structure["data_rows"],
+            columns=structure["columns"],
+            empty_cells=empty_cells,
+            needs_expansion=needs_expansion_table,
+            rows_to_add=expansion_result["rows_added"],
+            empty_cells_after_expansion=expansion_result["empty_cells"]
+        )
+        tables_analysis.append(table_analysis)
+
+    # Generate summary
+    if needs_expansion:
+        summary = f"Cần mở rộng {total_rows_to_add} rows across {len([t for t in tables_analysis if t.needs_expansion])} tables"
+    else:
+        summary = "Tất cả bảng đã có đủ chỗ, không cần mở rộng"
+
+    return TableExpansionPreviewResponse(
+        template_id=request.template_id,
+        needs_expansion=needs_expansion,
+        total_fields_required=requirements["total_fields"],
+        table_fields_required=len(requirements["table_fields"]),
+        tables_analysis=tables_analysis,
+        summary=summary
+    )
+
+
+@app.post("/api/merge-with-expansion")
+@handle_endpoint_errors("merge with table expansion")
+async def merge_with_table_expansion(request: TableExpansionRequest):
+    """
+    Execute merge với automatic table expansion
+
+    Process:
+    1. Analyze context và determine expansion needs
+    2. Create working copy of template
+    3. Expand tables if needed
+    4. Execute merge
+    5. Save result
+
+    Args:
+        request: TableExpansionRequest với template_id, context_data, và options
+
+    Returns:
+        TableExpansionResponse với result details và download URL
+    """
+    template_path = validate_template_path(request.template_id)
+
+    # Analyze context requirements
+    converter = SmartMailMergeConverter(str(template_path), gemini_api_key=GEMINI_API_KEY)
+    requirements = converter._analyze_context_requirements(request.context_data)
+
+    if request.preview_only:
+        # Preview mode - just return what would happen
+        preview = await preview_table_expansion(
+            TableExpansionPreviewRequest(
+                template_id=request.template_id,
+                context_data=request.context_data,
+                auto_expand=request.auto_expand
+            )
+        )
+        return TableExpansionResponse(
+            template_id=request.template_id,
+            success=None,
+            message="Preview mode - no changes made",
+            tables_expanded=0,
+            total_rows_added=0,
+            fields_filled=0,
+            download_url=None
+        )
+
+    # Execute mode
+    logger.info(f" ===== MERGE WITH EXPANSION START =====")
+    logger.info(f" Template ID: {request.template_id}")
+    logger.info(f" Total fields required: {requirements['total_fields']}")
+    logger.info(f" Table fields required: {len(requirements['table_fields'])}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create working copy
+        working_template = Path(tmpdir) / template_path.name
+        shutil.copy2(template_path, working_template)
+
+        # Re-initialize converter with working copy
+        converter = SmartMailMergeConverter(str(working_template), gemini_api_key=GEMINI_API_KEY)
+
+        # Expand tables if needed
+        tables_expanded = 0
+        total_rows_added = 0
+
+        if request.auto_expand:
+            logger.info(" ===== EXPANDING TABLES =====")
+
+            for table_idx, table in enumerate(converter.doc.tables):
+                structure = converter._get_table_structure(table)
+                empty_cells = converter._count_empty_cells_in_table(table)
+
+                # Determine required fields for this table
+                table_required_fields = len(requirements["table_fields"]) if requirements["table_fields"] else 0
+
+                if empty_cells < table_required_fields and table_required_fields > 0:
+                    expansion_result = converter._expand_table_for_context(table, table_required_fields)
+
+                    if expansion_result["rows_added"] > 0:
+                        tables_expanded += 1
+                        total_rows_added += expansion_result["rows_added"]
+                        logger.info(f" Table {table_idx}: Added {expansion_result['rows_added']} rows")
+                        logger.info(f"   Before: {structure['data_rows']} data rows × {structure['columns']} cols")
+                        logger.info(f"   After: {expansion_result['total_rows']} total rows")
+
+        # Save expanded template using doc object directly
+        converter.doc.save(str(working_template))
+
+        # Execute merge
+        logger.info(" ===== EXECUTING MERGE =====")
+
+        executor = MergeExecutor()
+        template_field_metadata = executor.get_template_field_metadata(str(working_template))
+        template_fields = [item["field_name"] for item in template_field_metadata]
+
+        # Determine data source
+        if request.field_values:
+            data = request.field_values
+
+            # Ensure all required fields have values
+            for field in template_fields:
+                if field not in data:
+                    data[field] = ""
+
+            logger.info(f" Using provided field_values: {len(data)} fields")
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="field_values must be provided for merge"
+            )
+
+        # Execute merge
+        result_path, result_id = executor.execute_merge(
+            str(working_template),
+            data,
+            locked_fields=set()
+        )
+
+        # Note: execute_merge already saves to RESULT_DIR, so result_path is the final location
+        # No need to copy again
+
+        logger.info(f" ===== MERGE COMPLETE =====")
+        logger.info(f" Tables expanded: {tables_expanded}")
+        logger.info(f" Total rows added: {total_rows_added}")
+        logger.info(f" Fields filled: {sum(1 for v in data.values() if str(v).strip())}")
+
+    return TableExpansionResponse(
+        template_id=request.template_id,
+        result_id=result_id,
+        success=True,
+        message=f"Merge completed: {tables_expanded} tables expanded, {total_rows_added} rows added",
+        tables_expanded=tables_expanded,
+        total_rows_added=total_rows_added,
+        fields_filled=sum(1 for v in data.values() if str(v).strip()),
+        download_url=f"/download/{result_id}"
+    )
 
 
 if __name__ == "__main__":

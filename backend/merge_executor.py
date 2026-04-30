@@ -232,14 +232,90 @@ class MergeExecutor:
                 prev_node = fld.getprevious().find(f".//{self.W_NS}t") if fld.getprevious() is not None else None
                 next_node = fld.getnext().find(f".//{self.W_NS}t") if fld.getnext() is not None else None
 
-                if prev_node is not None and prev_node.text:
-                    prev_text = re.sub(r'[._…]+$', '', prev_node.text)
-                    if prev_text != prev_node.text:
-                        prev_node.text = prev_text
-                if next_node is not None and next_node.text:
-                    next_text = re.sub(r'^[._…]+', '', next_node.text)
-                    if next_text != next_node.text:
-                        next_node.text = next_text
+                # Xử lý tất cả các runs trước field: xóa pattern, tab, whitespace
+                # Duyệt ngược từ runs gần nhất đến runs xa nhất
+                current_run = fld.getprevious()
+                found_tab_or_dots = False  # Flag để kiểm tra xem có tab/pattern trong các runs trước không
+                while current_run is not None:
+                    # Xóa tab element
+                    tab_elem = current_run.find(f"{self.W_NS}tab")
+                    has_tab_elem = tab_elem is not None
+                    if tab_elem is not None:
+                        found_tab_or_dots = True
+                        current_run.remove(tab_elem)
+
+                    # Xóa pattern dots trong text node
+                    text_node = current_run.find(f"{self.W_NS}t")
+                    if text_node is not None and text_node.text:
+                        # Kiểm tra xem có pattern dots ở cuối không
+                        has_trailing_dots = bool(re.search(r'[._…]+$', text_node.text))
+                        # Kiểm tra xem có tab character trong text không
+                        has_tab_char = '\t' in text_node.text
+
+                        if has_tab_elem or has_tab_char or has_trailing_dots:
+                            found_tab_or_dots = True
+
+                        # Xóa pattern dots ở cuối text
+                        text_content = re.sub(r'[._…]+$', '', text_node.text)
+                        # Xóa tab characters và whitespace ở cuối nếu có tab/pattern
+                        if found_tab_or_dots:
+                            text_content = text_content.rstrip().replace('\t', '')
+
+                        if text_content != text_node.text:
+                            text_node.text = text_content
+
+                        # Nếu text rỗng sau khi xóa, xóa text node
+                        if not text_content:
+                            current_run.remove(text_node)
+
+                    # Kiểm tra run có còn content không
+                    has_content = False
+                    for child in current_run:
+                        if not child.tag.endswith('}rPr'):  # Bỏ qua rPr
+                            has_content = True
+                            break
+
+                    # Nếu run rỗng, xóa run và tiếp tục
+                    if not has_content:
+                        next_to_check = current_run.getprevious()  # Lưu trước khi xóa
+                        current_run.getparent().remove(current_run)
+                        current_run = next_to_check
+                    else:
+                        # Run có content, dừng
+                        break  # Dừng sau khi xử lý run có content đầu tiên
+
+                # Xử lý next: xóa pattern dots, tab, whitespace
+                if fld.getnext() is not None:
+                    next_run = fld.getnext()
+                    # Xóa tab element
+                    tab_elem = next_run.find(f"{self.W_NS}tab")
+                    if tab_elem is not None:
+                        next_run.remove(tab_elem)
+                    # Xóa pattern dots và whitespace trong text node
+                    next_node = next_run.find(f"{self.W_NS}t")
+                    if next_node is not None and next_node.text:
+                        next_text = re.sub(r'^[._…]+', '', next_node.text)
+                        next_text = next_text.lstrip()  # Xóa cả whitespace/tab ở đầu
+                        if next_text != next_node.text:
+                            next_node.text = next_text
+                        # Nếu text rỗng sau khi xóa, xóa text node
+                        if not next_text:
+                            next_run.remove(next_node)
+                    # Xóa run rỗng (chỉ còn rPr hoặc không có content)
+                    # Kiểm tra xem run có content không (ngoài rPr)
+                    has_content = False
+                    for child in next_run:
+                        if not child.tag.endswith('}rPr'):  # Bỏ qua rPr (formatting)
+                            has_content = True
+                            break
+                    if not has_content:
+                        next_run.getparent().remove(next_run)
+
+                # Recalculate prev_text và next_text sau khi đã xóa
+                prev_node = fld.getprevious().find(f".//{self.W_NS}t") if fld.getprevious() is not None else None
+                next_node = fld.getnext().find(f".//{self.W_NS}t") if fld.getnext() is not None else None
+                prev_text = prev_node.text if prev_node is not None else ""
+                next_text = next_node.text if next_node is not None else ""
 
                 replacement = str(replacement).strip()
 

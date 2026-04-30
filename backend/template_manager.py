@@ -409,7 +409,6 @@ class MailMergeProcessor:
 
             # Step 2: Use Gemini to suggest better names (if API key provided)
             if self.gemini_client and fields:
-                print("\n=== STEP 2: Using Gemini to suggest better field names ===")
                 try:
                     # Extract structured content with placeholders
                     structured_content = self.extract_structured_content(str(output_path))
@@ -422,13 +421,11 @@ class MailMergeProcessor:
 
                     # Apply renames if any
                     if rename_map:
-                        print(f"\n=== STEP 3: Applying {len(rename_map)} renames ===")
                         success = self.rename_placeholders_in_docx(str(output_path), rename_map)
 
                         if success:
                             # Update field names
                             new_fields = [rename_map.get(f, f) for f in fields]
-                            print(f"Updated fields: {new_fields}")
                             fields = new_fields
 
                 except Exception as e:
@@ -550,7 +547,6 @@ class MailMergeProcessor:
             doc = Document(docx_path)
             content_blocks = []
 
-            print("=== EXTRACTING STRUCTURED CONTENT ===")
 
             # Use body children to preserve document order
             for child in doc.element.body.iterchildren():
@@ -618,7 +614,6 @@ class MailMergeProcessor:
                             "docx_index": len(content_blocks)
                         })
 
-            print(f"=== TOTAL BLOCKS: {len(content_blocks)} ===")
 
             # Add surrounding context for each block to help disambiguate similar content
             self._add_neighbor_context(content_blocks)
@@ -1380,8 +1375,6 @@ JSON:"""
             doc = Document(docx_path)
             rename_count = 0
 
-            print(f"=== RENAMING PLACEHOLDERS ===")
-
             # Xử lý tất cả paragraphs trong body
             for para_idx, para in enumerate(doc.paragraphs):
                 for fldSimple in para._p.findall(f"{self.w_ns}fldSimple"):
@@ -1432,8 +1425,6 @@ JSON:"""
                                                     t.text = f"«{new_name}»"
                                                     rename_count += 1
 
-            print(f"=== TOTAL RENAMED: {rename_count} placeholders ===")
-
             # Save file
             doc.save(docx_path)
 
@@ -1479,6 +1470,19 @@ JSON:"""
             rPr = element.find(f"{self.w_ns}rPr")
             style_text = self._get_run_style_text(rPr)
 
+            # Check for footnote/endnote references in this run
+            has_footnote_ref = any((child.tag.split('}')[1] if '}' in child.tag else child.tag) == 'footnoteReference'
+                                   for child in element)
+            has_endnote_ref = any((child.tag.split('}')[1] if '}' in child.tag else child.tag) == 'endnoteReference'
+                                   for child in element)
+
+            # Add superscript style for footnote/endnote references
+            if has_footnote_ref or has_endnote_ref:
+                if style_text:
+                    style_text += "; vertical-align: super; font-size: smaller;"
+                else:
+                    style_text = "vertical-align: super; font-size: smaller;"
+
             for child in element:
                 c_tag = child.tag.split('}')[1] if '}' in child.tag else child.tag
                 if c_tag == 't' and child.text:
@@ -1487,6 +1491,8 @@ JSON:"""
                     text_parts.append("                              ")
                 elif c_tag == 'br':
                     text_parts.append("<br>")
+                # Note: footnoteReference and endnoteReference are handled above
+                # by adding superscript style to the entire run
                 elif c_tag == 'drawing':
                     # Extract image from drawing element
                     img_html = self._extract_image_from_element(child)
