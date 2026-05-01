@@ -208,7 +208,7 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
 
     if op.type == "rename_placeholder":
         old_actual = find_actual_name(op.old_name)
-        if not editor.rename_placeholder(old_actual, op.new_name):
+        if not editor.rename_placeholder(old_actual, op.new_name, op.occurrence_index):
             raise ValueError(f"Failed to rename '{old_actual}'")
 
     elif op.type == "delete_placeholder":

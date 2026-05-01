@@ -907,7 +907,7 @@ async def batch_update(request: Request):
     {
         "template_id": "778c04c8-d477-49ff-a791-274bc4ee9a9e",
         "operations": [
-            {"type": "rename_placeholder", "old_name": "ho_ten", "new_name": "ten_day_du"},
+            {"type": "rename_placeholder", "old_name": "ho_ten", "new_name": "ten_day_du", "occurrence_index": 0},
             {"type": "delete_placeholder", "field_name": "dia_chi_cu"},
             {"type": "update_text", "block_index": 5, "old_text": "Hello", "new_text": "Hi"},
             {"type": "format_text", "block_index": 10, "selected_text": "Important",

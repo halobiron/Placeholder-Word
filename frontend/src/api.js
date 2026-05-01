@@ -360,7 +360,7 @@ export const addHyperlink = async (templateId, blockIndex, startOffset, endOffse
  * @example
  * // Rename and delete placeholders
  * const result = await batchUpdate(templateId, [
- *   { type: 'rename_placeholder', old_name: 'ho_ten', new_name: 'ten_day_du' },
+ *   { type: 'rename_placeholder', old_name: 'ho_ten', new_name: 'ten_day_du', occurrence_index: 0 },
  *   { type: 'delete_placeholder', field_name: 'dia_chi_cu' }
  * ])
  *

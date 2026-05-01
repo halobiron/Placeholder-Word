@@ -1887,19 +1887,22 @@ class DocxFullEditor:
             print(f"[ERROR] Failed to delete placeholder '{field_name}': {e}")
             return False
 
-    def rename_placeholder(self, old_name: str, new_name: str) -> bool:
+    def rename_placeholder(self, old_name: str, new_name: str, occurrence_index: int | None = None) -> bool:
         """
         Đổi tên placeholder (MERGEFIELD)
 
         Args:
             old_name: Tên placeholder cũ
             new_name: Tên placeholder mới
+            occurrence_index: Vị trí 0-based của placeholder cần đổi tên trong nhóm cùng old_name.
+                Nếu None thì đổi toàn bộ placeholder trùng tên để tương thích hành vi cũ.
 
         Returns:
             True nếu thành công, False nếu thất bại
         """
         w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         renamed = False
+        current_match_index = 0
 
         try:
             for fld in self.doc.element.iter(f"{w_ns}fldSimple"):
@@ -1907,6 +1910,10 @@ class DocxFullEditor:
                 match = re.search(r'MERGEFIELD\s+(\S+)', instr)
 
                 if match and match.group(1) == old_name:
+                    if occurrence_index is not None and current_match_index != occurrence_index:
+                        current_match_index += 1
+                        continue
+
                     # Giữ nguyên phần \z "original_text"
                     z_match = re.search(r'\\z\s*"([^"]*)"', instr)
                     z_part = f' \\z "{z_match.group(1)}"' if z_match else ""
@@ -1920,7 +1927,13 @@ class DocxFullEditor:
                         t.text = f"«{new_name}»"
 
                     renamed = True
-                    print(f"[RENAME] '{old_name}' → '{new_name}'")
+                    target_label = f" occurrence #{current_match_index}" if occurrence_index is not None else ""
+                    print(f"[RENAME]{target_label} '{old_name}' → '{new_name}'")
+
+                    if occurrence_index is not None:
+                        break
+
+                    current_match_index += 1
 
             return renamed
 

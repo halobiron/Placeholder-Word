@@ -35,6 +35,11 @@ class RenamePlaceholderOp(BaseOperation):
     type: Literal["rename_placeholder"] = "rename_placeholder"
     old_name: str = Field(..., description="Current placeholder name")
     new_name: str = Field(..., description="New placeholder name")
+    occurrence_index: Optional[int] = Field(
+        None,
+        ge=0,
+        description="0-based occurrence index among placeholders sharing old_name; omit to rename all matches"
+    )
 
 
 class DeletePlaceholderOp(BaseOperation):

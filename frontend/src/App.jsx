@@ -746,7 +746,7 @@ function App() {
 
         const newName = prompt('Đổi tên placeholder:', fieldName)
         if (newName?.trim() && newName.trim() !== fieldName) {
-          renameField(fieldName, newName.trim())
+          renameField(span, fieldName, newName.trim())
         }
       }
     })
@@ -1079,26 +1079,28 @@ function App() {
   }, [selectedField, lockedFields])
 
   // Rename placeholder using Batch Update API
-  const renameField = async (oldName, newName) => {
+  const renameField = async (targetSpan, oldName, newName) => {
     const editor = document.getElementById('document-editor')
-    if (!editor) return
+    if (!editor || !targetSpan) return
 
     // Store current state for rollback
     const oldHtml = editorHtml
     const oldFields = extractFields(editor.innerHTML)
     const oldLockedFields = [...lockedFields]
+    const placeholdersWithSameName = Array.from(
+      editor.querySelectorAll(`.mail-merge-placeholder[data-field="${oldName}"]`)
+    )
+    const occurrenceIndex = placeholdersWithSameName.indexOf(targetSpan)
+
+    if (occurrenceIndex === -1) {
+      setError('⚠️ Không xác định được placeholder cần đổi tên')
+      setTimeout(() => setError(null), 3000)
+      return
+    }
 
     // Update UI immediately
-    const placeholders = editor.querySelectorAll('.mail-merge-placeholder')
-
-    let updatedCount = 0
-    placeholders.forEach(span => {
-      if (span.getAttribute('data-field') === oldName) {
-        span.setAttribute('data-field', newName)
-        span.textContent = `«${newName}»`
-        updatedCount++
-      }
-    })
+    targetSpan.setAttribute('data-field', newName)
+    targetSpan.textContent = `«${newName}»`
 
     const newHtml = editor.innerHTML
     setEditorHtml(newHtml)
@@ -1109,7 +1111,8 @@ function App() {
         {
           type: 'rename_placeholder',
           old_name: oldName,
-          new_name: newName
+          new_name: newName,
+          occurrence_index: occurrenceIndex
         }
       ]
 
@@ -1117,12 +1120,12 @@ function App() {
 
       // Update state from backend response
       setFields(result.fields || extractFields(newHtml))
-      setSelectedField((prev) => (prev === oldName ? newName : prev))
-      setLockedFields((prev) =>
-        prev.includes(oldName)
-          ? prev.map((field) => (field === oldName ? newName : field))
+      setSelectedField(newName)
+      setLockedFields((prev) => (
+        prev.includes(oldName) && !prev.includes(newName)
+          ? [...prev, newName]
           : prev
-      )
+      ))
       setError(`✅ Đã đổi tên «${oldName}» → «${newName}»`)
       setTimeout(() => setError(null), 2000)
     } catch (err) {
@@ -1130,12 +1133,8 @@ function App() {
       setError('⚠️ Đổi tên thất bại: ' + (err.response?.data?.detail || err.message))
 
       // Rollback UI on failure
-      editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
-        if (span.getAttribute('data-field') === newName) {
-          span.setAttribute('data-field', oldName)
-          span.textContent = `«${oldName}»`
-        }
-      })
+      targetSpan.setAttribute('data-field', oldName)
+      targetSpan.textContent = `«${oldName}»`
       setEditorHtml(oldHtml)
       setFields(oldFields)
       setSelectedField((prev) => (prev === newName ? oldName : prev))
@@ -2694,7 +2693,7 @@ function App() {
                     fields.map((field) => (
                       <div key={field} className="group">
                         <div className="flex items-center justify-between mb-1.5 px-1">
-                          <label className="text-xs font-bold text-slate-500 font-mono truncate max-w-[150px]" title={field}>«{field}»</label>
+                          <label className="text-xs font-bold text-slate-500 font-mono break-all flex-1 pr-2" title={field}>«{field}»</label>
                           <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button onClick={() => toggleFieldLock(field)} className={`p-1 rounded hover:bg-slate-100 ${lockedFields.includes(field) ? 'text-amber-600' : 'text-slate-400'}`} title={lockedFields.includes(field) ? "Mở khóa cho Gemini" : "Khóa với Gemini"}>
                               {lockedFields.includes(field) ? '🔒' : '🔓'}

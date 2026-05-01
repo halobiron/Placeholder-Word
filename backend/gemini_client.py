@@ -3,6 +3,7 @@ Gemini Client for text extraction and document analysis
 Used for extracting data from context and analyzing document structure
 """
 import json
+import re
 import google.generativeai as genai
 
 
@@ -83,6 +84,45 @@ class GeminiClient:
             return json.loads(result.strip())
         except json.JSONDecodeError:
             return {}
+
+    def _detect_location_date_line_renames(
+        self,
+        structured_content: list,
+        current_fields: list,
+    ) -> dict:
+        """Force stable names for Vietnamese place/date signature lines.
+
+        Pattern handled:
+            «dia_diem», ngày «ngay» tháng «thang» năm «nam»
+        """
+        forced = {}
+        current_field_set = set(current_fields)
+        pattern = re.compile(
+            r'«(?P<dia>[^»]+)»\s*,\s*ngày\s*«(?P<ngay>[^»]+)»\s*tháng\s*«(?P<thang>[^»]+)»\s*năm\s*«(?P<nam>[^»]+)»',
+            re.IGNORECASE,
+        )
+
+        for block in structured_content:
+            text = (block.get("text") or "").strip()
+            if not text:
+                continue
+
+            match = pattern.search(text)
+            if not match:
+                continue
+
+            rename_targets = {
+                match.group("dia"): "dia_diem_lam_don",
+                match.group("ngay"): "ngay_lam_don",
+                match.group("thang"): "thang_lam_don",
+                match.group("nam"): "nam_lam_don",
+            }
+
+            for old_name, new_name in rename_targets.items():
+                if old_name in current_field_set and old_name != new_name:
+                    forced[old_name] = new_name
+
+        return forced
 
     def extract_data_from_context(
         self,
@@ -347,7 +387,10 @@ Chỉ trả về JSON, không có text khác."""
         Returns:
             Dict mapping current_field_name -> better_field_name
         """
-        import re
+        forced_renames = self._detect_location_date_line_renames(
+            structured_content,
+            current_fields,
+        )
 
         # Format fields với context cho Gemini
         field_infos = []
@@ -366,6 +409,8 @@ Chỉ trả về JSON, không có text khác."""
 
             # Xử lý từng field trong block
             for field in current_fields:
+                if field in forced_renames:
+                    continue
                 if f"«{field}»" not in text:
                     continue
 
@@ -373,21 +418,22 @@ Chỉ trả về JSON, không có text khác."""
                 block_type = block.get("type", "paragraph")
                 before = ' | '.join(block.get("before_context", [])[-2:])
                 after = ' | '.join(block.get("after_context", [])[:2])
+                text_snippet = text.replace("\n", " ")[:220]
 
                 info = f"«{field}» | {block_type} | Section:{section}"
                 if block_type == "table_cell":
-                    info += f" | Row:{block.get('table_row')} Col:{block.get('table_col')}"
+                    info += f" | Row:{block.get('table_row')} Col:{block.get('table_col')} | Text:[{text_snippet}]"
                 else:
-                    info += f" | Trước:[{before}] Sau:[{after}]"
+                    info += f" | Text:[{text_snippet}] | Trước:[{before}] Sau:[{after}]"
 
                 field_infos.append(info)
 
         if not field_infos:
-            return {}
+            return forced_renames
 
         # Batch process để tránh token limit
         batch_size = 15
-        all_renames = {}
+        all_renames = dict(forced_renames)
 
         for i in range(0, len(field_infos), batch_size):
             batch = field_infos[i:i+batch_size]
@@ -447,6 +493,7 @@ JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
                 continue
 
         print(f"=== Total renames: {len(all_renames)} ===")
+        all_renames.update(forced_renames)
         return all_renames
 
 

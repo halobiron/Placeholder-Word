@@ -15,13 +15,13 @@ from docx.text.paragraph import Paragraph
 from typing import List, Dict, Optional
 
 # Treat placeholder-like dot runs broadly:
-# - ASCII dot/underscore runs need at least 2 chars
+# - ASCII dot/underscore runs need at least 2 chars total
 # - Unicode ellipsis/dot-leader chars count as a placeholder by themselves
 # - Mixed runs such as "...…‥⋯..." stay a single placeholder
-# - Dots separated by spaces: ". . . ." or ". . . . . . ." or "... ..." (ALL treated as ONE field)
-# - Pattern: dots/underscores with optional spaces between, must contain at least 2 dots/underscores total
-# - Updated: (?:[._][.\s]*)*[._]+ to greedily match dots with any spaces in between
-PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?:[._][.\s]*)*[._]{2,}|[□■]+)')
+# - Dots separated by spaces/newlines: ". . . ." or ". . . . . . ." or "... ..." or multi-line dots (ALL treated as ONE field)
+# - Pattern uses lookahead to ensure at least 2 dots/underscores total (including those separated by whitespace)
+# - Updated: (?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._] to match space/newline-separated dots with minimum count
+PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._]|[□■]+)')
 TERMINAL_TAB_PLACEHOLDER_PATTERN = re.compile(r'\t+$')
 
 
@@ -302,8 +302,14 @@ class SmartMailMergeConverter:
                 text_no_dots = pattern.sub('', paragraph.text).strip()
                 ctx = paragraph.text if len(text_no_dots) > 5 else self.last_meaningful_text
                 label, sw = self._generate_label(full_text[:offset], ctx, content)
+
+                # Truncate placeholder text for instruction (max 50 chars to avoid XML issues)
+                content_short = content[:50] if len(content) > 50 else content
+                # Escape quotes in content
+                content_short = content_short.replace('"', '\\"')
+
                 fld = OxmlElement('w:fldSimple')
-                fld.set(qn('w:instr'), f' MERGEFIELD {label} {sw} \\z "{content}" ')
+                fld.set(qn('w:instr'), f' MERGEFIELD {label} {sw} \\z "{content_short}" ')
                 run = OxmlElement('w:r')
                 if original_rPr is not None: run.append(copy.deepcopy(original_rPr))
                 # Add special elements for merge fields too
@@ -461,7 +467,6 @@ class SmartMailMergeConverter:
                         if current_col <= col < current_col + grid_span:
                             if self._is_cell_empty(cell):
                                 self._insert_field_in_cell(cell, field_name)
-                                reason = suggestion.get("reason", "")
                             break
                         current_col += grid_span
 
@@ -493,268 +498,9 @@ class SmartMailMergeConverter:
                             self._insert_field_in_cell(cell, field_name)
                             print(f"  → Rule-based auto-fill: «{field_name}» (from header: '{header_text}')")
 
-    def _normalize_text_for_matching(self, text):
-        """Normalize text cho keyword matching (bỏ dấu, lowercase)
 
-        Args:
-            text: Text để normalize
 
-        Returns:
-            Normalized text
-        """
-        if not text:
-            return ""
 
-        # Xử lý chữ đ/Đ đặc biệt
-        text = text.replace('đ', 'd').replace('Đ', 'D')
-
-        # Normalize Unicode
-        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-
-        # Lowercase và remove special chars
-        text = text.lower()
-        text = re.sub(r'[^a-z0-9\s]', ' ', text)
-
-        return text
-
-    def _analyze_context_requirements(self, context_data):
-        """Phân tích context để determine số lượng fields cần điền
-
-        Args:
-            context_data: Dict/list containing fields to fill
-
-        Returns:
-            Dict với:
-                - total_fields: Tổng số fields cần
-                - field_names: List tên fields
-                - table_fields: Fields thuộc về table (detected by keywords)
-        """
-        if isinstance(context_data, list):
-            return {
-                "total_fields": len(context_data),
-                "field_names": context_data,
-                "table_fields": []
-            }
-
-        # Nếu context phức tạp với sections
-        total = 0
-        fields = []
-        table_fields = []
-
-        # Keywords để detect table-related sections (cả có dấu và không dấu)
-        table_keywords_raw = [
-            "vốn góp", "nhà đầu tư", "mục tiêu hoạt động", "vsic", "cpc",
-            "số vốn", "tỷ lệ", "quốc tịch", "phương thức", "tiến độ",
-            "von gop", "nha dau tu", "muc tieu hoat dong", "so von", "ty le",
-            "quoc tich", "phuong thuc", "tien do"
-        ]
-
-        # Normalize keywords
-        table_keywords = [self._normalize_text_for_matching(kw) for kw in table_keywords_raw]
-
-        for section, data in context_data.items():
-            if isinstance(data, list):
-                section_fields = data
-                total += len(section_fields)
-                fields.extend(section_fields)
-
-                # Detect nếu section liên quan đến table (normalize cả section name)
-                section_normalized = self._normalize_text_for_matching(section)
-                if any(kw in section_normalized for kw in table_keywords):
-                    table_fields.extend(section_fields)
-            elif isinstance(data, dict):
-                # Nested dict structure
-                for key, value in data.items():
-                    if isinstance(value, list):
-                        total += len(value)
-                        fields.extend(value)
-                        key_normalized = self._normalize_text_for_matching(key)
-                        if any(kw in key_normalized for kw in table_keywords):
-                            table_fields.extend(value)
-
-        return {
-            "total_fields": total,
-            "field_names": fields,
-            "table_fields": table_fields
-        }
-
-    def _count_empty_cells_in_table(self, table, skip_merged=True):
-        """Đếm số empty cells available trong bảng
-
-        Args:
-            table: Table object
-            skip_merged: If True, skip merged cells when counting
-
-        Returns:
-            Số empty cells
-        """
-        empty_count = 0
-        merged_count = 0
-
-        for row in table.rows:
-            for cell in row.cells:
-                # Check if cell is part of a merge
-                if skip_merged:
-                    tc = cell._element
-                    tcPr = tc.find(f"{self.w_ns}tcPr")
-                    if tcPr is not None:
-                        # Check for vMerge (vertical merge)
-                        vmerge = tcPr.find(f"{self.w_ns}vMerge")
-                        # Check for gridSpan (horizontal merge)
-                        gridSpan = tcPr.find(f"{self.w_ns}gridSpan")
-                        if vmerge is not None or gridSpan is not None:
-                            merged_count += 1
-                            continue
-
-                if self._is_cell_empty(cell):
-                    empty_count += 1
-
-        return empty_count
-
-    def _get_table_structure(self, table):
-        """Lấy cấu trúc bảng để determine columns per row
-
-        Args:
-            table: Table object
-
-        Returns:
-            Dict với:
-                - header_row: Row index của header (thường là 0)
-                - data_rows: Số data rows
-                - columns: Số columns (trừ header)
-                - has_header: Bool
-        """
-        if len(table.rows) == 0:
-            return {"header_row": 0, "data_rows": 0, "columns": 0, "has_header": False}
-
-        # Assume first row is header if table has > 1 rows
-        has_header = len(table.rows) > 1
-        header_row = 0 if has_header else -1
-        data_rows = len(table.rows) - 1 if has_header else len(table.rows)
-
-        # Count columns from first row
-        columns = len(table.rows[0].cells) if table.rows else 0
-
-        return {
-            "header_row": header_row,
-            "data_rows": data_rows,
-            "columns": columns,
-            "has_header": has_header
-        }
-
-    def _clone_table_row(self, table, template_row):
-        """Clone một row trong bảng (giữ nguyên formatting)
-
-        Args:
-            table: Table object
-            template_row: Row để clone (thường là row đầu tiên sau header)
-
-        Returns:
-            New row object
-        """
-        # XML-based deep copy để preserve formatting
-        new_row_element = copy.deepcopy(template_row._element)
-
-        # Clear content IMMEDIATELY at XML level before inserting
-        # This is more reliable than docx API
-        for tc in new_row_element.findall(f"{self.w_ns}tc"):
-            # Remove ALL paragraphs
-            for p in tc.findall(f"{self.w_ns}p"):
-                tc.remove(p)
-
-            # Create a single empty paragraph
-            new_p = OxmlElement('w:p')
-            new_r = OxmlElement('w:r')
-            new_t = OxmlElement('w:t')
-            new_t.text = ""
-            new_r.append(new_t)
-            new_p.append(new_r)
-            tc.append(new_p)
-
-        # CRITICAL FIX: Insert at the END of table to avoid index shifting issues
-        # Get last row and insert after it
-        last_row = table.rows[-1]
-        last_row._element.addnext(new_row_element)
-
-        # Force table to reindex
-        table._tbl.findall(f"{self.w_ns}tr")
-
-        # Get reference to newly added row (now at the end)
-        new_row = table.rows[-1]
-        return new_row
-
-    def _expand_table_for_context(self, table, required_fields, context_hints=None):
-        """Tự động thêm rows vào bảng nếu cần
-
-        Args:
-            table: Table object
-            required_fields: Số fields cần điền vào table này
-            context_hints: Optional dict với context về field types
-
-        Returns:
-            Dict với:
-                - rows_added: Số rows đã thêm
-                - total_rows: Tổng số rows sau khi expand
-                - empty_cells: Số empty cells sau khi expand
-        """
-        structure = self._get_table_structure(table)
-
-        if structure["data_rows"] == 0:
-            # Table chỉ có header, không expand
-            return {
-                "rows_added": 0,
-                "total_rows": len(table.rows),
-                "empty_cells": 0
-            }
-
-        # Đếm empty cells hiện có
-        empty_cells = self._count_empty_cells_in_table(table)
-
-        # Nếu đã đủ chỗ, không cần thêm
-        if empty_cells >= required_fields:
-            return {
-                "rows_added": 0,
-                "total_rows": len(table.rows),
-                "empty_cells": empty_cells
-            }
-
-        # Calculate rows needed based on EMPTY cells (not total slots)
-        # Mỗi row mới thêm sẽ cho ra thêm N empty cells (N = số columns)
-        columns = structure["columns"]
-        deficit = required_fields - empty_cells
-
-        if deficit <= 0:
-            return {
-                "rows_added": 0,
-                "total_rows": len(table.rows),
-                "empty_cells": empty_cells
-            }
-
-        # Calculate rows to add (round up)
-        # Mỗi row mới thêm sẽ cho ra thêm 'columns' empty cells
-        rows_to_add = (deficit // columns) + (1 if deficit % columns else 0)
-
-        # Determine template row (first data row, right after header)
-        template_row_idx = 1 if structure["has_header"] else 0
-        if template_row_idx >= len(table.rows):
-            template_row_idx = 0
-
-        template_row = table.rows[template_row_idx]
-
-        # Add new rows
-        added = 0
-        for _ in range(rows_to_add):
-            self._clone_table_row(table, template_row)
-            added += 1
-
-        # Recount empty cells after expansion
-        new_empty_cells = self._count_empty_cells_in_table(table)
-
-        return {
-            "rows_added": added,
-            "total_rows": len(table.rows),
-            "empty_cells": new_empty_cells
-        }
 
     def convert(self, output_path, auto_fill_tables=True):
         """Duyệt toàn bộ tài liệu để thực thi chuyển đổi
@@ -768,20 +514,99 @@ class SmartMailMergeConverter:
         """
         print(f"Đang phân tích tài liệu...")
 
+        # First pass: collect paragraphs to identify placeholder patterns
+        paragraphs_info = []
         for para in self.doc.paragraphs:
-            # Kiểm tra nếu dòng này là tiêu đề mục để lưu context (Section-Based)
-            text_strip = para.text.strip()
-            if text_strip and (text_strip[0].isdigit() or text_strip.isupper()) and len(text_strip) < 50:
-                potential_label = self._slugify(text_strip)
+            text = para.text
+            text_strip = text.strip()
+            # Check if paragraph has placeholders
+            has_placeholders = bool(PLACEHOLDER_PATTERN.search(text))
+            # Check if paragraph only contains placeholders (no meaningful text)
+            cleaned = PLACEHOLDER_PATTERN.sub(' ', text_strip).strip()
+            is_placeholder_only = has_placeholders and (not cleaned or not any(c.isalpha() or c.isdigit() for c in cleaned))
+            paragraphs_info.append({
+                'para': para,
+                'text': text,
+                'text_strip': text_strip,
+                'has_placeholders': has_placeholders,
+                'is_placeholder_only': is_placeholder_only
+            })
+
+        # Process paragraphs with placeholder merging logic
+        i = 0
+        while i < len(paragraphs_info):
+            info = paragraphs_info[i]
+
+            # Check for section headers (for context)
+            if info['text_strip'] and (info['text_strip'][0].isdigit() or info['text_strip'].isupper()) and len(info['text_strip']) < 50:
+                potential_label = self._slugify(info['text_strip'])
                 if potential_label:
                     self.last_section_label = potential_label
 
-            self._process_paragraph(para)
+            # If this paragraph has placeholders, check if next paragraphs should be merged
+            if info['has_placeholders']:
+                # Look ahead to find consecutive paragraphs with placeholders that should be merged
+                # Case 1: Paragraph with text + placeholders followed by placeholder-only paragraphs
+                # Case 2: Multiple placeholder-only paragraphs in a row
+                streak_start = i
+                streak_end = i
 
-            # Cập nhật context text để dùng cho paragraph sau nếu cần
-            cleaned = PLACEHOLDER_PATTERN.sub(' ', text_strip).strip()
+                # Determine if we should merge with next paragraphs
+                should_merge = False
+
+                # Check next paragraphs
+                while streak_end + 1 < len(paragraphs_info):
+                    next_info = paragraphs_info[streak_end + 1]
+
+                    # Merge if next paragraph is placeholder-only
+                    if next_info['is_placeholder_only']:
+                        should_merge = True
+                        streak_end += 1
+                    else:
+                        break
+
+                # If we have a streak that should be merged (> 1 paragraph)
+                if should_merge and streak_end > streak_start:
+                    # Merge placeholder-only paragraphs into the first paragraph
+                    # by copying their runs, then process the merged paragraph
+                    first_para = paragraphs_info[streak_start]['para']
+                    first_para_element = first_para._p
+
+                    # Copy runs from all subsequent paragraphs in the streak
+                    # (skip the first paragraph as it's already in first_para_element)
+                    for j in range(streak_start + 1, streak_end + 1):
+                        current_para = paragraphs_info[j]['para']
+                        current_para_element = current_para._p
+
+                        # Copy all runs from current paragraph
+                        for run in current_para.runs:
+                            run_element = run._element
+                            # Deep copy the run element to preserve all formatting
+                            run_copy = copy.deepcopy(run_element)
+                            first_para_element.append(run_copy)
+
+                    # Process the merged first paragraph (now contains all runs)
+                    self._process_paragraph(first_para)
+
+                    # Delete the merged paragraphs (they've been incorporated into the first one)
+                    for j in range(streak_end, streak_start, -1):  # Reverse order to avoid index shifting
+                        para_to_delete = paragraphs_info[j]['para']
+                        para_element = para_to_delete._element
+                        para_element.getparent().remove(para_element)
+
+                    # Skip the rest of the streak
+                    i = streak_end + 1
+                    continue
+
+            # Process normal paragraph
+            self._process_paragraph(info['para'])
+
+            # Update context
+            cleaned = PLACEHOLDER_PATTERN.sub(' ', info['text_strip']).strip()
             if cleaned and any(c.isalpha() for c in cleaned):
                 self.last_meaningful_text = cleaned
+
+            i += 1
 
         # Xử lý Table
         for table in self.doc.tables:
