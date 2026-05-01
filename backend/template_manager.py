@@ -495,29 +495,34 @@ class MailMergeProcessor:
                     # Track starting block index for this table (for first cell)
                     table_start_block_index = block_index
 
-                    # Process each cell as a separate block (matching extract_structured_content logic)
-                    # CRITICAL FIX: Increment block_index for ALL cells (including empty ones)
-                    # This matches _process_table_to_html and _build_block_index_map behavior
+                    # CRITICAL FIX: Check if table has content WITHOUT incrementing block_index here
+                    # _process_table_to_html will handle block_index increment and return final count
                     for row_idx, row in enumerate(table.rows):
                         for cell_idx, cell in enumerate(row.cells):
-                            # Extract cell text to check if it has content
                             cell_text = "".join(
                                 self._extract_xml_text(para._p) for para in cell.paragraphs
                             ).strip()
 
                             if cell_text:
                                 table_has_content = True
-                            # CRITICAL FIX: Increment block_index for ALL cells, not just non-empty ones
-                            # This ensures consistency with _process_table_to_html and _build_block_index_map
-                            block_index += 1
 
-                    # CRITICAL FIX: Always render table, even if empty!
-                    # New tables added by user will be empty initially but should still be visible
-                    # Use the starting block index for the table (first cell's block_index)
-                    html = self._process_table_to_html(table, table_start_block_index, current_table_index)
-                    html_parts.append(html)
+                    # CRITICAL FIX: _process_table_to_html now returns (html, cells_count)
+                    # This ensures block_index consistency between HTML and document structure
+                    table_html, cells_count = self._process_table_to_html(table, table_start_block_index, current_table_index)
+                    html_parts.append(table_html)
+
+                    # Increment block_index by the number of cells processed
+                    block_index += cells_count
+
                     if table_has_content:
-                        # Keep block indices aligned with extract/inject, even though the summary is not rendered.
+                        # CRITICAL FIX: Add table_summary to HTML preview for block index consistency
+                        # This ensures HTML block indices match candidate block indices exactly
+                        # Table summary is not visible but has data-block-index for mapping
+                        table_summary_index = block_index
+                        table_summary_html = f'<div data-block-index="{table_summary_index}" data-type="table_summary" data-table-index="{current_table_index}" style="display: none;"></div>'
+                        html_parts.append(table_summary_html)
+
+                        # Keep block indices aligned with extract/inject for table_summary
                         block_index += 1
 
             print(f"=== TOTAL BLOCKS IN HTML PREVIEW: {block_index} ===")
@@ -1775,7 +1780,7 @@ JSON:"""
 
         return para_html
 
-    def _process_table_to_html(self, table, block_index: int, table_index: int) -> str:
+    def _process_table_to_html(self, table, block_index: int, table_index: int) -> tuple:
         """Xử lý Table thành thẻ table html với block_index metadata cho từng ô
 
         Args:
@@ -1784,7 +1789,7 @@ JSON:"""
             table_index: Index of this table in the document
 
         Returns:
-            HTML string for the entire table
+            Tuple of (html_string, cells_count) where cells_count is the number of cells processed
         """
         print(f"[_process_table_to_html] START Processing table {table_index} with {len(table.rows)} rows, {len(table.columns)} columns")
         table_html = ['<div style="overflow-x: auto; max-width: 100%;"><table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; max-width: 100%; table-layout: auto; margin: 10px 0;">']
@@ -1931,5 +1936,5 @@ JSON:"""
         table_html.append('</table></div>')
         html_result = "\n".join(table_html)
         print(f"[_process_table_to_html] END Processed {cells_processed} cells")
-        return html_result
+        return (html_result, cells_processed)
 
