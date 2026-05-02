@@ -5,7 +5,6 @@ Handles Vietnamese forms with XML surgical injection, offset mapping, and smart 
 Now uses Gemini for intelligent table analysis instead of complex rule-based code.
 """
 import re
-import unicodedata
 import copy
 from lxml import etree
 from docx import Document
@@ -56,41 +55,6 @@ class SmartMailMergeConverter:
                 pass
         return self._gemini_client
 
-    def _slugify(self, text):
-        """Chuyển đổi tiếng Việt có dấu thành snake_case không dấu, tối đa 6 từ
-
-        Args:
-            text: Vietnamese text with accents
-
-        Returns:
-            Snake_case string or None
-        """
-        if not text or not text.strip():
-            return None
-
-        # Loại bỏ nhiễu: (ghi rõ...), nhưng giữ lại %, ( ) trong context hợp lý
-        # Dùng regex case-insensitive cho "(ghi rõ..."
-        text = re.sub(r'\(ghi rõ.*?\)', ' ', text, flags=re.IGNORECASE)
-        # Giữ lại các ký tự quan trọng: %, VND, USD
-        text = re.sub(r'[:\-–—\._…□]', ' ', text)
-
-        # Xử lý chữ đ/Đ đặc biệt trước khi normalize
-        text = text.replace('đ', 'd').replace('Đ', 'D')
-
-        # Bình thường hóa tiếng Việt
-        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-
-        # Tìm tất cả words và các token quan trọng (VND, USD, %)
-        words = re.findall(r'\w+|%|VND|USD|EUR|GBP|JPY', text.lower())
-
-        # Lấy tất cả các từ (tối đa 10 để tránh quá dài)
-        slug = "_".join(words[-10:]) if len(words) > 10 else "_".join(words)
-
-        # Clean up: loại bỏ dấu _ ở đầu/cuối và _ liên tiếp
-        slug = re.sub(r'^_+|_+$', '', slug)
-        slug = re.sub(r'_+', '_', slug)
-
-        return slug if slug else None
 
     def _get_unique_label(self, base_label):
         """Đảm bảo tên field không bị trùng lặp
@@ -111,17 +75,21 @@ class SmartMailMergeConverter:
         return result
 
     def _generate_label(self, pre_text, para_context, content=None):
-        """Tạo field name và format switch dựa trên text ngay trước placeholder"""
-        parts = [p.strip() for p in re.split(r'[:\-–—\._…□■\n]', pre_text) if p.strip()]
-        recent = parts[-1] if parts else ""
-        label = self._slugify(recent) or self._slugify(pre_text) or self._slugify(para_context) or "field"
-        
-        # Nếu placeholder gốc là checkbox, thêm tiền tố ck_ để dễ nhận diện khi merge
+        """Tạo field name ĐƠN GIẢN - Gemini sẽ rename sau"""
+        label = "field"  # Cực kỳ đơn giản
+
+        # Checkbox prefix
         if content in ('□', '■'):
             label = f"ck_{label}"
-            
+
+        # Hệ thống tự thêm _2, _3 nếu trùng
         unique_label = self._get_unique_label(label)
+
+        # Format switch vẫn giữ (preserve uppercase/title case)
+        parts = [p.strip() for p in re.split(r'[:\-–—\._…□■\n]', pre_text) if p.strip()]
+        recent = parts[-1] if parts else ""
         sw = "\\* Upper" if recent.isupper() else "\\* Caps" if recent.istitle() else "\\* MERGEFORMAT"
+
         return unique_label, sw
 
     def _get_special_elements(self, run_element):
@@ -541,14 +509,10 @@ class SmartMailMergeConverter:
 
             for col_idx, cell in enumerate(row.cells):
                 if self._is_cell_empty(cell) and col_idx < len(header_texts):
-                    header_text = header_texts[col_idx]
-                    if header_text:
-                        field_name = self._slugify(header_text)
-                        if field_name:
-                            # Add row suffix to avoid duplicates
-                            field_name = f"{field_name}_row_{row_idx}"
-                            self._insert_field_in_cell(cell, field_name)
-                            print(f"  → Rule-based auto-fill: «{field_name}» (from header: '{header_text}')")
+                    # Rule-based fallback: extremely simple naming
+                    field_name = "field"
+                    self._insert_field_in_cell(cell, field_name)
+                    print(f"  → Rule-based auto-fill: «{field_name}» (column {col_idx})")
 
 
 
@@ -591,9 +555,9 @@ class SmartMailMergeConverter:
 
             # Check for section headers (for context)
             if info['text_strip'] and (info['text_strip'][0].isdigit() or info['text_strip'].isupper()) and len(info['text_strip']) < 50:
-                potential_label = self._slugify(info['text_strip'])
-                if potential_label:
-                    self.last_section_label = potential_label
+                # Extremely simple text normalization for section labels
+                simple_text = info['text_strip'].lower().replace(' ', '_')[:20]
+                self.last_section_label = simple_text if simple_text else "field"
 
             # If this paragraph has placeholders, check if next paragraphs should be merged
             if info['has_placeholders']:

@@ -559,14 +559,11 @@ QUY TẮC QUAN TRỌNG - BẮT BUỘC:
    - Row 1 có "VNĐ" → dùng "VNĐ" thay vì "Số vốn góp" từ row 0
    - Row 1 có "Tương đương USD" → dùng đó thay vì "Số vốn góp"
 
-4. **TUYỆT ĐỐI KHÔNG DÙNG SỐ THỨ TỤ ROW** - CẤM BẤT KỲ suffix nào như "_row_1", "_row_2", "_row_3"
+4. **TUYỆT ĐỐI KHÔNG DÙNG SỐ THỨ TỤ** - CẤM BẤT KỲ suffix nào như "_row_1", "_row_2", "_1", "_2", "_3"
    - TÊN KHÔNG ĐƯỢC CHỨA SỐ ở cuối (trừ khi là phần của tên như "ngay_2", "thang_3")
    - MẶC ĐỊNH: Tên đơn giản, không có số thứ tự
-   - SAU KHI TẠO TÊN: Kiểm tra lại, nếu tên có "_row_X" thì XÓA NGAY
-
-5. CHỈ thêm số thứ tự khi CÓ >1 ROW DATA CÙNG LOẠI CẦN PHÂN BIỆT
-   - Ví dụ CẦN: Bảng có 3 rows điền 3 cổ đông khác nhau → "ten_co_dong_1", "ten_co_dong_2"
-   - Ví dụ KHÔNG CẦN: Bảng chỉ có 1-2 rows data rỗng → không cần số thứ tự
+   - SAU KHI TẠO TÊN: Kiểm tra lại, nếu tên có "_row_X" hoặc "_X" ở cuối thì XÓA NGAY
+   - HỆ THỐNG sẽ tự động xử lý trùng lặp (thêm _2, _3 khi cần)
 
 5. **RÚT GỌN TÊN** - không được quá dài
    - "nha_dau_tu_nuoc_ngoai" là đủ, không cần "thong_tin_nha_dau_tu_nuoc_ngoai"
@@ -579,31 +576,36 @@ VÍ DỤ ĐÚNG:
   Row 2: [EMPTY] | [EMPTY] | [EMPTY] | [EMPTY] | [EMPTY]
 
   → Context bảng: "nha_dau_tu_nuoc_ngoai"
-  → Col 0: "stt_nha_dau_tu_nuoc_ngoai"  ← KHÔNG "_row_2"
-  → Col 1: "ten_nha_dau_tu_nuoc_ngoai"  ← KHÔNG "_row_2"
-  → Col 2: "quoc_tich_nha_dau_tu_nuoc_ngoai"  ← ĐÚNG!
+  → Col 0: "stt_nha_dau_tu_nuoc_ngoai"  ← KHÔNG có "_row_2" hay số thứ tự
+  → Col 1: "ten_nha_dau_tu_nuoc_ngoai"  ← Tên đơn giản, không đánh số
+  → Col 2: "quoc_tich_nha_dau_tu_nuoc_ngoai"  ← ĐÚNG! Context rõ nghĩa
   → Col 3: "so_von_gop_vnd_nha_dau_tu_nuoc_ngoai"
   → Col 4: "so_von_gop_usd_nha_dau_tu_nuoc_ngoai"
 
-VÍ DỤ CẦN SỐ THỨ TỰ:
 - Bảng "Danh sách cổ đông" có 3 rows:
-  → "ten_co_dong_1", "so_co_phan_1" (row 1)
-  → "ten_co_dong_2", "so_co_phan_2" (row 2)
-  → "ten_co_dong_3", "so_co_phan_3" (row 3)
+  Row 1: [EMPTY] | [EMPTY]  → "ten_co_dong", "so_co_phan"
+  Row 2: [EMPTY] | [EMPTY]  → "ten_co_dong", "so_co_phan"  (Hệ thống sẽ tự thành "ten_co_dong_2", "so_co_phan_2")
+  Row 3: [EMPTY] | [EMPTY]  → "ten_co_dong", "so_co_phan"  (Hệ thống sẽ tự thành "ten_co_dong_3", "so_co_phan_3")
+
+  → QUAN TRỌNG: Tất cả rows đều dùng TÊN CƠ BẢN, không đánh số
+  → Hệ thống _get_unique_label() sẽ tự thêm _2, _3 khi trùng lặp
 
 ĐẶC BIỆT:
 - Nếu ô trống nằm ở cột checkbox (□, [ ]) → thêm prefix "ck_"
 - Nếu ô trống là ngày tháng → tên: "ngay_...", "thang_...", "nam_..."
 - Nếu ô trống là số tiền/mức lương → tên: "muc_luong_...", "so_tien_..."
-- Nếu ô trống trong row data (có số thứ tự) → thêm suffix "_row_X" để phân biệt (X là số thứ tự row)
+- KHÔNG BAO GIỜ thêm suffix "_row_X", "_1", "_2" để phân biệt row
+- TẬP TRUNG vào việc tạo TÊN CÓ Ý NGHĨA từ context, để hệ thống tự xử lý trùng lặp
 
 YÊU CẦU ĐẦU RA (JSON chỉ):
 {{
   "suggestions": [
-    {{"row": 1, "col": 1, "field_name": "ho_ten_nguoi_lap", "reason": "cột Họ tên, row data đầu tiên"}},
-    {{"row": 1, "col": 2, "field_name": "dia_chi_nguoi_lap", "reason": "cột Địa chỉ"}}
+    {{"row": 1, "col": 1, "field_name": "ho_ten_nguoi_lap", "reason": "cột Họ tên, context rõ nghĩa"}},
+    {{"row": 1, "col": 2, "field_name": "dia_chi_nguoi_lap", "reason": "cột Địa chỉ, không đánh số"}}
   ]
 }}
+
+NHỚ: Không bao giờ thêm số thứ tự vào tên. Hệ thống sẽ tự xử lý trùng lặp.
 
 Chỉ trả về JSON, không có text khác."""
 
