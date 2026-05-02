@@ -33,15 +33,47 @@ class MailMergeProcessor:
         self.gemini_client = GeminiClient(gemini_api_key) if gemini_api_key else None
 
     def _extract_xml_text(self, element) -> str:
-        """Extract and normalize all text nodes from a Word XML element."""
+        """Extract and normalize all text nodes from a Word XML element including tabs and breaks."""
         if element is None:
             return ""
 
         text_parts = []
-        for t in element.findall(f".//{self.w_ns}t"):
-            if t.text:
-                text_parts.append(t.text)
+        # CRITICAL FIX: Iterate through children to preserve order of text, tabs, and breaks
+        for child in element.iter():
+            tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
+            if tag_name == 't' and child.text:
+                text_parts.append(child.text)
+            elif tag_name == 'tab':
+                text_parts.append('\t')
+            elif tag_name == 'br':
+                text_parts.append('\n')
+        
         return "".join(text_parts).strip()
+
+    def _extract_table_cell_text(self, cell) -> str:
+        """Extract visible text from a table cell."""
+        return "".join(
+            self._extract_xml_text(para._p) for para in cell.paragraphs
+        ).strip()
+
+    def _build_visible_table_summary(self, table) -> tuple[str, bool]:
+        """Build summary text from visible cells only to keep merged tables stable."""
+        rows: dict[int, list[tuple[int, str]]] = {}
+        table_has_content = False
+
+        for cell_data in self._iter_visible_table_cells(table):
+            cell_text = self._extract_table_cell_text(cell_data["cell"])
+            if cell_text:
+                table_has_content = True
+            rows.setdefault(cell_data["row_idx"], []).append((cell_data["col_idx"], cell_text))
+
+        table_text = "\n".join(
+            " | ".join(text for _, text in sorted(row_cells, key=lambda item: item[0]))
+            for _, row_cells in sorted(rows.items())
+            if any(text.strip() for _, text in row_cells)
+        )
+
+        return table_text, table_has_content
 
     def _build_block_candidates(self, doc: Document) -> list:
         """Build a stable block list that matches structured extraction order."""
@@ -64,43 +96,25 @@ class MailMergeProcessor:
 
             elif isinstance(child, CT_Tbl):
                 table = Table(child, doc)
-                table_has_content = False
+                table_text, table_has_content = self._build_visible_table_summary(table)
 
-                for row_idx, row in enumerate(table.rows):
-                    for cell_idx, cell in enumerate(row.cells):
-                        cell_text = "".join(
-                            self._extract_xml_text(para._p) for para in cell.paragraphs
-                        ).strip()
+                for cell_data in self._iter_visible_table_cells(table):
+                    cell = cell_data["cell"]
+                    cell_text = self._extract_table_cell_text(cell)
 
-                        if cell_text:
-                            table_has_content = True
-
-                        candidates.append({
-                            "type": "table_cell",
-                            "index": current_index,
-                            "text": cell_text if cell_text else "[EMPTY CELL]",
-                            "table": table,
-                            "row": row_idx,
-                            "col": cell_idx,
-                            "cell": cell,
-                            "is_empty": not cell_text,
-                        })
-                        current_index += 1
+                    candidates.append({
+                        "type": "table_cell",
+                        "index": current_index,
+                        "text": cell_text if cell_text else "[EMPTY CELL]",
+                        "table": table,
+                        "row": cell_data["row_idx"],
+                        "col": cell_data["col_idx"],
+                        "cell": cell,
+                        "is_empty": not cell_text,
+                    })
+                    current_index += 1
 
                 if table_has_content:
-                    all_cells_text = []
-                    for row in table.rows:
-                        row_cells = []
-                        for cell in row.cells:
-                            cell_text = "".join(
-                                self._extract_xml_text(para._p) for para in cell.paragraphs
-                            ).strip()
-                            row_cells.append(cell_text)
-                        all_cells_text.append(row_cells)
-
-                    table_text = "\n".join(
-                        [" | ".join(row) for row in all_cells_text if any(cell.strip() for cell in row)]
-                    )
                     candidates.append({
                         "type": "table_summary",
                         "index": current_index,
@@ -490,21 +504,10 @@ class MailMergeProcessor:
                     table = Table(child, doc)
                     current_table_index = table_index  # Store current table index
                     table_index += 1  # Increment for next table
-                    table_has_content = False
 
                     # Track starting block index for this table (for first cell)
                     table_start_block_index = block_index
-
-                    # CRITICAL FIX: Check if table has content WITHOUT incrementing block_index here
-                    # _process_table_to_html will handle block_index increment and return final count
-                    for row_idx, row in enumerate(table.rows):
-                        for cell_idx, cell in enumerate(row.cells):
-                            cell_text = "".join(
-                                self._extract_xml_text(para._p) for para in cell.paragraphs
-                            ).strip()
-
-                            if cell_text:
-                                table_has_content = True
+                    _, table_has_content = self._build_visible_table_summary(table)
 
                     # CRITICAL FIX: _process_table_to_html now returns (html, cells_count)
                     # This ensures block_index consistency between HTML and document structure
@@ -570,47 +573,25 @@ class MailMergeProcessor:
                     })
                 elif isinstance(child, CT_Tbl):
                     table = Table(child, doc)
-                    table_has_content = False
+                    table_text, table_has_content = self._build_visible_table_summary(table)
 
-                    # Process each cell as a separate content block to enable precise targeting
-                    # CRITICAL FIX: Process ALL cells (including empty ones) for consistency
-                    # This matches _generate_html_preview and _build_block_index_map behavior
-                    for row_idx, row in enumerate(table.rows):
-                        for cell_idx, cell in enumerate(row.cells):
-                            cell_text = "".join(
-                                self._extract_xml_text(para._p) for para in cell.paragraphs
-                            ).strip()
+                    # Process each visible cell as a separate content block to keep merged
+                    # tables aligned with HTML preview and editor block maps.
+                    for cell_data in self._iter_visible_table_cells(table):
+                        cell_text = self._extract_table_cell_text(cell_data["cell"])
 
-                            if cell_text:
-                                table_has_content = True
-
-                            content_blocks.append({
-                                "type": "table_cell",
-                                "text": cell_text if cell_text else "",
-                                "table_row": row_idx,
-                                "table_col": cell_idx,
-                                "docx_index": len(content_blocks),
-                                "table_context": f"Row {row_idx}, Col {cell_idx}",
-                                "is_empty": not cell_text
-                            })
+                        content_blocks.append({
+                            "type": "table_cell",
+                            "text": cell_text if cell_text else "",
+                            "table_row": cell_data["row_idx"],
+                            "table_col": cell_data["col_idx"],
+                            "docx_index": len(content_blocks),
+                            "table_context": f"Row {cell_data['row_idx']}, Col {cell_data['col_idx']}",
+                            "is_empty": not cell_text
+                        })
 
                     # Only add table as a block if it has content (for backward compatibility)
                     if table_has_content:
-                        # Create a summary block for the entire table
-                        all_cells = []
-                        for row in table.rows:
-                            row_cells = []
-                            for cell in row.cells:
-                                cell_text = ""
-                                for para in cell.paragraphs:
-                                    for t in para._p.findall(f".//{self.w_ns}t"):
-                                        if t.text:
-                                            cell_text += t.text
-                                row_cells.append(cell_text.strip())
-                            all_cells.append(row_cells)
-
-                        # Format table as readable text for summary
-                        table_text = "\n".join([" | ".join(row) for row in all_cells if any(cell.strip() for cell in row)])
                         content_blocks.append({
                             "type": "table_summary",
                             "text": table_text,
@@ -1493,7 +1474,9 @@ JSON:"""
                 if c_tag == 't' and child.text:
                     text_parts.append(child.text)
                 elif c_tag == 'tab':
-                    text_parts.append("                              ")
+                    # FIX: Use 4 spaces instead of 30 to reduce "extra characters" impression
+                    # and better match standard tab width
+                    text_parts.append("    ")
                 elif c_tag == 'br':
                     text_parts.append("<br>")
                 # Note: footnoteReference and endnoteReference are handled above
@@ -1514,7 +1497,10 @@ JSON:"""
                     return f'<span class="mail-merge-placeholder" data-field="{field_name}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
 
                 text_with_highlights = re.sub(r'«([^»]+)»', highlight_placeholder, text)
-                if style_text and "mail-merge-placeholder" not in text_with_highlights:
+                
+                # CRITICAL FIX: Always wrap the entire run content in the run style if style exists.
+                # This ensures text surrounding a placeholder doesn't lose its formatting.
+                if style_text:
                     result_parts.append(f'<span style="{style_text}">{text_with_highlights}</span>')
                 else:
                     result_parts.append(text_with_highlights)

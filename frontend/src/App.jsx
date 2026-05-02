@@ -707,49 +707,10 @@ function App() {
     [templateId]
   )
 
-  // Attach click handlers to placeholders for selection / rename
+  // Attach click handlers to placeholders and table cells after preview refresh.
   useEffect(() => {
     const editor = document.getElementById('document-editor')
     if (!editor || !editorHtml) return
-
-    // Remove old handlers first
-    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
-      span.onclick = null
-      span.ondblclick = null
-    })
-
-    // Single click selects the placeholder for keyboard lock toggle.
-    // Double click keeps rename available without conflicting with the shortcut.
-    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
-      const fieldName = span.getAttribute('data-field')
-      span.onclick = (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-
-        // If in add mode, don't select/rename
-        if (isAddMode) {
-          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
-          return
-        }
-
-        setSelectedField(fieldName)
-      }
-
-      span.ondblclick = (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-
-        if (isAddMode) {
-          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
-          return
-        }
-
-        const newName = prompt('Đổi tên placeholder:', fieldName)
-        if (newName?.trim() && newName.trim() !== fieldName) {
-          renameField(span, fieldName, newName.trim())
-        }
-      }
-    })
 
     // Add click handlers for table cells
     // In NORMAL mode: enable table editing toolbar (cell-level selection)
@@ -773,6 +734,11 @@ function App() {
 
         // Use capture phase to override paragraph handlers
         element.addEventListener('click', (e) => {
+          const placeholderTarget = e.target?.closest?.('.mail-merge-placeholder')
+          if (placeholderTarget) {
+            return
+          }
+
           console.log(`[Table Debug] Cell click event captured (normal mode)`)
 
           // Check if click is directly on cell or its children
@@ -817,6 +783,49 @@ function App() {
     } else {
       console.log(`[Table Debug] Add mode - cell-level handlers DISABLED, using cell-paragraph handlers with offset`)
     }
+
+    // Placeholder handlers must be attached after table-cell cloning above,
+    // otherwise placeholders inside table cells lose their listeners.
+    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
+      span.onclick = null
+      span.ondblclick = null
+    })
+
+    // Single click selects the placeholder.
+    // Double click keeps rename available without conflicting with the shortcut.
+    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
+      const fieldName = span.getAttribute('data-field')
+      span.onclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+
+        if (isAddMode) {
+          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
+          setTimeout(() => setError(null), 2000)
+          return
+        }
+
+        setSelectedField(fieldName)
+        setError(`Đã chọn «${fieldName}». Double click để đổi tên, Ctrl+Shift+L để khóa.`)
+        setTimeout(() => setError(null), 1500)
+      }
+
+      span.ondblclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+
+        if (isAddMode) {
+          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
+          setTimeout(() => setError(null), 2000)
+          return
+        }
+
+        const newName = prompt('Đổi tên placeholder:', fieldName)
+        if (newName?.trim() && newName.trim() !== fieldName) {
+          renameField(span, fieldName, newName.trim())
+        }
+      }
+    })
 
     // Add click handlers for block selection in add mode
     if (isAddMode) {
@@ -2792,6 +2801,7 @@ function App() {
           cursor: pointer;
           display: inline-block;
           margin: 0 2px;
+          text-indent: 0;
           transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
         

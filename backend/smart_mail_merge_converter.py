@@ -22,7 +22,6 @@ from typing import List, Dict, Optional
 # - Pattern uses lookahead to ensure at least 2 dots/underscores total (including those separated by whitespace)
 # - Updated: (?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._] to match space/newline-separated dots with minimum count
 PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._]|[□■]+)')
-TERMINAL_TAB_PLACEHOLDER_PATTERN = re.compile(r'\t+$')
 
 
 class SmartMailMergeConverter:
@@ -144,34 +143,81 @@ class SmartMailMergeConverter:
                 special_elements.append(copy.deepcopy(elem))
         return special_elements
 
-    def _paragraph_has_placeholder_tab(self, paragraph, full_text):
-        """Return True when a trailing tab behaves like a fill-in placeholder.
+    def _find_placeholder_tab_spans(self, paragraph, full_text):
+        """Locate placeholder tabs backed by tab stops with special leaders.
 
-        Word often renders dotted fill areas via paragraph tab stops (`w:pPr/w:tabs`)
-        plus a terminal `w:tab` run, so there may be no literal dots in the XML.
+        Only tabs whose corresponding paragraph tab stop uses a visible leader
+        are treated as placeholders. Plain alignment tabs are ignored.
         """
-        if not full_text or not TERMINAL_TAB_PLACEHOLDER_PATTERN.search(full_text):
-            return False
-
-        visible_prefix = full_text.rstrip("\t").rstrip()
-        if not visible_prefix:
-            return False
-
-        has_tab_run = any(run.element.find(f"{self.w_ns}tab") is not None for run in paragraph.runs)
-        if not has_tab_run:
-            return False
+        if not full_text or "\t" not in full_text:
+            return []
 
         p_pr = paragraph._p.find(f"{self.w_ns}pPr")
         tabs = p_pr.find(f"{self.w_ns}tabs") if p_pr is not None else None
         if tabs is None:
-            return visible_prefix.endswith(":")
+            return []
 
-        for tab in tabs.findall(f"{self.w_ns}tab"):
-            leader = tab.get(qn("w:leader"))
-            if leader in {"dot", "middleDot", "heavy", "underscore"}:
-                return True
+        placeholder_leaders = {"dot", "middleDot", "heavy", "underscore"}
+        tab_defs = tabs.findall(f"{self.w_ns}tab")
+        if not any(tab.get(qn("w:leader")) in placeholder_leaders for tab in tab_defs):
+            return []
 
-        return visible_prefix.endswith(":")
+        spans = []
+        tab_index = 0
+        current_span = None
+
+        for pos, char in enumerate(full_text):
+            if char != "\t":
+                if current_span is not None:
+                    spans.append(current_span)
+                    current_span = None
+                continue
+
+            leader = tab_defs[tab_index].get(qn("w:leader")) if tab_index < len(tab_defs) else None
+            tab_index += 1
+
+            if leader not in placeholder_leaders:
+                if current_span is not None:
+                    spans.append(current_span)
+                    current_span = None
+                continue
+
+            visible_prefix = full_text[:pos].rstrip()
+            visible_suffix = full_text[pos + 1:].lstrip()
+            if not visible_prefix and not visible_suffix:
+                if current_span is not None:
+                    spans.append(current_span)
+                    current_span = None
+                continue
+
+            if current_span is None:
+                current_span = [pos, pos + 1]
+            elif current_span[1] == pos:
+                current_span[1] = pos + 1
+            else:
+                spans.append(current_span)
+                current_span = [pos, pos + 1]
+
+        if current_span is not None:
+            spans.append(current_span)
+
+        return [(start, end) for start, end in spans]
+
+    def _has_placeholder(self, paragraph, full_text):
+        """Return True when a paragraph contains a detectable placeholder."""
+        return bool(PLACEHOLDER_PATTERN.search(full_text)) or bool(
+            self._find_placeholder_tab_spans(paragraph, full_text)
+        )
+
+    def _strip_placeholder_markers(self, paragraph, text):
+        """Remove placeholder markers while preserving surrounding content."""
+        if not text:
+            return text
+
+        cleaned = PLACEHOLDER_PATTERN.sub(" ", text)
+        for start, end in reversed(self._find_placeholder_tab_spans(paragraph, text)):
+            cleaned = cleaned[:start] + " " + cleaned[end:]
+        return cleaned
 
     def _process_paragraph(self, paragraph):
         """Xử lý paragraph: inject Mail Merge field với định dạng chính xác
@@ -199,8 +245,8 @@ class SmartMailMergeConverter:
                 current_pos += text_len
 
         has_pattern_placeholder = bool(pattern.search(full_text))
-        has_terminal_tab_placeholder = self._paragraph_has_placeholder_tab(paragraph, full_text)
-        if not has_pattern_placeholder and not has_terminal_tab_placeholder:
+        placeholder_tab_spans = self._find_placeholder_tab_spans(paragraph, full_text)
+        if not has_pattern_placeholder and not placeholder_tab_spans:
             return
 
         # Helper: find which run a position belongs to
@@ -251,27 +297,33 @@ class SmartMailMergeConverter:
         if last_idx < len(full_text):
             segments.append(('text', full_text[last_idx:], last_idx))
 
-        if has_terminal_tab_placeholder:
-            tab_match = TERMINAL_TAB_PLACEHOLDER_PATTERN.search(full_text)
-            if tab_match is not None:
-                tab_start, tab_end = tab_match.span()
-                if not any(
-                    kind == 'field' and offset <= tab_start < offset + len(content)
-                    for kind, content, offset in segments
-                ):
-                    if segments and segments[-1][0] == 'text' and segments[-1][2] <= tab_start:
-                        text_content, text_offset = segments[-1][1], segments[-1][2]
-                        leading_text = text_content[:tab_start - text_offset]
-                        trailing_text = text_content[tab_end - text_offset:]
-                        segments.pop()
-                        if leading_text:
-                            segments.append(('text', leading_text, text_offset))
-                        segments.append(('field', full_text[tab_start:tab_end], tab_start))
-                        if trailing_text:
-                            segments.append(('text', trailing_text, tab_end))
-                    else:
-                        segments.append(('field', full_text[tab_start:tab_end], tab_start))
-                    segments.sort(key=lambda item: item[2])
+        for tab_start, tab_end in placeholder_tab_spans:
+            if any(
+                kind == 'field' and offset <= tab_start < offset + len(content)
+                for kind, content, offset in segments
+            ):
+                continue
+
+            updated_segments = []
+            inserted = False
+            for kind, content, offset in segments:
+                segment_end = offset + len(content)
+                if kind != 'text' or tab_end <= offset or tab_start >= segment_end:
+                    updated_segments.append((kind, content, offset))
+                    continue
+
+                leading_text = content[:tab_start - offset]
+                trailing_text = content[tab_end - offset:]
+                if leading_text:
+                    updated_segments.append(('text', leading_text, offset))
+                updated_segments.append(('field', full_text[tab_start:tab_end], tab_start))
+                if trailing_text:
+                    updated_segments.append(('text', trailing_text, tab_end))
+                inserted = True
+
+            if not inserted:
+                updated_segments.append(('field', full_text[tab_start:tab_end], tab_start))
+            segments = sorted(updated_segments, key=lambda item: item[2])
 
         # Rebuild XML - text segments are split by original run boundaries
         for r in p_element.findall(f"{self.w_ns}r"): p_element.remove(r)
@@ -299,7 +351,7 @@ class SmartMailMergeConverter:
             else:
                 # For fields, use rPr from the first character of the matched content
                 original_rPr, original_special = get_run_info_at_position(offset)
-                text_no_dots = pattern.sub('', paragraph.text).strip()
+                text_no_dots = self._strip_placeholder_markers(paragraph, paragraph.text).strip()
                 ctx = paragraph.text if len(text_no_dots) > 5 else self.last_meaningful_text
                 label, sw = self._generate_label(full_text[:offset], ctx, content)
 
@@ -520,9 +572,9 @@ class SmartMailMergeConverter:
             text = para.text
             text_strip = text.strip()
             # Check if paragraph has placeholders
-            has_placeholders = bool(PLACEHOLDER_PATTERN.search(text))
+            has_placeholders = self._has_placeholder(para, text)
             # Check if paragraph only contains placeholders (no meaningful text)
-            cleaned = PLACEHOLDER_PATTERN.sub(' ', text_strip).strip()
+            cleaned = self._strip_placeholder_markers(para, text_strip).strip()
             is_placeholder_only = has_placeholders and (not cleaned or not any(c.isalpha() or c.isdigit() for c in cleaned))
             paragraphs_info.append({
                 'para': para,
@@ -602,7 +654,7 @@ class SmartMailMergeConverter:
             self._process_paragraph(info['para'])
 
             # Update context
-            cleaned = PLACEHOLDER_PATTERN.sub(' ', info['text_strip']).strip()
+            cleaned = self._strip_placeholder_markers(info['para'], info['text_strip']).strip()
             if cleaned and any(c.isalpha() for c in cleaned):
                 self.last_meaningful_text = cleaned
 
@@ -616,7 +668,7 @@ class SmartMailMergeConverter:
                     for para in cell.paragraphs:
                         text_strip = para.text.strip()
                         self._process_paragraph(para)
-                        cleaned = PLACEHOLDER_PATTERN.sub(' ', text_strip).strip()
+                        cleaned = self._strip_placeholder_markers(para, text_strip).strip()
                         if cleaned and any(c.isalpha() for c in cleaned):
                             self.last_meaningful_text = cleaned
 

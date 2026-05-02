@@ -107,19 +107,45 @@ class DocxFullEditor:
             return True
 
         if mode == "set":
-            t_elements[0].text = text
+            # Clear all and set first
+            for i, t_elem in enumerate(t_elements):
+                if i == 0:
+                    t_elem.text = text
+                    if text and (text.startswith(' ') or text.endswith(' ')):
+                        t_elem.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                else:
+                    # Remove extra t elements
+                    parent = t_elem.getparent()
+                    if parent is not None:
+                        parent.remove(t_elem)
             return True
 
         if mode == "replace" and start_idx is not None and end_idx is not None:
-            t_elem = t_elements[0]
-            original_text = t_elem.text if t_elem.text else ""
+            # CRITICAL FIX: Handle multiple w:t elements in a single run
+            # Extract FULL text from all t elements to ensure offset calculation is correct
+            full_original_text = "".join(t.text for t in t_elements if t.text)
+            
             seg_start = seg['start_pos']
             # Calculate relative positions within segment
             pos_start_in_seg = max(0, start_idx - seg_start)
             pos_end_in_seg = end_idx - seg_start
 
-            # Replace text using safe slicing
-            t_elem.text = original_text[:pos_start_in_seg] + text + original_text[pos_end_in_seg:]
+            # Replace text using safe slicing on the FULL text
+            new_full_text = full_original_text[:pos_start_in_seg] + text + full_original_text[pos_end_in_seg:]
+            
+            # Update first t element and remove the rest
+            for i, t_elem in enumerate(t_elements):
+                if i == 0:
+                    t_elem.text = new_full_text
+                    # Always check for preserve space if it contains leading/trailing spaces
+                    if new_full_text and (new_full_text.startswith(' ') or new_full_text.endswith(' ')):
+                        t_elem.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                else:
+                    # Remove extra t elements that were part of the same logical segment
+                    parent = t_elem.getparent()
+                    if parent is not None:
+                        parent.remove(t_elem)
+            
             if success_msg:
                 print(f"[REPLACE] ✓ {success_msg}")
             return True
@@ -493,14 +519,11 @@ class DocxFullEditor:
                 yield para
             elif isinstance(child, CT_Tbl):
                 table = Table(child, self.doc)
-                # Process ALL paragraphs in ALL cells
-                for row_idx, row in enumerate(table.rows):
-                    for cell_idx, cell in enumerate(row.cells):
-                        # Yield ALL paragraphs from each cell (not just the first one)
-                        if cell.paragraphs:
-                            for para in cell.paragraphs:
-                                yield para
-                        # else: cell has no paragraphs (shouldn't happen with properly formatted cells)
+                # Process visible cells only so merged cells are not duplicated.
+                for _, _, cell, _, _ in self._iter_visible_table_cells(table):
+                    if cell.paragraphs:
+                        for para in cell.paragraphs:
+                            yield para
 
     def _collect_paragraph_text_segments(self, paragraph: Paragraph) -> list:
         """
@@ -515,7 +538,20 @@ class DocxFullEditor:
             tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
 
             if tag_name == 'r':
-                run_text = "".join(t.text for t in child.findall(f"{self.w_ns}t") if t.text)
+                # CRITICAL FIX: Extract ALL visible content from run including tabs and breaks
+                # to ensure offsets match what users see and allow deletion of these elements.
+                run_content_parts = []
+                for run_child in child:
+                    c_tag = run_child.tag.split('}')[1] if '}' in run_child.tag else run_child.tag
+                    if c_tag == 't' and run_child.text:
+                        run_content_parts.append(run_child.text)
+                    elif c_tag == 'tab':
+                        run_content_parts.append('\t')
+                    elif c_tag == 'br':
+                        run_content_parts.append('\n')
+                
+                run_text = "".join(run_content_parts)
+                
                 if run_text:
                     text_segments.append({
                         'text': run_text,
@@ -2621,14 +2657,26 @@ class DocxFullEditor:
 
         return True
 
+    def _get_all_tables_in_doc_order(self) -> List[Table]:
+        """
+        Get ALL tables in document order (matching _generate_html_preview logic).
+        Includes nested tables by using recursive iteration.
+        """
+        tables = []
+        for child in self.doc.element.body.iter():
+            if isinstance(child, CT_Tbl):
+                tables.append(Table(child, self.doc))
+        return tables
+
     # ===== TABLE EDITING =====
 
     def delete_table_row(self, table_index: int, row_index: int):
         """Xóa row khỏi table"""
-        if table_index >= len(self.doc.tables):
+        all_tables = self._get_all_tables_in_doc_order()
+        if table_index >= len(all_tables):
             return False
 
-        table = self.doc.tables[table_index]
+        table = all_tables[table_index]
         if row_index >= len(table.rows) or row_index < 0:
             return False
 
@@ -2644,10 +2692,11 @@ class DocxFullEditor:
 
     def insert_table_row(self, table_index: int, row_index: int):
         """Chèn row mới vào vị trí cụ thể trong table"""
-        if table_index >= len(self.doc.tables):
+        all_tables = self._get_all_tables_in_doc_order()
+        if table_index >= len(all_tables):
             return False
 
-        table = self.doc.tables[table_index]
+        table = all_tables[table_index]
         if row_index < 0 or row_index > len(table.rows):
             return False
 
@@ -2664,10 +2713,11 @@ class DocxFullEditor:
 
     def delete_table_column(self, table_index: int, col_index: int):
         """Xóa column khỏi table"""
-        if table_index >= len(self.doc.tables):
+        all_tables = self._get_all_tables_in_doc_order()
+        if table_index >= len(all_tables):
             return False
 
-        table = self.doc.tables[table_index]
+        table = all_tables[table_index]
         if col_index < 0:
             return False
 
@@ -2699,10 +2749,11 @@ class DocxFullEditor:
 
     def insert_table_column(self, table_index: int, col_index: int):
         """Chèn column mới vào vị trí cụ thể trong table"""
-        if table_index >= len(self.doc.tables):
+        all_tables = self._get_all_tables_in_doc_order()
+        if table_index >= len(all_tables):
             return False
 
-        table = self.doc.tables[table_index]
+        table = all_tables[table_index]
         if col_index < 0:
             return False
 
@@ -2710,90 +2761,61 @@ class DocxFullEditor:
         if len(table.rows) > 0 and col_index > len(table.rows[0].cells):
             return False
 
-        # Python-docx không hỗ trợ trực tiếp add column
-        # Cách giải quyết: tạo table mới với cấu trúc cập nhật
-
-        # Lưu số columns cũ
-        old_col_count = len(table.columns)
-        new_col_count = old_col_count + 1
-
         # Thêm cell vào mỗi row
         for row in table.rows:
             # Tạo tc element (table cell)
             tc = OxmlElement('w:tc')
-
-            # Tạo tcPr (table cell properties)
             tcPr = OxmlElement('w:tcPr')
-
-            # Tạo tcW (table cell width) - auto width
-            tcW = OxmlElement('w:tcW')
-            tcW.set(qn('w:type'), 'auto')
-            tcPr.append(tcW)
-
-            # Tạo vAlign (vertical alignment) - center để text nằm giữa ô
-            vAlign = OxmlElement('w:vAlign')
-            vAlign.set(qn('w:val'), 'center')
-            tcPr.append(vAlign)
-
             tc.append(tcPr)
-
-            # Tạo multiple paragraphs để user có thể click vào từng dòng riêng lẻ
-            # Tương tự như ô gốc có 6 paragraphs (1 text + 4 empty + 1 text)
-            for para_idx in range(6):
-                # Tạo p element (paragraph)
-                p = OxmlElement('w:p')
-                p.set(qn('w:rsidR'), '00D9489C')
-                p.set(qn('w:rsidRDefault'), '00D9489C')
-
-                # Tạo pPr (paragraph properties)
-                pPr = OxmlElement('w:pPr')
-                p.append(pPr)
-
-                # Chỉ paragraph đầu tiên có Run/Text để có thể nhập liệu
-                # Các paragraph khác để trống để user có thể click vào từng dòng
-                if para_idx == 0:
-                    # CRITICAL FIX: Tạo Run và Text node để ô có thể nhận nội dung
-                    # Không có Run/Text → ô trống và không thể edit
-                    r = OxmlElement('w:r')
-                    t = OxmlElement('w:t')
-                    t.set(qn('xml:space'), 'preserve')
-                    t.text = ""  # Empty text initially, but can be filled later
-                    r.append(t)
-                    p.append(r)
-
-                tc.append(p)
-
-            # Chèn cell vào vị trí cụ thể
-            if col_index >= len(row.cells):
-                # Thêm vào cuối row
-                row._element.append(tc)
+            
+            # Phải có ít nhất 1 paragraph trong cell
+            p = OxmlElement('w:p')
+            tc.append(p)
+            
+            # Chèn vào vị trí mong muốn
+            if col_index < len(row.cells):
+                target_cell_element = row.cells[col_index]._element
+                target_cell_element.addprevious(tc)
             else:
-                # Chèn trước cell tại col_index
-                target_cell = row.cells[col_index]._element
-                target_cell.addprevious(tc)
+                row._element.append(tc)
 
-        # Update table grid để include column mới
+        # Update table grid
         tbl = table._element
         tblGrid = tbl.find(qn('w:tblGrid'))
-
         if tblGrid is not None:
-            # Tạo gridCol mới với auto width
-            gridCol = OxmlElement('w:gridCol')
-            gridCol.set(qn('w:w'), '2310')  # Default width
-
-            # Chèn gridCol vào vị trí col_index
-            if col_index >= len(tblGrid):
-                tblGrid.append(gridCol)
+            new_grid_col = OxmlElement('w:gridCol')
+            gridCols = tblGrid.findall(qn('w:gridCol'))
+            if col_index < len(gridCols):
+                gridCols[col_index].addprevious(new_grid_col)
             else:
-                gridCols = tblGrid.findall(qn('w:gridCol'))
-                if col_index < len(gridCols):
-                    gridCols[col_index].addprevious(gridCol)
-                else:
-                    tblGrid.append(gridCol)
+                tblGrid.append(new_grid_col)
 
         return True
 
-    # ===== CELL FORMATTING HELPERS =====
+    def format_table_cell(self, table_index: int, row_index: int, col_index: int, format_options: dict):
+        """Định dạng cell (màu nền, border...)"""
+        all_tables = self._get_all_tables_in_doc_order()
+        if table_index >= len(all_tables):
+            return False
+
+        table = all_tables[table_index]
+        if row_index >= len(table.rows) or col_index >= len(table.rows[row_index].cells):
+            return False
+
+        cell = table.rows[row_index].cells[col_index]
+        tcPr = cell._element.get_or_add_tcPr()
+
+        # Màu nền
+        if 'background_color' in format_options:
+            color = format_options['background_color'].replace('#', '')
+            shd = tcPr.find(qn('w:shd'))
+            if shd is None:
+                shd = OxmlElement('w:shd')
+                tcPr.append(shd)
+            shd.set(qn('w:fill'), color)
+            shd.set(qn('w:val'), 'clear')
+
+        return True
 
     def _validate_and_get_cell(self, table_index: int, row_index: int, col_index: int):
         """Validate indices and return cell. Returns None if invalid."""
