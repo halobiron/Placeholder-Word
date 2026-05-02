@@ -112,6 +112,14 @@ def parse_json_list(raw_value: str | None) -> list[str]:
     return [str(item) for item in parsed if item is not None]
 
 
+def empty_gemini_usage() -> dict:
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
 # Setup paths
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -219,7 +227,9 @@ async def convert_to_template(
             "field_count": result["field_count"],
             "html_preview": result["html_preview"],
             "download_url": f"/download/{result['template_id']}",
-            "method": result.get("method", "smart_converter")
+            "method": result.get("method", "smart_converter"),
+            "gemini_usage": result.get("gemini_usage", empty_gemini_usage()),
+            "gemini_usage_steps": result.get("gemini_usage_steps", [])
         }
 
         return JSONResponse(content=response_data)
@@ -252,6 +262,7 @@ async def merge_template(
         JSON with result_id and download_url
     """
     template_path = validate_template_path(template_id)
+    gemini_usage = empty_gemini_usage()
 
     executor = MergeExecutor()
     template_field_metadata = executor.get_template_field_metadata(str(template_path))
@@ -292,6 +303,7 @@ async def merge_template(
         )
         logger.debug(f"Extracted data: {data}")
         logger.debug("=== END MERGE DEBUG ===")
+        gemini_usage = gemini_client.get_usage_summary()
     else:
         raise HTTPException(
             status_code=400,
@@ -309,7 +321,8 @@ async def merge_template(
     return JSONResponse(content={
         "result_id": result_id,
         "download_url": f"/download/{result_id}",
-        "fields_filled": sum(1 for value in data.values() if str(value).strip())
+        "fields_filled": sum(1 for value in data.values() if str(value).strip()),
+        "gemini_usage": gemini_usage if context else empty_gemini_usage()
     })
 
 
@@ -421,10 +434,12 @@ async def suggest_placeholders(template_id: str = Form(...)):
     )
 
     suggestions = analysis.get("suggestions", [])
+    gemini_usage = gemini_client.get_usage_summary()
 
     return {
         "template_id": template_id,
-        "suggestions": suggestions
+        "suggestions": suggestions,
+        "gemini_usage": gemini_usage,
     }
 
 
@@ -460,7 +475,8 @@ async def apply_ai_suggestions(
         "total_suggestions": len(suggestions_list),
         "successful": 0,
         "failed": 0,
-        "applied_fields": []
+        "applied_fields": [],
+        "gemini_usage": empty_gemini_usage()
     }
 
     for suggestion in suggestions_list:

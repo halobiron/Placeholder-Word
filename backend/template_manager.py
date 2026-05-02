@@ -32,6 +32,22 @@ class MailMergeProcessor:
         self._gemini_api_key = gemini_api_key
         self.gemini_client = GeminiClient(gemini_api_key) if gemini_api_key else None
 
+    @staticmethod
+    def _empty_usage() -> dict:
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    @classmethod
+    def _merge_usage(cls, left: dict | None, right: dict | None) -> dict:
+        merged = cls._empty_usage()
+        for source in (left or {}, right or {}):
+            for key in merged:
+                merged[key] += int(source.get(key, 0) or 0)
+        return merged
+
     def _extract_xml_text(self, element) -> str:
         """Extract and normalize all text nodes from a Word XML element including tabs and breaks."""
         if element is None:
@@ -411,6 +427,9 @@ class MailMergeProcessor:
             template_id = output_path.stem
 
         try:
+            gemini_usage = self._empty_usage()
+            usage_steps = []
+
             # Step 1: Use SmartMailMergeConverter to create basic placeholders
             print("=== STEP 1: Creating basic placeholders ===")
             # Pass gemini_api_key to converter for intelligent table analysis
@@ -421,9 +440,15 @@ class MailMergeProcessor:
             converter = SmartMailMergeConverter(docx_path, gemini_api_key=gemini_key)
             fields = converter.convert(str(output_path), auto_fill_tables=auto_fill_tables)
 
+            converter_usage = converter.gemini_client.get_usage_summary() if converter.gemini_client else self._empty_usage()
+            if any(converter_usage.values()):
+                usage_steps.append({"step": "convert", **converter_usage})
+            gemini_usage = self._merge_usage(gemini_usage, converter_usage)
+
             # Step 2: Use Gemini to suggest better names (if API key provided)
             if self.gemini_client and fields:
                 try:
+                    self.gemini_client.reset_usage()
                     # Extract structured content with placeholders
                     structured_content = self.extract_structured_content(str(output_path))
 
@@ -445,6 +470,11 @@ class MailMergeProcessor:
                 except Exception as e:
                     print(f"Gemini rename failed, using basic names: {e}")
                     # Continue with basic names
+                finally:
+                    rename_usage = self.gemini_client.get_usage_summary()
+                    if any(rename_usage.values()):
+                        usage_steps.append({"step": "rename", **rename_usage})
+                    gemini_usage = self._merge_usage(gemini_usage, rename_usage)
 
             # Step 4: Generate HTML preview from converted template
             html_preview = self._generate_html_preview(str(output_path))
@@ -455,7 +485,9 @@ class MailMergeProcessor:
                 "field_count": len(fields),
                 "html_preview": html_preview,
                 "method": "smart_converter_with_gemini" if self.gemini_client else "smart_converter",
-                "note": "Full XML surgical injection with Vietnamese support" + (" + Gemini smart naming" if self.gemini_client else "")
+                "note": "Full XML surgical injection with Vietnamese support" + (" + Gemini smart naming" if self.gemini_client else ""),
+                "gemini_usage": gemini_usage,
+                "gemini_usage_steps": usage_steps,
             }
 
         except Exception as e:
@@ -720,6 +752,7 @@ Trả về JSON: {{"suggested_name": "<tên>", "reason": "<lý do>"}}
 JSON:"""
 
                 response = self.gemini_client.model.generate_content(prompt)
+                self.gemini_client._record_usage(response)
                 suggestion = self.gemini_client.parse_gemini_json_response(response.text)
                 suggested_name = suggestion.get("suggested_name", base_name)
 

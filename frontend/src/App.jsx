@@ -14,6 +14,11 @@ function App() {
   const [context, setContext] = useState('')
   const [resultId, setResultId] = useState(null)
   const [previewHtml, setPreviewHtml] = useState(null) // Preview of merged result
+  const [geminiUsage, setGeminiUsage] = useState({
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0
+  })
   const [merging, setMerging] = useState(false)
   const [error, setError] = useState(null)
   const [suggestions, setSuggestions] = useState([]) // AI suggestions for missing placeholders
@@ -104,6 +109,25 @@ function App() {
   const getNotificationText = (message) => {
     if (!message) return message
     return message.replace(/^[✅⚠️💡⏳ℹ️❌]\s*/, '')
+  }
+
+  const normalizeGeminiUsage = (usage) => ({
+    prompt_tokens: Number(usage?.prompt_tokens || 0),
+    completion_tokens: Number(usage?.completion_tokens || 0),
+    total_tokens: Number(usage?.total_tokens || 0)
+  })
+
+  const addGeminiUsage = (usage) => {
+    const normalized = normalizeGeminiUsage(usage)
+    if (!normalized.total_tokens && !normalized.prompt_tokens && !normalized.completion_tokens) {
+      return
+    }
+
+    setGeminiUsage((prev) => ({
+      prompt_tokens: prev.prompt_tokens + normalized.prompt_tokens,
+      completion_tokens: prev.completion_tokens + normalized.completion_tokens,
+      total_tokens: prev.total_tokens + normalized.total_tokens
+    }))
   }
 
   const getSuggestionKey = (suggestion) => {
@@ -1214,6 +1238,7 @@ function App() {
     setFields(data.fields)
     setLockedFields([])
     setSelectedField(null)
+    setGeminiUsage(normalizeGeminiUsage(data.geminiUsage))
     setStep('preview')
   }
 
@@ -1259,6 +1284,7 @@ function App() {
         lockedFields
       )
       setResultId(result.result_id)
+      addGeminiUsage(result.gemini_usage)
 
       // Fetch preview
       try {
@@ -1294,6 +1320,7 @@ function App() {
     try {
       const result = await suggestPlaceholders(templateId)
       setSuggestions(result.suggestions || [])
+      addGeminiUsage(result.gemini_usage)
     } catch (err) {
       setError(err.response?.data?.detail || 'AI phân tích thất bại. Kiểm tra GEMINI_API_KEY.')
     } finally {
@@ -1325,6 +1352,7 @@ function App() {
       // Update editor with result from applySuggestions (no extra API call needed)
       setEditorHtml(result.html_preview)
       setFields(result.updated_fields)
+      addGeminiUsage(result.gemini_usage)
 
       // Clear suggestions and edits after successful apply
       setSuggestions([])
@@ -1504,6 +1532,11 @@ function App() {
     setShowEditPopup(false)
     setSelectedTextForEdit(null)
     setCopiedFormat(null) // Clear copied format
+    setGeminiUsage({
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0
+    })
   }
 
   // Handle text selection for editing
@@ -2753,6 +2786,24 @@ function App() {
                 >
                   Xác nhận & Tải xuống
                 </button>
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Gemini total</p>
+                <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.total_tokens.toLocaleString()}</p>
+                <p className="text-xs text-slate-500 mt-1">Tổng token Gemini qua toàn bộ bước</p>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Prompt tokens</p>
+                <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.prompt_tokens.toLocaleString()}</p>
+                <p className="text-xs text-slate-500 mt-1">Token đầu vào cho Gemini</p>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Completion tokens</p>
+                <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.completion_tokens.toLocaleString()}</p>
+                <p className="text-xs text-slate-500 mt-1">Token đầu ra từ Gemini</p>
               </div>
             </div>
 

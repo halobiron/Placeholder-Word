@@ -4,7 +4,8 @@ Used for extracting data from context and analyzing document structure
 """
 import json
 import re
-import google.generativeai as genai
+from google import genai
+from typing import Any
 
 
 class GeminiClient:
@@ -19,8 +20,60 @@ class GeminiClient:
         if not bool(api_key and api_key != "your_gemini_api_key_here"):
             raise ValueError("GEMINI_API_KEY not configured. Please set it in .env file")
 
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('models/gemini-3.1-flash-lite-preview')
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = 'gemini-3.1-flash-lite-preview'
+        self._usage_total = self._empty_usage()
+        self.last_usage = self._empty_usage()
+
+    @staticmethod
+    def _empty_usage() -> dict[str, int]:
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    @staticmethod
+    def _usage_value(source: Any, *names: str) -> int:
+        for name in names:
+            val = source.get(name) if isinstance(source, dict) else getattr(source, name, None)
+            try:
+                if val is not None:
+                    return int(val)
+            except (TypeError, ValueError):
+                pass
+        return 0
+
+    def _record_usage(self, response: Any) -> dict:
+        if not response:
+            return self._empty_usage()
+
+        meta = getattr(response, "usage_metadata", None) or (response.get("usage_metadata") if isinstance(response, dict) else None)
+
+        usage = {
+            "prompt_tokens": self._usage_value(meta, "prompt_token_count", "prompt_tokens"),
+            "completion_tokens": self._usage_value(
+                meta, "candidates_token_count", "candidate_token_count", "output_token_count", "completion_tokens"
+            ),
+            "total_tokens": self._usage_value(meta, "total_token_count", "total_tokens"),
+        }
+
+        usage["total_tokens"] = usage["total_tokens"] or (usage["prompt_tokens"] + usage["completion_tokens"])
+        self.last_usage = usage
+
+        for key in self._usage_total:
+            self._usage_total[key] += usage.get(key, 0)
+
+        return usage
+
+    def get_usage_summary(self) -> dict:
+        """Return cumulative Gemini usage for this client instance."""
+        return dict(self._usage_total)
+
+    def reset_usage(self) -> None:
+        """Reset cumulative and last usage counters."""
+        self._usage_total = self._empty_usage()
+        self.last_usage = self._empty_usage()
 
     @staticmethod
     def _slugify(text):
@@ -181,7 +234,8 @@ Yêu cầu:
 JSON:"""
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            self._record_usage(response)
             data = self.parse_gemini_json_response(response.text)
 
             # Ensure all fields exist
@@ -335,7 +389,8 @@ Trả về JSON với format sau:
 Chỉ trả về JSON, không có text khác."""
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            self._record_usage(response)
             analysis = self.parse_gemini_json_response(response.text)
 
             # Normalize suggestions using the explicit block_index returned by Gemini.
@@ -478,7 +533,8 @@ QUAN TRỌNG - PHÂN TÍCH CONTEXT TRƯỚC/SAU ĐỂ PHÂN BIỆT LOẠI vs GI�
 JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
 
             try:
-                response = self.model.generate_content(prompt)
+                response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+                self._record_usage(response)
                 result = self.parse_gemini_json_response(response.text)
 
                 for item in result.get("renames", []):
@@ -610,7 +666,8 @@ NHỚ: Không bao giờ thêm số thứ tự vào tên. Hệ thống sẽ tự 
 Chỉ trả về JSON, không có text khác."""
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            self._record_usage(response)
             result = self.parse_gemini_json_response(response.text)
 
             # Validate row/col indices
