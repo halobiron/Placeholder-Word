@@ -486,12 +486,32 @@ Chỉ trả về JSON, không có text khác."""
         if not field_infos:
             return forced_renames
 
-        # Batch process để tránh token limit
-        batch_size = 15
+        # Optimize: Estimate token count and decide on batch strategy
+        # Rough estimate: 1 token ≈ 4 characters for Vietnamese text
+        # gemini-3.1-flash-lite-preview supports up to 1M tokens input
+        # Safe limit: 100K tokens per call to leave room for response
+        full_text = "\n".join(field_infos)
+        estimated_tokens = len(full_text) // 3  # Conservative estimate (1 token ≈ 3 chars)
+        SAFE_TOKEN_LIMIT = 100_000
+
         all_renames = dict(forced_renames)
 
-        for i in range(0, len(field_infos), batch_size):
-            batch = field_infos[i:i+batch_size]
+        # Decide batch strategy based on estimated token count
+        if estimated_tokens <= SAFE_TOKEN_LIMIT:
+            # Single API call for all fields - most efficient
+            batches = [field_infos]
+            print(f"=== Single batch: {len(field_infos)} fields, ~{estimated_tokens} tokens ===")
+        else:
+            # Split into 2 batches only (not many small batches)
+            mid_point = len(field_infos) // 2
+            batches = [
+                field_infos[:mid_point],
+                field_infos[mid_point:]
+            ]
+            print(f"=== Two batches: {len(field_infos)} fields, ~{estimated_tokens} tokens ===")
+
+        # Process batches (1 or 2 API calls total)
+        for batch_idx, batch in enumerate(batches, 1):
             batch_text = "\n".join(batch)
 
             prompt = f"""Đổi tên fields tiếng Việt không dấu, viết đầy đủ (snake_case):
@@ -545,7 +565,7 @@ JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
                         print(f"{old} → {new}")
 
             except Exception as e:
-                print(f"Gemini batch error: {e}")
+                print(f"Gemini batch {batch_idx}/{len(batches)} error: {e}")
                 continue
 
         print(f"=== Total renames: {len(all_renames)} ===")
