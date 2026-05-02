@@ -1,8 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
-import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, deleteMultipleParagraphs, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate, downloadFile } from './api'
+import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate, downloadFile } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result
@@ -15,6 +14,11 @@ function App() {
   const [context, setContext] = useState('')
   const [resultId, setResultId] = useState(null)
   const [previewHtml, setPreviewHtml] = useState(null) // Preview of merged result
+  const [geminiUsage, setGeminiUsage] = useState({
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0
+  })
   const [merging, setMerging] = useState(false)
   const [error, setError] = useState(null)
   const [suggestions, setSuggestions] = useState([]) // AI suggestions for missing placeholders
@@ -105,6 +109,25 @@ function App() {
   const getNotificationText = (message) => {
     if (!message) return message
     return message.replace(/^[✅⚠️💡⏳ℹ️❌]\s*/, '')
+  }
+
+  const normalizeGeminiUsage = (usage) => ({
+    prompt_tokens: Number(usage?.prompt_tokens || 0),
+    completion_tokens: Number(usage?.completion_tokens || 0),
+    total_tokens: Number(usage?.total_tokens || 0)
+  })
+
+  const addGeminiUsage = (usage) => {
+    const normalized = normalizeGeminiUsage(usage)
+    if (!normalized.total_tokens && !normalized.prompt_tokens && !normalized.completion_tokens) {
+      return
+    }
+
+    setGeminiUsage((prev) => ({
+      prompt_tokens: prev.prompt_tokens + normalized.prompt_tokens,
+      completion_tokens: prev.completion_tokens + normalized.completion_tokens,
+      total_tokens: prev.total_tokens + normalized.total_tokens
+    }))
   }
 
   const getSuggestionKey = (suggestion) => {
@@ -708,49 +731,10 @@ function App() {
     [templateId]
   )
 
-  // Attach click handlers to placeholders for selection / rename
+  // Attach click handlers to placeholders and table cells after preview refresh.
   useEffect(() => {
     const editor = document.getElementById('document-editor')
     if (!editor || !editorHtml) return
-
-    // Remove old handlers first
-    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
-      span.onclick = null
-      span.ondblclick = null
-    })
-
-    // Single click selects the placeholder for keyboard lock toggle.
-    // Double click keeps rename available without conflicting with the shortcut.
-    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
-      const fieldName = span.getAttribute('data-field')
-      span.onclick = (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-
-        // If in add mode, don't select/rename
-        if (isAddMode) {
-          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
-          return
-        }
-
-        setSelectedField(fieldName)
-      }
-
-      span.ondblclick = (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-
-        if (isAddMode) {
-          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
-          return
-        }
-
-        const newName = prompt('Đổi tên placeholder:', fieldName)
-        if (newName?.trim() && newName.trim() !== fieldName) {
-          renameField(fieldName, newName.trim())
-        }
-      }
-    })
 
     // Add click handlers for table cells
     // In NORMAL mode: enable table editing toolbar (cell-level selection)
@@ -774,6 +758,11 @@ function App() {
 
         // Use capture phase to override paragraph handlers
         element.addEventListener('click', (e) => {
+          const placeholderTarget = e.target?.closest?.('.mail-merge-placeholder')
+          if (placeholderTarget) {
+            return
+          }
+
           console.log(`[Table Debug] Cell click event captured (normal mode)`)
 
           // Check if click is directly on cell or its children
@@ -818,6 +807,49 @@ function App() {
     } else {
       console.log(`[Table Debug] Add mode - cell-level handlers DISABLED, using cell-paragraph handlers with offset`)
     }
+
+    // Placeholder handlers must be attached after table-cell cloning above,
+    // otherwise placeholders inside table cells lose their listeners.
+    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
+      span.onclick = null
+      span.ondblclick = null
+    })
+
+    // Single click selects the placeholder.
+    // Double click keeps rename available without conflicting with the shortcut.
+    editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
+      const fieldName = span.getAttribute('data-field')
+      span.onclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+
+        if (isAddMode) {
+          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
+          setTimeout(() => setError(null), 2000)
+          return
+        }
+
+        setSelectedField(fieldName)
+        setError(`Đã chọn «${fieldName}». Double click để đổi tên, Ctrl+Shift+L để khóa.`)
+        setTimeout(() => setError(null), 1500)
+      }
+
+      span.ondblclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+
+        if (isAddMode) {
+          setError('Thoát chế độ thêm placeholder trước khi đổi tên')
+          setTimeout(() => setError(null), 2000)
+          return
+        }
+
+        const newName = prompt('Đổi tên placeholder:', fieldName)
+        if (newName?.trim() && newName.trim() !== fieldName) {
+          renameField(span, fieldName, newName.trim())
+        }
+      }
+    })
 
     // Add click handlers for block selection in add mode
     if (isAddMode) {
@@ -1080,26 +1112,28 @@ function App() {
   }, [selectedField, lockedFields])
 
   // Rename placeholder using Batch Update API
-  const renameField = async (oldName, newName) => {
+  const renameField = async (targetSpan, oldName, newName) => {
     const editor = document.getElementById('document-editor')
-    if (!editor) return
+    if (!editor || !targetSpan) return
 
     // Store current state for rollback
     const oldHtml = editorHtml
     const oldFields = extractFields(editor.innerHTML)
     const oldLockedFields = [...lockedFields]
+    const placeholdersWithSameName = Array.from(
+      editor.querySelectorAll(`.mail-merge-placeholder[data-field="${oldName}"]`)
+    )
+    const occurrenceIndex = placeholdersWithSameName.indexOf(targetSpan)
+
+    if (occurrenceIndex === -1) {
+      setError('⚠️ Không xác định được placeholder cần đổi tên')
+      setTimeout(() => setError(null), 3000)
+      return
+    }
 
     // Update UI immediately
-    const placeholders = editor.querySelectorAll('.mail-merge-placeholder')
-
-    let updatedCount = 0
-    placeholders.forEach(span => {
-      if (span.getAttribute('data-field') === oldName) {
-        span.setAttribute('data-field', newName)
-        span.textContent = `«${newName}»`
-        updatedCount++
-      }
-    })
+    targetSpan.setAttribute('data-field', newName)
+    targetSpan.textContent = `«${newName}»`
 
     const newHtml = editor.innerHTML
     setEditorHtml(newHtml)
@@ -1110,7 +1144,8 @@ function App() {
         {
           type: 'rename_placeholder',
           old_name: oldName,
-          new_name: newName
+          new_name: newName,
+          occurrence_index: occurrenceIndex
         }
       ]
 
@@ -1118,12 +1153,12 @@ function App() {
 
       // Update state from backend response
       setFields(result.fields || extractFields(newHtml))
-      setSelectedField((prev) => (prev === oldName ? newName : prev))
-      setLockedFields((prev) =>
-        prev.includes(oldName)
-          ? prev.map((field) => (field === oldName ? newName : field))
+      setSelectedField(newName)
+      setLockedFields((prev) => (
+        prev.includes(oldName) && !prev.includes(newName)
+          ? [...prev, newName]
           : prev
-      )
+      ))
       setError(`✅ Đã đổi tên «${oldName}» → «${newName}»`)
       setTimeout(() => setError(null), 2000)
     } catch (err) {
@@ -1131,12 +1166,8 @@ function App() {
       setError('⚠️ Đổi tên thất bại: ' + (err.response?.data?.detail || err.message))
 
       // Rollback UI on failure
-      editor.querySelectorAll('.mail-merge-placeholder').forEach(span => {
-        if (span.getAttribute('data-field') === newName) {
-          span.setAttribute('data-field', oldName)
-          span.textContent = `«${oldName}»`
-        }
-      })
+      targetSpan.setAttribute('data-field', oldName)
+      targetSpan.textContent = `«${oldName}»`
       setEditorHtml(oldHtml)
       setFields(oldFields)
       setSelectedField((prev) => (prev === newName ? oldName : prev))
@@ -1207,6 +1238,7 @@ function App() {
     setFields(data.fields)
     setLockedFields([])
     setSelectedField(null)
+    setGeminiUsage(normalizeGeminiUsage(data.geminiUsage))
     setStep('preview')
   }
 
@@ -1252,6 +1284,7 @@ function App() {
         lockedFields
       )
       setResultId(result.result_id)
+      addGeminiUsage(result.gemini_usage)
 
       // Fetch preview
       try {
@@ -1287,6 +1320,7 @@ function App() {
     try {
       const result = await suggestPlaceholders(templateId)
       setSuggestions(result.suggestions || [])
+      addGeminiUsage(result.gemini_usage)
     } catch (err) {
       setError(err.response?.data?.detail || 'AI phân tích thất bại. Kiểm tra GEMINI_API_KEY.')
     } finally {
@@ -1318,6 +1352,7 @@ function App() {
       // Update editor with result from applySuggestions (no extra API call needed)
       setEditorHtml(result.html_preview)
       setFields(result.updated_fields)
+      addGeminiUsage(result.gemini_usage)
 
       // Clear suggestions and edits after successful apply
       setSuggestions([])
@@ -1497,6 +1532,11 @@ function App() {
     setShowEditPopup(false)
     setSelectedTextForEdit(null)
     setCopiedFormat(null) // Clear copied format
+    setGeminiUsage({
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0
+    })
   }
 
   // Handle text selection for editing
@@ -2088,7 +2128,7 @@ function App() {
 
       {/* HEADER */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-40">
-        <div className="max-w-[1600px] mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="max-w-[1800px] mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-indigo-200 shadow-lg">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" /><polyline points="14 2 14 8 20 8" /></svg>
@@ -2129,7 +2169,7 @@ function App() {
         </div>
       </header>
 
-      <main className="max-w-[1600px] mx-auto p-4 md:p-6">
+      <main className="max-w-[1800px] mx-auto p-4 md:p-6">
         {/* STEP: UPLOAD */}
         {step === 'upload' && (
           <div className="max-w-2xl mx-auto mt-12">
@@ -2456,7 +2496,7 @@ function App() {
                       }
                     }, 1000)
                   }}
-                  className="p-8 sm:p-16 min-h-[1056px] w-full max-w-[816px] mx-auto focus:outline-none bg-white shadow-2xl doc-editor-surface mb-8 mt-4"
+                  className="p-8 sm:p-16 min-h-[1056px] w-full max-w-[1500px] mx-auto focus:outline-none bg-white shadow-2xl doc-editor-surface mb-8 mt-4"
                   dangerouslySetInnerHTML={{ __html: editorHtml }}
                 />
               </div>
@@ -2695,7 +2735,7 @@ function App() {
                     fields.map((field) => (
                       <div key={field} className="group">
                         <div className="flex items-center justify-between mb-1.5 px-1">
-                          <label className="text-xs font-bold text-slate-500 font-mono truncate max-w-[150px]" title={field}>«{field}»</label>
+                          <label className="text-xs font-bold text-slate-500 font-mono break-all flex-1 pr-2" title={field}>«{field}»</label>
                           <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button onClick={() => toggleFieldLock(field)} className={`p-1 rounded hover:bg-slate-100 ${lockedFields.includes(field) ? 'text-amber-600' : 'text-slate-400'}`} title={lockedFields.includes(field) ? "Mở khóa cho Gemini" : "Khóa với Gemini"}>
                               {lockedFields.includes(field) ? '🔒' : '🔓'}
@@ -2728,7 +2768,7 @@ function App() {
 
         {/* STEP: PREVIEW RESULT */}
         {step === 'preview_result' && previewHtml && (
-          <div className="max-w-[1200px] mx-auto space-y-6">
+          <div className="max-w-[1600px] mx-auto space-y-6">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-2xl font-bold text-slate-800">Kiểm tra kết quả</h2>
@@ -2736,12 +2776,12 @@ function App() {
               </div>
               <div className="flex gap-2">
                 <button onClick={() => setStep('preview')} className="px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-lg text-sm font-bold hover:bg-slate-50 transition-colors">Quay lại sửa</button>
-                <button 
+                <button
                   onClick={() => {
                     downloadFile(resultId);
                     setError('✅ Đang tải xuống tài liệu...');
                     setTimeout(() => setError(null), 5000);
-                  }} 
+                  }}
                   className="px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-md shadow-indigo-100 transition-all"
                 >
                   Xác nhận & Tải xuống
@@ -2749,8 +2789,26 @@ function App() {
               </div>
             </div>
 
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Gemini total</p>
+                <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.total_tokens.toLocaleString()}</p>
+                <p className="text-xs text-slate-500 mt-1">Tổng token Gemini qua toàn bộ bước</p>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Prompt tokens</p>
+                <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.prompt_tokens.toLocaleString()}</p>
+                <p className="text-xs text-slate-500 mt-1">Token đầu vào cho Gemini</p>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Completion tokens</p>
+                <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.completion_tokens.toLocaleString()}</p>
+                <p className="text-xs text-slate-500 mt-1">Token đầu ra từ Gemini</p>
+              </div>
+            </div>
+
             <div className="bg-slate-100 border border-slate-200 rounded-2xl shadow-sm overflow-hidden p-4 sm:p-12 flex justify-center">
-              <div className="bg-white shadow-2xl p-8 sm:p-20 w-full max-w-[816px] min-h-[1056px]">
+              <div className="bg-white shadow-2xl p-8 sm:p-20 w-full max-w-[1200px] min-h-[1056px] overflow-x-auto">
                 <div
                   dangerouslySetInnerHTML={{ __html: previewHtml }}
                   className="prose prose-slate max-w-none"
@@ -2794,6 +2852,7 @@ function App() {
           cursor: pointer;
           display: inline-block;
           margin: 0 2px;
+          text-indent: 0;
           transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
         

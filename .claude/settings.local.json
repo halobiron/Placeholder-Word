@@ -76,7 +76,16 @@
       "mcp__plugin_everything-claude-code_sequential-thinking__sequentialthinking",
       "Bash(cp main.py main.py.bak)",
       "Bash(sed -i '858,975d' main.py)",
-      "mcp__code-review-graph__get_minimal_context_tool"
+      "mcp__code-review-graph__get_minimal_context_tool",
+      "mcp__plugin_everything-claude-code_context7__resolve-library-id",
+      "WebSearch",
+      "mcp__plugin_everything-claude-code_context7__query-docs",
+      "mcp__code-review-graph__get_architecture_overview_tool",
+      "mcp__code-review-graph__get_impact_radius_tool",
+      "mcp__mcp-document-reader__read_document",
+      "mcp__code-review-graph__list_communities_tool",
+      "mcp__code-review-graph__list_flows_tool",
+      "mcp__code-review-graph__build_or_update_graph_tool"
     ]
   },
   "enabledMcpjsonServers": [

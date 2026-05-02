@@ -10,16 +10,17 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
-from docx.table import Table
+from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 import copy
-from smart_mail_merge_converter import SmartMailMergeConverter
+from smart_mail_merge_converter import PLACEHOLDER_PATTERN, SmartMailMergeConverter
 from gemini_client import GeminiClient
 from docx_editor import DocxFullEditor
 
 
 class MailMergeProcessor:
     """Convert .docx to Mail Merge template using SmartMailMergeConverter"""
+    PAGE_BREAK_TOKEN = "__DOCX_PAGE_BREAK__"
 
     def __init__(self, gemini_api_key: str = None, timeout: int = 30):
         """Initialize processor
@@ -29,18 +30,67 @@ class MailMergeProcessor:
             timeout: Not used, kept for backward compatibility
         """
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        self._gemini_api_key = gemini_api_key
         self.gemini_client = GeminiClient(gemini_api_key) if gemini_api_key else None
 
+    @staticmethod
+    def _empty_usage() -> dict:
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    @classmethod
+    def _merge_usage(cls, left: dict | None, right: dict | None) -> dict:
+        merged = cls._empty_usage()
+        for source in (left or {}, right or {}):
+            for key in merged:
+                merged[key] += int(source.get(key, 0) or 0)
+        return merged
+
     def _extract_xml_text(self, element) -> str:
-        """Extract and normalize all text nodes from a Word XML element."""
+        """Extract and normalize all text nodes from a Word XML element including tabs and breaks."""
         if element is None:
             return ""
 
         text_parts = []
-        for t in element.findall(f".//{self.w_ns}t"):
-            if t.text:
-                text_parts.append(t.text)
+        # CRITICAL FIX: Iterate through children to preserve order of text, tabs, and breaks
+        for child in element.iter():
+            tag_name = child.tag.split('}')[1] if '}' in child.tag else child.tag
+            if tag_name == 't' and child.text:
+                text_parts.append(child.text)
+            elif tag_name == 'tab':
+                text_parts.append('\t')
+            elif tag_name == 'br':
+                text_parts.append('\n')
+        
         return "".join(text_parts).strip()
+
+    def _extract_table_cell_text(self, cell) -> str:
+        """Extract visible text from a table cell."""
+        return "".join(
+            self._extract_xml_text(para._p) for para in cell.paragraphs
+        ).strip()
+
+    def _build_visible_table_summary(self, table) -> tuple[str, bool]:
+        """Build summary text from visible cells only to keep merged tables stable."""
+        rows: dict[int, list[tuple[int, str]]] = {}
+        table_has_content = False
+
+        for cell_data in self._iter_visible_table_cells(table):
+            cell_text = self._extract_table_cell_text(cell_data["cell"])
+            if cell_text:
+                table_has_content = True
+            rows.setdefault(cell_data["row_idx"], []).append((cell_data["col_idx"], cell_text))
+
+        table_text = "\n".join(
+            " | ".join(text for _, text in sorted(row_cells, key=lambda item: item[0]))
+            for _, row_cells in sorted(rows.items())
+            if any(text.strip() for _, text in row_cells)
+        )
+
+        return table_text, table_has_content
 
     def _build_block_candidates(self, doc: Document) -> list:
         """Build a stable block list that matches structured extraction order."""
@@ -63,43 +113,25 @@ class MailMergeProcessor:
 
             elif isinstance(child, CT_Tbl):
                 table = Table(child, doc)
-                table_has_content = False
+                table_text, table_has_content = self._build_visible_table_summary(table)
 
-                for row_idx, row in enumerate(table.rows):
-                    for cell_idx, cell in enumerate(row.cells):
-                        cell_text = "".join(
-                            self._extract_xml_text(para._p) for para in cell.paragraphs
-                        ).strip()
+                for cell_data in self._iter_visible_table_cells(table):
+                    cell = cell_data["cell"]
+                    cell_text = self._extract_table_cell_text(cell)
 
-                        if cell_text:
-                            table_has_content = True
-
-                        candidates.append({
-                            "type": "table_cell",
-                            "index": current_index,
-                            "text": cell_text if cell_text else "[EMPTY CELL]",
-                            "table": table,
-                            "row": row_idx,
-                            "col": cell_idx,
-                            "cell": cell,
-                            "is_empty": not cell_text,
-                        })
-                        current_index += 1
+                    candidates.append({
+                        "type": "table_cell",
+                        "index": current_index,
+                        "text": cell_text if cell_text else "[EMPTY CELL]",
+                        "table": table,
+                        "row": cell_data["row_idx"],
+                        "col": cell_data["col_idx"],
+                        "cell": cell,
+                        "is_empty": not cell_text,
+                    })
+                    current_index += 1
 
                 if table_has_content:
-                    all_cells_text = []
-                    for row in table.rows:
-                        row_cells = []
-                        for cell in row.cells:
-                            cell_text = "".join(
-                                self._extract_xml_text(para._p) for para in cell.paragraphs
-                            ).strip()
-                            row_cells.append(cell_text)
-                        all_cells_text.append(row_cells)
-
-                    table_text = "\n".join(
-                        [" | ".join(row) for row in all_cells_text if any(cell.strip() for cell in row)]
-                    )
                     candidates.append({
                         "type": "table_summary",
                         "index": current_index,
@@ -208,12 +240,178 @@ class MailMergeProcessor:
         res = self._word_border_to_css(table_border)
         return "none" if res == "__NONE__" else res
 
-    def convert_to_mail_merge(self, docx_path: str, output_path: str = None) -> Dict:
+    def _calculate_rowspan(self, table, start_row_idx: int, col_idx: int) -> int:
+        """Calculate rowspan for a vertically merged cell.
+
+        Counts how many consecutive rows have vMerge="continue" at the same column
+        starting from the row after start_row_idx.
+
+        Args:
+            table: docx Table object
+            start_row_idx: Row index where vMerge="restart" is found
+            col_idx: Column index of the merged cell
+
+        Returns:
+            Number of rows spanned (minimum 1)
+        """
+        rowspan = 1
+        total_rows = len(table.rows)
+
+        for row_idx in range(start_row_idx + 1, total_rows):
+            if row_idx >= total_rows:
+                break
+            row = table.rows[row_idx]
+            cell, _, _ = self._find_row_cell_at_column(row, col_idx)
+            try:
+                if cell is not None:
+                    tcPr = cell._element.find(f"{self.w_ns}tcPr")
+                    if tcPr is not None:
+                        vmerge_elem = tcPr.find(f"{self.w_ns}vMerge")
+                        if vmerge_elem is not None:
+                            vmerge_val = vmerge_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "continue")
+                            if vmerge_val == "continue":
+                                rowspan += 1
+                            else:
+                                # Found "restart" or no vMerge, vertical merge ends
+                                break
+                        else:
+                            # No vMerge element, vertical merge ends
+                            break
+                    else:
+                        # No tcPr, vertical merge ends
+                        break
+                else:
+                    # Column index out of range
+                    break
+            except Exception as e:
+                print(f"[_calculate_rowspan] Error checking row {row_idx}: {e}")
+                break
+
+        return rowspan
+
+    def _iter_xml_row_cells(self, row):
+        """Yield actual XML cells in a row without python-docx merge expansion."""
+        return [_Cell(tc, row) for tc in row._tr.tc_lst]
+
+    def _get_cell_grid_span(self, cell) -> int:
+        tcPr = cell._element.find(f"{self.w_ns}tcPr")
+        if tcPr is None:
+            return 1
+
+        grid_span_elem = tcPr.find(f"{self.w_ns}gridSpan")
+        if grid_span_elem is None:
+            return 1
+
+        grid_span_val = grid_span_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
+        if not grid_span_val:
+            return 1
+
+        try:
+            return max(1, int(grid_span_val))
+        except (TypeError, ValueError):
+            return 1
+
+    def _find_row_cell_at_column(self, row, logical_col_idx: int):
+        """Resolve a logical column index to the backing XML cell in that row."""
+        current_col = 0
+        for cell in self._iter_xml_row_cells(row):
+            colspan = self._get_cell_grid_span(cell)
+            if current_col <= logical_col_idx < current_col + colspan:
+                return cell, current_col, colspan
+            current_col += colspan
+        return None, None, None
+
+    def _get_vertical_merge_value(self, cell):
+        tcPr = cell._element.find(f"{self.w_ns}tcPr")
+        if tcPr is None:
+            return None
+
+        vmerge_elem = tcPr.find(f"{self.w_ns}vMerge")
+        if vmerge_elem is None:
+            return None
+
+        return vmerge_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "continue")
+
+    def _iter_visible_table_cells(self, table):
+        """Yield visible table cells with logical column and merge metadata."""
+        for row_idx, row in enumerate(table.rows):
+            logical_col_idx = 0
+            for cell_idx, cell in enumerate(self._iter_xml_row_cells(row)):
+                colspan = self._get_cell_grid_span(cell)
+                vmerge_val = self._get_vertical_merge_value(cell)
+                if vmerge_val == "continue":
+                    logical_col_idx += colspan
+                    continue
+
+                rowspan = self._calculate_rowspan(table, row_idx, logical_col_idx) if vmerge_val == "restart" else 1
+                yield {
+                    "row_idx": row_idx,
+                    "row": row,
+                    "cell_idx": cell_idx,
+                    "cell": cell,
+                    "col_idx": logical_col_idx,
+                    "colspan": colspan,
+                    "rowspan": rowspan,
+                }
+                logical_col_idx += colspan
+
+    def _build_table_cell_style(
+        self,
+        cell,
+        row_idx: int,
+        cell_idx: int,
+        col_idx: int,
+        column_widths,
+        table_borders,
+        last_row_idx: int,
+        last_col_idx: int,
+    ) -> str:
+        cell_style = "padding: 5px; font-weight: normal; font-style: normal; text-decoration: none; text-align: left;"
+
+        if column_widths and col_idx < len(column_widths):
+            cell_style += f" width: {column_widths[col_idx]};"
+
+        try:
+            tcPr = cell._element.find(f"{self.w_ns}tcPr")
+            if tcPr is None:
+                return cell_style
+
+            shd = tcPr.find(f"{self.w_ns}shd")
+            if shd is not None:
+                fill = shd.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}fill")
+                if fill and fill != "auto":
+                    cell_style += f" background-color: #{fill};"
+
+            v_align = tcPr.find(f"{self.w_ns}vAlign")
+            if v_align is not None:
+                v_align_val = v_align.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "top")
+                css_v_align = {"top": "top", "center": "middle", "bottom": "bottom"}.get(v_align_val, "top")
+                cell_style += f" vertical-align: {css_v_align};"
+
+            for side in ["top", "bottom", "left", "right"]:
+                css_border = self._get_cell_border_css(
+                    tcPr,
+                    table_borders,
+                    side,
+                    row_idx,
+                    cell_idx,
+                    last_row_idx,
+                    last_col_idx,
+                )
+                if css_border:
+                    cell_style += f" border-{side}: {css_border};"
+        except Exception as e:
+            print(f"[_process_table_to_html] Error extracting cell formatting: {e}")
+
+        return cell_style
+
+    def convert_to_mail_merge(self, docx_path: str, output_path: str = None, auto_fill_tables: bool = True) -> Dict:
         """Convert .docx to Mail Merge template using SmartMailMergeConverter
 
         Args:
             docx_path: Path to input .docx file
             output_path: Path to save template (optional)
+            auto_fill_tables: Auto-fill placeholders in empty table cells (default: True)
 
         Returns:
             Dict with template_id, fields, and HTML preview
@@ -230,15 +428,28 @@ class MailMergeProcessor:
             template_id = output_path.stem
 
         try:
+            gemini_usage = self._empty_usage()
+            usage_steps = []
+
             # Step 1: Use SmartMailMergeConverter to create basic placeholders
             print("=== STEP 1: Creating basic placeholders ===")
-            converter = SmartMailMergeConverter(docx_path)
-            fields = converter.convert(str(output_path))
+            # Pass gemini_api_key to converter for intelligent table analysis
+            gemini_key = None
+            if hasattr(self, '_gemini_api_key'):
+                gemini_key = self._gemini_api_key
+
+            converter = SmartMailMergeConverter(docx_path, gemini_api_key=gemini_key)
+            fields = converter.convert(str(output_path), auto_fill_tables=auto_fill_tables)
+
+            converter_usage = converter.gemini_client.get_usage_summary() if converter.gemini_client else self._empty_usage()
+            if any(converter_usage.values()):
+                usage_steps.append({"step": "convert", **converter_usage})
+            gemini_usage = self._merge_usage(gemini_usage, converter_usage)
 
             # Step 2: Use Gemini to suggest better names (if API key provided)
             if self.gemini_client and fields:
-                print("\n=== STEP 2: Using Gemini to suggest better field names ===")
                 try:
+                    self.gemini_client.reset_usage()
                     # Extract structured content with placeholders
                     structured_content = self.extract_structured_content(str(output_path))
 
@@ -250,18 +461,21 @@ class MailMergeProcessor:
 
                     # Apply renames if any
                     if rename_map:
-                        print(f"\n=== STEP 3: Applying {len(rename_map)} renames ===")
                         success = self.rename_placeholders_in_docx(str(output_path), rename_map)
 
                         if success:
                             # Update field names
                             new_fields = [rename_map.get(f, f) for f in fields]
-                            print(f"Updated fields: {new_fields}")
                             fields = new_fields
 
                 except Exception as e:
                     print(f"Gemini rename failed, using basic names: {e}")
                     # Continue with basic names
+                finally:
+                    rename_usage = self.gemini_client.get_usage_summary()
+                    if any(rename_usage.values()):
+                        usage_steps.append({"step": "rename", **rename_usage})
+                    gemini_usage = self._merge_usage(gemini_usage, rename_usage)
 
             # Step 4: Generate HTML preview from converted template
             html_preview = self._generate_html_preview(str(output_path))
@@ -272,7 +486,9 @@ class MailMergeProcessor:
                 "field_count": len(fields),
                 "html_preview": html_preview,
                 "method": "smart_converter_with_gemini" if self.gemini_client else "smart_converter",
-                "note": "Full XML surgical injection with Vietnamese support" + (" + Gemini smart naming" if self.gemini_client else "")
+                "note": "Full XML surgical injection with Vietnamese support" + (" + Gemini smart naming" if self.gemini_client else ""),
+                "gemini_usage": gemini_usage,
+                "gemini_usage_steps": usage_steps,
             }
 
         except Exception as e:
@@ -292,15 +508,6 @@ class MailMergeProcessor:
             table_index = 0  # Track table index for table operations
 
             print("=== GENERATING HTML PREVIEW ===")
-            print(f"[DEBUG] Document has {len(doc.tables)} tables total")
-            print(f"[DEBUG] Document has {len(doc.part.rels)} relationships")
-
-            # Count images
-            image_count = 0
-            for rId, rel in doc.part.rels.items():
-                if 'image' in rel.target_ref:
-                    image_count += 1
-            print(f"[DEBUG] Document has {image_count} images")
 
             # Use body children directly to preserve document order
             # IMPORTANT: Use same logic as inject_placeholder_at_location for consistency
@@ -311,8 +518,6 @@ class MailMergeProcessor:
 
                     # Check if paragraph has images (drawing elements)
                     has_images = len(child.findall(f".//{self.w_ns}drawing")) > 0
-                    if has_images:
-                        print(f"[DEBUG] Paragraph #{block_index} has {len(child.findall(f'.//{self.w_ns}drawing'))} drawing(s)")
 
                     # Process ALL paragraphs (including empty ones) to preserve document structure
                     # Empty lines ARE selectable for adding placeholders
@@ -332,38 +537,29 @@ class MailMergeProcessor:
                     table = Table(child, doc)
                     current_table_index = table_index  # Store current table index
                     table_index += 1  # Increment for next table
-                    table_has_content = False
-
-                    print(f"[DEBUG] Processing TABLE #{current_table_index} with {len(table.rows)} rows, {len(table.columns)} columns")
 
                     # Track starting block index for this table (for first cell)
                     table_start_block_index = block_index
+                    _, table_has_content = self._build_visible_table_summary(table)
 
-                    # Process each cell as a separate block (matching extract_structured_content logic)
-                    # CRITICAL FIX: Increment block_index for ALL cells (including empty ones)
-                    # This matches _process_table_to_html and _build_block_index_map behavior
-                    for row_idx, row in enumerate(table.rows):
-                        for cell_idx, cell in enumerate(row.cells):
-                            # Extract cell text to check if it has content
-                            cell_text = "".join(
-                                self._extract_xml_text(para._p) for para in cell.paragraphs
-                            ).strip()
+                    # CRITICAL FIX: _process_table_to_html now returns (html, cells_count)
+                    # This ensures block_index consistency between HTML and document structure
+                    table_html, cells_count = self._process_table_to_html(table, table_start_block_index, current_table_index)
+                    html_parts.append(table_html)
 
-                            if cell_text:
-                                table_has_content = True
-                            # CRITICAL FIX: Increment block_index for ALL cells, not just non-empty ones
-                            # This ensures consistency with _process_table_to_html and _build_block_index_map
-                            block_index += 1
+                    # Increment block_index by the number of cells processed
+                    block_index += cells_count
 
-                    # CRITICAL FIX: Always render table, even if empty!
-                    # New tables added by user will be empty initially but should still be visible
-                    # Use the starting block index for the table (first cell's block_index)
-                    html = self._process_table_to_html(table, table_start_block_index, current_table_index)
-                    html_parts.append(html)
                     if table_has_content:
-                        # Keep block indices aligned with extract/inject, even though the summary is not rendered.
+                        # CRITICAL FIX: Add table_summary to HTML preview for block index consistency
+                        # This ensures HTML block indices match candidate block indices exactly
+                        # Table summary is not visible but has data-block-index for mapping
+                        table_summary_index = block_index
+                        table_summary_html = f'<div data-block-index="{table_summary_index}" data-type="table_summary" data-table-index="{current_table_index}" style="display: none;"></div>'
+                        html_parts.append(table_summary_html)
+
+                        # Keep block indices aligned with extract/inject for table_summary
                         block_index += 1
-                    print(f"[DEBUG] Added table HTML to preview, table {current_table_index}, has_content: {table_has_content}, HTML length: {len(html)}")
 
             print(f"=== TOTAL BLOCKS IN HTML PREVIEW: {block_index} ===")
 
@@ -392,7 +588,6 @@ class MailMergeProcessor:
             doc = Document(docx_path)
             content_blocks = []
 
-            print("=== EXTRACTING STRUCTURED CONTENT ===")
 
             # Use body children to preserve document order
             for child in doc.element.body.iterchildren():
@@ -409,55 +604,27 @@ class MailMergeProcessor:
                         "docx_index": len(content_blocks),  # CRITICAL FIX: Use block index, not table index
                         "is_empty": not text
                     })
-                    print(f"[{len(content_blocks)-1}] {text[:80] if text else '[EMPTY]'}...")
                 elif isinstance(child, CT_Tbl):
                     table = Table(child, doc)
-                    table_has_content = False
+                    table_text, table_has_content = self._build_visible_table_summary(table)
 
-                    # Process each cell as a separate content block to enable precise targeting
-                    # CRITICAL FIX: Process ALL cells (including empty ones) for consistency
-                    # This matches _generate_html_preview and _build_block_index_map behavior
-                    for row_idx, row in enumerate(table.rows):
-                        for cell_idx, cell in enumerate(row.cells):
-                            cell_text = "".join(
-                                self._extract_xml_text(para._p) for para in cell.paragraphs
-                            ).strip()
+                    # Process each visible cell as a separate content block to keep merged
+                    # tables aligned with HTML preview and editor block maps.
+                    for cell_data in self._iter_visible_table_cells(table):
+                        cell_text = self._extract_table_cell_text(cell_data["cell"])
 
-                            if cell_text:
-                                table_has_content = True
-
-                            content_blocks.append({
-                                "type": "table_cell",
-                                "text": cell_text if cell_text else "",
-                                "table_row": row_idx,
-                                "table_col": cell_idx,
-                                "docx_index": len(content_blocks),
-                                "table_context": f"Row {row_idx}, Col {cell_idx}",
-                                "is_empty": not cell_text
-                            })
-
-                            if cell_text:
-                                print(f"[{len(content_blocks)-1}] TABLE_CELL[{row_idx},{cell_idx}]: {cell_text[:60]}...")
-                            else:
-                                print(f"[{len(content_blocks)-1}] TABLE_CELL[{row_idx},{cell_idx}]: [EMPTY]")
+                        content_blocks.append({
+                            "type": "table_cell",
+                            "text": cell_text if cell_text else "",
+                            "table_row": cell_data["row_idx"],
+                            "table_col": cell_data["col_idx"],
+                            "docx_index": len(content_blocks),
+                            "table_context": f"Row {cell_data['row_idx']}, Col {cell_data['col_idx']}",
+                            "is_empty": not cell_text
+                        })
 
                     # Only add table as a block if it has content (for backward compatibility)
                     if table_has_content:
-                        # Create a summary block for the entire table
-                        all_cells = []
-                        for row in table.rows:
-                            row_cells = []
-                            for cell in row.cells:
-                                cell_text = ""
-                                for para in cell.paragraphs:
-                                    for t in para._p.findall(f".//{self.w_ns}t"):
-                                        if t.text:
-                                            cell_text += t.text
-                                row_cells.append(cell_text.strip())
-                            all_cells.append(row_cells)
-
-                        # Format table as readable text for summary
-                        table_text = "\n".join([" | ".join(row) for row in all_cells if any(cell.strip() for cell in row)])
                         content_blocks.append({
                             "type": "table_summary",
                             "text": table_text,
@@ -465,9 +632,7 @@ class MailMergeProcessor:
                             "cols": len(table.rows[0].cells) if table.rows else 0,
                             "docx_index": len(content_blocks)
                         })
-                        print(f"[{len(content_blocks)-1}] TABLE_SUMMARY: {table_text[:80]}...")
 
-            print(f"=== TOTAL BLOCKS: {len(content_blocks)} ===")
 
             # Add surrounding context for each block to help disambiguate similar content
             self._add_neighbor_context(content_blocks)
@@ -501,19 +666,13 @@ class MailMergeProcessor:
         text = target_block.get("text", "")
         block_type = target_block.get("type", "paragraph")
 
-        print(f"[extract_text] block_index={block_index}, block_type={block_type}, para_in_cell={para_in_cell}")
-        print(f"[extract_text] Full block text: {repr(text[:100])}")
-
         # If it's a table cell and para_in_cell is specified, extract that specific paragraph
         if para_in_cell is not None and block_type == "table_cell":
             # Split text by newlines and get the specific paragraph
             paragraphs = text.split("\n")
-            print(f"[extract_text] Table cell has {len(paragraphs)} paragraphs")
             if 0 <= para_in_cell < len(paragraphs):
                 text = paragraphs[para_in_cell].strip()
-                print(f"[extract_text] Extracted paragraph #{para_in_cell}: {repr(text[:100])}")
             else:
-                print(f"[extract_text] para_in_cell {para_in_cell} >= {len(paragraphs)}, returning empty")
                 text = ""
 
         # Check if meaningful (not just dots/underscores)
@@ -521,33 +680,26 @@ class MailMergeProcessor:
             return bool(re.sub(r'[\s._]+', '', t))
 
         if has_content(text):
-            print(f"→ Found text: {text[:60]}...")
             return text
 
         # Fallback: search backwards - BUT NOT for table cells!
         # Table cells have their own context, don't fallback to other cells
         if para_in_cell is not None and target_block.get("type") == "table_cell":
-            print(f"→ Table cell paragraph #{para_in_cell} is empty, not falling back to other cells")
             # Try to find context within the same cell (other paragraphs)
             cell_text = target_block.get("text", "")
             all_paras = cell_text.split("\n")
             # Look for the first non-empty paragraph in the same cell
             for i, p in enumerate(all_paras):
                 if has_content(p.strip()):
-                    print(f"→ Found context in same cell, paragraph #{i}: {p[:60]}...")
                     return p.strip()
-            print("→ No meaningful text found in this cell")
             return ""
 
         # Fallback for non-table blocks
-        print(f"→ Block empty, searching backwards...")
         for i in range(block_index - 1, -1, -1):
             candidate_text = structured_content[i].get("text", "")
             if has_content(candidate_text):
-                print(f"→ Found in block #{i}: {candidate_text[:60]}...")
                 return candidate_text
 
-        print("→ No meaningful text found")
         return ""
 
     def generate_smart_field_name(
@@ -583,8 +735,6 @@ class MailMergeProcessor:
         if not base_name:
             base_name = "field"
 
-        print(f"→ Base field name: {base_name}")
-
         # Step 2: Use Gemini to refine if available (shorter prompt)
         if self.gemini_client and structured_content and block_index is not None:
             try:
@@ -603,15 +753,15 @@ Trả về JSON: {{"suggested_name": "<tên>", "reason": "<lý do>"}}
 JSON:"""
 
                 response = self.gemini_client.model.generate_content(prompt)
+                self.gemini_client._record_usage(response)
                 suggestion = self.gemini_client.parse_gemini_json_response(response.text)
                 suggested_name = suggestion.get("suggested_name", base_name)
 
                 if suggested_name and suggested_name != base_name:
-                    print(f"→ Gemini refined: {base_name} → {suggested_name}")
                     return suggested_name
 
             except Exception as e:
-                print(f"→ Gemini refinement failed: {e}")
+                pass  # Fall through to return base_name
 
         return base_name
 
@@ -656,35 +806,16 @@ JSON:"""
             editor = DocxFullEditor(docx_path)
             doc = editor.doc
 
-            print(f"=== INJECT PLACEHOLDER: LOOKING FOR BLOCK_INDEX {block_index} ===")
-            print(f"Context hint: {context_hint[:100] if context_hint else 'None'}...")
-            print(f"Before context: {before_context}")
-            print(f"After context: {after_context}")
-
             candidates = self._build_block_candidates(doc)
             self._add_neighbor_context(candidates)
 
-            for candidate in candidates:
-                print(f"[Injection] Block {candidate['index']}: {candidate['text'][:60]}...")
-
-            print(f"=== INJECTION: TOTAL CANDIDATES: {len(candidates)} ===")
-
             # Find best match using the block_index returned by Gemini
             best_match = next((candidate for candidate in candidates if candidate["index"] == block_index), None)
-
-            if best_match:
-                print(f"✓ DIRECT INDEX MATCH: [{best_match['index']}] ({best_match['type']})")
-                print(f"  Text: {best_match['text'][:60]}...")
-
-                if best_match["type"] == "table_cell":
-                    print(f"  Cell location: [{best_match.get('row', '?')},{best_match.get('col', '?')}]")
 
             # Fail closed if the verified block index does not match any current candidate.
             # Context similarity is intentionally not used here because it can select the wrong location.
 
             if best_match:
-                print(f"→ INJECTING at index {best_match['index']}: {best_match['text'][:50]}...")
-                print(f"  Position: {position}")
                 if best_match['type'] == 'paragraph':
                     if position == "inline":
                         if not insert_after:
@@ -795,22 +926,16 @@ JSON:"""
                 return False
 
             para_text = paragraph.text if paragraph else ""
-            print(f"\n[INLINE INJECTION VIA OFFSET]")
-            print(f"  Placeholder: '{placeholder_name}'")
-            print(f"  Insert after: '{insert_after}'")
-            print(f"  Paragraph index: {paragraph_index}")
-            print(f"  Current paragraph: '{para_text}'")
 
             search_idx = para_text.find(insert_after)
             if search_idx == -1:
-                print(f"  ✗ Could not find '{insert_after}' in paragraph")
+                print(f"✗ Could not find '{insert_after}' in paragraph")
                 return False
 
             offset = search_idx + len(insert_after)
-            print(f"  → Found '{insert_after}' at index {search_idx}, offset {offset}")
 
             if not editor.insert_placeholder_at_offset(paragraph_index, offset, placeholder_name):
-                print("  ✗ Offset-based inline insertion failed")
+                print("✗ Offset-based inline insertion failed")
                 return False
 
             if cell is not None:
@@ -821,13 +946,10 @@ JSON:"""
                     tc_pr.append(v_align)
                 v_align.set(qn('w:val'), 'center')
 
-            print(f"  ✓ Injected inline after '{insert_after}' via offset\n")
             return True
 
         except Exception as e:
-            print(f"[INLINE INJECTION VIA OFFSET] ✗ Error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"✗ Error in inline injection: {e}")
             return False
 
     def _inject_placeholder_in_paragraph(
@@ -851,16 +973,10 @@ JSON:"""
         try:
             # Log context ban đầu
             para_text = paragraph.text if paragraph else ""
-            print(f"\n[INJECT PLACEHOLDER IN PARAGRAPH]")
-            print(f"  Placeholder: '{placeholder_name}'")
-            print(f"  Position: {position}")
-            print(f"  Context hint: '{context_hint}'")
-            print(f"  Current paragraph: '{para_text}'")
 
             # Inline insertion is routed through the offset-based adapter in
             # inject_placeholder_at_location() to keep one implementation path.
             if position == "inline":
-                print("  ✗ Inline insertion must be handled by the offset-based adapter")
                 return False
 
             text_runs = []
@@ -870,7 +986,6 @@ JSON:"""
 
             if not text_runs:
                 # Add new run with placeholder using MERGEFIELD structure
-                print(f"  → No text runs found, adding placeholder with empty original text")
                 self._add_mergefield_placeholder(paragraph, placeholder_name, "", position)
                 return True
 
@@ -878,36 +993,26 @@ JSON:"""
             last_run = text_runs[-1]
             original_text = last_run.text
 
-            # Check if ends with dots or underscores
-            if re.search(r'[._]{3,}$', original_text):
+            # Reuse the same placeholder detection rules as the main converter.
+            end_match = PLACEHOLDER_PATTERN.search(original_text)
+            if end_match and end_match.end() == len(original_text):
                 # Extract the pattern to use as original text
-                match = re.search(r'([._]{3,})$', original_text)
+                match = end_match
                 original_pattern = match.group(1) if match else "..."
 
-                print(f"  → Found pattern '{original_pattern}' at end, removing and adding placeholder")
-
                 # Remove pattern from run text
-                last_run.text = re.sub(r'[._]{3,}$', '', original_text)
-                print(f"  → Removed pattern from run text: '{last_run.text}'")
+                last_run.text = original_text[:match.start()]
 
                 # Add MERGEFIELD placeholder
                 self._add_mergefield_placeholder(paragraph, placeholder_name, original_pattern, position)
                 return True
             else:
                 # Append placeholder at end with empty original
-                print(f"  → No pattern found at end, adding placeholder with empty original text")
                 self._add_mergefield_placeholder(paragraph, placeholder_name, "", position)
-
-                # Log kết quả cuối cùng
-                final_text = paragraph.text
-                print(f"[INJECT PLACEHOLDER IN PARAGRAPH] Final result: '{final_text}'")
-                print(f"✓ Placeholder injection completed successfully\n")
                 return True
 
         except Exception as e:
-            print(f"[INJECT PLACEHOLDER IN PARAGRAPH] ✗ Error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"✗ Error injecting placeholder in paragraph: {e}")
             return False
 
     def _add_mergefield_placeholder(
@@ -928,13 +1033,6 @@ JSON:"""
 
         # Get paragraph element
         p_element = paragraph._p
-
-        # Log trạng thái trước khi chèn
-        para_text_before = paragraph.text
-        print(f"\n[INSERT PLACEHOLDER] Position: {position}")
-        print(f"  Before insert: '{para_text_before}'")
-        print(f"  Placeholder name: '{placeholder_name}'")
-        print(f"  Original text: '{original_text}'")
 
         # Create fldSimple element (MERGEFIELD)
         fld = OxmlElement('w:fldSimple')
@@ -976,10 +1074,6 @@ JSON:"""
             # Append fldSimple to end of paragraph
             p_element.append(fld)
 
-        # Log trạng thái sau khi chèn
-        print(f"  After insert: '{paragraph.text}'")
-        print(f"  ✓ Placeholder '{placeholder_name}' inserted successfully")
-
     def _add_new_paragraph_with_placeholder(
         self,
         original_paragraph,
@@ -999,8 +1093,6 @@ JSON:"""
         original_text_content = "".join(
             t.text for t in original_p_element.findall(f".//{self.w_ns}t") if t.text
         )
-        print(f"  [NEW LINE] Original paragraph: '{original_text_content}'")
-        print(f"  [NEW LINE] Creating new paragraph with placeholder '{placeholder_name}'")
 
         # Get the parent element (could be body or cell)
         parent = original_p_element.getparent()
@@ -1016,7 +1108,6 @@ JSON:"""
         pPr = original_p_element.find(f"{self.w_ns}pPr")
         if pPr is not None:
             new_p.append(copy.deepcopy(pPr))
-            print(f"  [new_line] Copied indentation from original paragraph")
         else:
             # Create basic pPr if none exists
             new_pPr = OxmlElement('w:pPr')
@@ -1040,7 +1131,6 @@ JSON:"""
                     new_jc = OxmlElement('w:jc')
                     new_jc.set(qn('w:val'), 'right')
                     new_pPr.append(new_jc)
-                print(f"  [new_line] Changed alignment from 'both' to 'right' to match HTML preview")
 
         # Add right indent when there are leading spaces
         # This creates partial right alignment (keeps some space from right edge)
@@ -1067,8 +1157,6 @@ JSON:"""
                 new_ind.set(qn('w:right'), str(right_indent_twips))
                 new_pPr.append(new_ind)
 
-            print(f"  [new_line] Added right indent: {right_indent_twips} twips to match HTML preview")
-
         if leading_spaces > 0:
             # Add a run with leading spaces to match original indentation
             spaces_run = OxmlElement('w:r')
@@ -1077,7 +1165,6 @@ JSON:"""
             spaces_t.text = ' ' * leading_spaces
             spaces_run.append(spaces_t)
             new_p.append(spaces_run)
-            print(f"  [new_line] Added {leading_spaces} leading spaces to match original indentation")
 
         # Add the placeholder field to the new paragraph
         new_p.append(fld_element)
@@ -1085,15 +1172,6 @@ JSON:"""
         # Insert new paragraph after the original paragraph
         parent_index = list(parent).index(original_p_element)
         parent.insert(parent_index + 1, new_p)
-
-        # Log kết quả
-        new_paragraph_text = ""
-        for t in new_p.findall(f".//{self.w_ns}t"):
-            if t.text:
-                new_paragraph_text += t.text
-        print(f"  [new_line] Created new paragraph with placeholder after original")
-        print(f"  [NEW LINE] New paragraph content: '{new_paragraph_text}'")
-        print(f"  ✓ NEW LINE creation completed successfully")
 
     def _inject_placeholder_in_table(
         self,
@@ -1123,37 +1201,27 @@ JSON:"""
 
         # If cell_index is provided, target that specific cell directly
         if cell_index is not None:
-            print(f"=== TABLE INJECTION - DIRECT CELL TARGETING ===")
-            print(f"Target cell index: {cell_index}, para_in_cell: {para_in_cell}")
-
             # Flatten table cells to find the specific cell
             current_cell_index = 0
             for row_idx, row in enumerate(table.rows):
                 for cell_idx, cell in enumerate(row.cells):
                     if current_cell_index == cell_index:
                         # Found the target cell
-                        print(f"✓ Found target cell at row {row_idx}, col {cell_idx}")
-
                         # If para_in_cell is specified, target that specific paragraph
                         if para_in_cell is not None and para_in_cell < len(cell.paragraphs):
-                            print(f"✓ Targeting paragraph {para_in_cell} in cell (total: {len(cell.paragraphs)} paras)")
                             return self._inject_placeholder_in_paragraph(
                                 cell.paragraphs[para_in_cell], placeholder_name, context_hint, position, insert_after
                             )
                         else:
                             # Inject into first paragraph (default behavior)
-                            if para_in_cell is not None:
-                                print(f"⚠️ Warning: para_in_cell {para_in_cell} >= cell paragraph count {len(cell.paragraphs)}, using first paragraph")
                             if cell.paragraphs:
                                 return self._inject_placeholder_in_paragraph(
                                     cell.paragraphs[0], placeholder_name, context_hint, position, insert_after
                                 )
                             else:
-                                print(f"✗ Target cell has no paragraphs")
                                 return False
                     current_cell_index += 1
 
-            print(f"✗ Cell index {cell_index} not found in table")
             return False
 
         # Original logic: Parse table context hint and find best matching cell
@@ -1168,15 +1236,9 @@ JSON:"""
             # Single cell or no separator
             table_cells_text = [context_hint.strip()]
 
-        print(f"=== TABLE INJECTION ===")
-        print(f"Placeholder: {placeholder_name}")
-        print(f"Context hint: {context_hint[:100] if context_hint else 'None'}...")
-        print(f"Parsed cells: {len(table_cells_text)}")
-
         # Extract keywords from placeholder_name for better matching
         # E.g., "chu_ky_truong_phong" → ["chu", "ky", "truong", "phong"]
         placeholder_keywords = set(placeholder_name.lower().split('_'))
-        print(f"Placeholder keywords: {placeholder_keywords}")
 
         # Find best matching cell based on placeholder_name and context
         best_match = None
@@ -1195,8 +1257,6 @@ JSON:"""
                     if not cell_text:
                         continue
 
-                    print(f"  Cell[{row_idx},{cell_idx}]: {cell_text[:50]}...")
-
                     # Calculate similarity with each parsed cell text
                     for parsed_cell_text in table_cells_text:
                         # Word overlap similarity
@@ -1213,20 +1273,15 @@ JSON:"""
                             keyword_overlap = placeholder_keywords & cell_words_lower
                             if keyword_overlap:
                                 keyword_bonus = len(keyword_overlap) * 0.2  # 20% bonus per matching keyword
-                                print(f"    Keyword bonus: +{keyword_bonus:.2f} (matched: {keyword_overlap})")
 
                             total_score = base_score + keyword_bonus
-
-                            print(f"    Score: {total_score:.2f} (base: {base_score:.2f} + bonus: {keyword_bonus:.2f}) (vs '{parsed_cell_text[:30]}...')")
 
                             if total_score > best_score:
                                 best_score = total_score
                                 best_match = para
-                                print(f"    → New best match! Score: {total_score:.2f}")
 
         # Inject into best matching cell
         if best_match:
-            print(f"✓ Injecting into best match cell (score: {best_score:.2f})")
             return self._inject_placeholder_in_paragraph(best_match, placeholder_name, context_hint, position, insert_after)
 
         print(f"✗ No matching cell found")
@@ -1310,13 +1365,11 @@ JSON:"""
 
         vertAlign = rPr.find(f"{self.w_ns}vertAlign")
         if vertAlign is not None:
-            val = vertAlign.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "")
+            val = vertAlign.get(f"{self.w_ns}val", "")
             if val == "superscript":
                 styles.append("vertical-align: super")
-                styles.append("font-size: smaller")
             elif val == "subscript":
                 styles.append("vertical-align: sub")
-                styles.append("font-size: smaller")
 
         return "; ".join(styles)
 
@@ -1336,21 +1389,14 @@ JSON:"""
         """
 
         if not rename_map:
-            print("No renames needed")
             return True
 
         try:
             doc = Document(docx_path)
             rename_count = 0
 
-            print(f"=== RENAMING PLACEHOLDERS ===")
-            print(f"Rename map: {rename_map}")
-
             # Xử lý tất cả paragraphs trong body
             for para_idx, para in enumerate(doc.paragraphs):
-                para_text = para.text
-                print(f"\n[PARAGRAPH {para_idx}] Before rename: '{para_text}'")
-
                 for fldSimple in para._p.findall(f"{self.w_ns}fldSimple"):
                     instr = fldSimple.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", "")
 
@@ -1372,23 +1418,13 @@ JSON:"""
                                 for t in r.findall(f"{self.w_ns}t"):
                                     if t.text and f"«{old_name}»" in t.text:
                                         t.text = f"«{new_name}»"
-                                        print(f"  ✓ Renamed: {old_name} → {new_name}")
                                         rename_count += 1
-
-                # Log trạng thái sau khi rename
-                para_text_after = para.text
-                print(f"[PARAGRAPH {para_idx}] After rename: '{para_text_after}'")
 
             # Xử lý tables
             for table_idx, table in enumerate(doc.tables):
-                print(f"\n[TABLE {table_idx}] Processing table with {len(table.rows)} rows")
                 for row_idx, row in enumerate(table.rows):
                     for cell_idx, cell in enumerate(row.cells):
-                        print(f"[TABLE {table_idx}][ROW {row_idx}][CELL {cell_idx}] Processing cell")
                         for para_idx, para in enumerate(cell.paragraphs):
-                            para_text = para.text
-                            print(f"  [PARAGRAPH {para_idx}] Before rename: '{para_text}'")
-
                             for fldSimple in para._p.findall(f"{self.w_ns}fldSimple"):
                                 instr = fldSimple.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}instr", "")
 
@@ -1407,18 +1443,10 @@ JSON:"""
                                             for t in r.findall(f"{self.w_ns}t"):
                                                 if t.text and f"«{old_name}»" in t.text:
                                                     t.text = f"«{new_name}»"
-                                                    print(f"    ✓ Renamed (table): {old_name} → {new_name}")
                                                     rename_count += 1
-
-                            # Log trạng thái sau khi rename
-                            para_text_after = para.text
-                            print(f"  [PARAGRAPH {para_idx}] After rename: '{para_text_after}'")
-
-            print(f"=== TOTAL RENAMED: {rename_count} placeholders ===")
 
             # Save file
             doc.save(docx_path)
-            print(f"File saved: {docx_path}")
 
             return True
 
@@ -1462,20 +1490,42 @@ JSON:"""
             rPr = element.find(f"{self.w_ns}rPr")
             style_text = self._get_run_style_text(rPr)
 
+            # Check for footnote/endnote references in this run
+            has_footnote_ref = any((child.tag.split('}')[1] if '}' in child.tag else child.tag) == 'footnoteReference'
+                                   for child in element)
+            has_endnote_ref = any((child.tag.split('}')[1] if '}' in child.tag else child.tag) == 'endnoteReference'
+                                   for child in element)
+
+            # Add superscript style for footnote/endnote references
+            if has_footnote_ref or has_endnote_ref:
+                if style_text:
+                    style_text += "; vertical-align: super; font-size: smaller;"
+                else:
+                    style_text = "vertical-align: super; font-size: smaller;"
+
             for child in element:
                 c_tag = child.tag.split('}')[1] if '}' in child.tag else child.tag
                 if c_tag == 't' and child.text:
                     text_parts.append(child.text)
                 elif c_tag == 'tab':
-                    text_parts.append("                              ")
+                    # FIX: Use 4 spaces instead of 30 to reduce "extra characters" impression
+                    # and better match standard tab width
+                    text_parts.append("    ")
                 elif c_tag == 'br':
-                    text_parts.append("<br>")
+                    br_type = child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type")
+                    if br_type == "page":
+                        # Preserve page breaks as a separate token so the paragraph
+                        # renderer can place the visual indicator before the next line.
+                        text_parts.append(self.PAGE_BREAK_TOKEN)
+                    else:
+                        text_parts.append("<br>")
+                # Note: footnoteReference and endnoteReference are handled above
+                # by adding superscript style to the entire run
                 elif c_tag == 'drawing':
                     # Extract image from drawing element
                     img_html = self._extract_image_from_element(child)
                     if img_html:
                         image_html.append(img_html)
-                        print(f"[DEBUG] Found image in drawing element")
 
             text = "".join(text_parts)
 
@@ -1486,11 +1536,23 @@ JSON:"""
                     field_name = match.group(1).strip()
                     return f'<span class="mail-merge-placeholder" data-field="{field_name}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
 
-                text_with_highlights = re.sub(r'«([^»]+)»', highlight_placeholder, text)
-                if style_text and "mail-merge-placeholder" not in text_with_highlights:
-                    result_parts.append(f'<span style="{style_text}">{text_with_highlights}</span>')
+                def wrap_fragment(fragment: str) -> str:
+                    fragment_with_highlights = re.sub(r'«([^»]+)»', highlight_placeholder, fragment)
+                    # CRITICAL FIX: Always wrap the entire run content in the run style if style exists.
+                    # This ensures text surrounding a placeholder doesn't lose its formatting.
+                    if style_text:
+                        return f'<span style="{style_text}">{fragment_with_highlights}</span>'
+                    return fragment_with_highlights
+
+                if self.PAGE_BREAK_TOKEN in text:
+                    fragments = text.split(self.PAGE_BREAK_TOKEN)
+                    for idx, fragment in enumerate(fragments):
+                        if fragment:
+                            result_parts.append(wrap_fragment(fragment))
+                        if idx < len(fragments) - 1:
+                            result_parts.append(self.PAGE_BREAK_TOKEN)
                 else:
-                    result_parts.append(text_with_highlights)
+                    result_parts.append(wrap_fragment(text))
 
             # Add images
             result_parts.extend(image_html)
@@ -1547,8 +1609,6 @@ JSON:"""
                         b64_data = base64.b64encode(image_data).decode('utf-8')
                         data_uri = f"data:{content_type};base64,{b64_data}"
 
-                        print(f"[DEBUG] Extracted image: {content_type}, {len(image_data)} bytes")
-
                         # Try to get width from extent element (wordprocessingDrawing namespace)
                         width_percent = None
 
@@ -1571,13 +1631,9 @@ JSON:"""
                                 ratio = image_width_emu / page_width_emu
                                 width_percent = ratio * 100
 
-                                print(f"[DEBUG] Image size: cx={cx} EMU, {width_percent:.1f}% of page width")
-
                         style_attr = f'width: {width_percent:.1f}%;' if width_percent else 'max-width: 100%;'
 
                         return f'<img src="{data_uri}" style="{style_attr}" alt="embedded image" />'
-
-            print("[DEBUG] No blip element found in drawing")
             return ""
 
         except Exception as e:
@@ -1671,48 +1727,6 @@ JSON:"""
                 has_page_break = True
                 break
 
-        content = "".join(self._process_xml_element_to_html(child) for child in para._p)
-        if is_empty or not content.strip():
-            # Empty paragraph - preserve for visual layout, selectable for adding placeholders
-            cursor_style = "cursor: crosshair;" if block_index >= 0 else "cursor: default;"
-
-            # FIX: Use empty content with CSS min-height instead of &nbsp;
-            # This prevents non-breaking space from appearing when users type in empty paragraphs
-            # The min-height: 1.2em + display: block ensures the paragraph is visible and clickable
-            empty_content = ""
-
-            # Check if this empty paragraph has a page break
-            if has_page_break:
-                # Empty paragraph WITH page break - show visual indicator
-                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para page-break-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}" title="Ngắt trang (Page Break)">{3}</p>'.format(
-                    block_index, str(has_page_break).lower(), cursor_style, empty_content
-                ) + '''
-                <div class="page-break-indicator" contenteditable="false" style="
-                    margin: 20px 0 !important;
-                    padding: 10px !important;
-                    border-top: 2px dashed #666 !important;
-                    border-bottom: 2px dashed #666 !important;
-                    text-align: center !important;
-                    color: #666 !important;
-                    font-size: 12px !important;
-                    font-style: italic !important;
-                    background-color: #f9f9f9 !important;
-                    user-select: none !important;
-                    -webkit-user-select: none !important;
-                    -moz-user-select: none !important;
-                    -ms-user-select: none !important;
-                    pointer-events: none !important;
-                    cursor: default !important;
-                " title="Ngắt trang (Page Break) - Không thể chỉnh sửa">
-                    📄 Ngắt trang
-                </div>
-                '''
-            else:
-                # Regular empty paragraph - NO &nbsp; to prevent spacing issues when typing
-                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}" title="Click để thêm placeholder">{3}</p>'.format(
-                    block_index, str(has_page_break).lower(), cursor_style, empty_content
-                )
-
         align_style = f"text-align: {alignment};" if alignment != "left" else ""
         align_style += margin_right  # Add margin-right if calculated
 
@@ -1720,21 +1734,10 @@ JSON:"""
         if para_styles:
             align_style += "; ".join(para_styles) + ";"
 
-        # Preserve leading/trailing whitespace by adding white-space: pre-wrap when needed
-        # This fixes issue where leading spaces used for right-alignment are collapsed in HTML
-        # Check the actual text content (stripping HTML tags) to detect leading/trailing spaces
-        text_content = re.sub(r'<[^>]+>', '', content)
-        if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
-            align_style += " white-space: pre-wrap;"
+        content = "".join(self._process_xml_element_to_html(child) for child in para._p)
 
-        # Build paragraph HTML
-        para_html = '<{0} data-block-index="{1}" data-type="paragraph" data-page-break="{2}" style="{3}">{4}</{0}>'.format(
-            tag, block_index, str(has_page_break).lower(), align_style, content
-        )
-
-        # Add visual page break indicator if this paragraph has a page break
-        if has_page_break:
-            page_break_indicator = '''
+        def build_page_break_indicator() -> str:
+            return '''
             <div class="page-break-indicator" contenteditable="false" style="
                 margin: 20px 0 !important;
                 padding: 10px !important;
@@ -1755,11 +1758,57 @@ JSON:"""
                 📄 Ngắt trang
             </div>
             '''
-            para_html += page_break_indicator
+
+        def build_paragraph_html(fragment_content: str) -> str:
+            return '<{0} data-block-index="{1}" data-type="paragraph" data-page-break="{2}" style="{3}">{4}</{0}>'.format(
+                tag, block_index, str(has_page_break).lower(), align_style, fragment_content
+            )
+
+        # Preserve leading/trailing whitespace by adding white-space: pre-wrap when needed
+        # This fixes issue where leading spaces used for right-alignment are collapsed in HTML
+        # Check the actual text content (stripping HTML tags) to detect leading/trailing spaces
+        text_content = re.sub(r'<[^>]+>', '', content)
+        if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
+            align_style += " white-space: pre-wrap;"
+
+        if has_page_break and content.startswith(self.PAGE_BREAK_TOKEN):
+            # Page break at the start of a paragraph should render before the
+            # following text, not after the entire paragraph.
+            content = content.replace(self.PAGE_BREAK_TOKEN, "", 1)
+            para_html = build_page_break_indicator() + build_paragraph_html(content)
+            return para_html
+
+        if is_empty or not content.strip():
+            # Empty paragraph - preserve for visual layout, selectable for adding placeholders
+            cursor_style = "cursor: crosshair;" if block_index >= 0 else "cursor: default;"
+
+            # FIX: Use empty content with CSS min-height instead of &nbsp;
+            # This prevents non-breaking space from appearing when users type in empty paragraphs
+            # The min-height: 1.2em + display: block ensures the paragraph is visible and clickable
+            empty_content = ""
+
+            # Check if this empty paragraph has a page break
+            if has_page_break:
+                # Empty paragraph WITH page break - show visual indicator
+                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para page-break-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}" title="Ngắt trang (Page Break)">{3}</p>'.format(
+                    block_index, str(has_page_break).lower(), cursor_style, empty_content
+                ) + build_page_break_indicator()
+            else:
+                # Regular empty paragraph - NO &nbsp; to prevent spacing issues when typing
+                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}" title="Click để thêm placeholder">{3}</p>'.format(
+                    block_index, str(has_page_break).lower(), cursor_style, empty_content
+                )
+
+        # Build paragraph HTML
+        para_html = build_paragraph_html(content)
+
+        # Add visual page break indicator if this paragraph has a page break
+        if has_page_break:
+            para_html += build_page_break_indicator()
 
         return para_html
 
-    def _process_table_to_html(self, table, block_index: int, table_index: int) -> str:
+    def _process_table_to_html(self, table, block_index: int, table_index: int) -> tuple:
         """Xử lý Table thành thẻ table html với block_index metadata cho từng ô
 
         Args:
@@ -1768,11 +1817,10 @@ JSON:"""
             table_index: Index of this table in the document
 
         Returns:
-            HTML string for the entire table
+            Tuple of (html_string, cells_count) where cells_count is the number of cells processed
         """
         print(f"[_process_table_to_html] START Processing table {table_index} with {len(table.rows)} rows, {len(table.columns)} columns")
-        w_ns = self.w_ns
-        table_html = ['<table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; margin: 10px 0;">']
+        table_html = ['<div style="overflow-x: auto; max-width: 100%;"><table class="docx-table" data-type="table" style="border-collapse: collapse; width: 100%; max-width: 100%; table-layout: auto; margin: 10px 0;">']
 
         # Extract column widths from tblGrid to set proper cell proportions
         column_widths = []
@@ -1794,19 +1842,20 @@ JSON:"""
                     for width in widths:
                         percentage = (width / total_width) * 100
                         column_widths.append(f"{percentage:.2f}%")
-                    print(f"[_process_table_to_html] Column widths from tblGrid: {column_widths}")
         except Exception as e:
             print(f"[_process_table_to_html] Error extracting column widths: {e}")
 
-        # Track block index for each cell (matching extract_structured_content logic)
         current_cell_block_index = block_index
         cells_processed = 0
         table_borders = self._get_table_borders(table)
         last_row_idx = len(table.rows) - 1
         last_col_idx = len(table.columns) - 1
+        cells_by_row = {}
+        for cell_data in self._iter_visible_table_cells(table):
+            cells_by_row.setdefault(cell_data["row_idx"], []).append(cell_data)
 
         for row_idx, row in enumerate(table.rows):
-            # Extract row height from trPr
+            # Inline row style extraction (was _get_row_style)
             row_style = ""
             try:
                 trPr = row._element.find(f"{self.w_ns}trPr")
@@ -1814,62 +1863,43 @@ JSON:"""
                     tr_height = trPr.find(f"{self.w_ns}trHeight")
                     if tr_height is not None:
                         h_val = tr_height.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
-                        h_rule = trPr.find(f"{self.w_ns}hRule")
-                        h_rule_val = h_rule.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val") if h_rule is not None else None
-
                         if h_val:
-                            # Convert twips to pixels (1 twip = 1/20 point, 1 point ≈ 1.333 pixels)
-                            # Or simpler: 1 twip ≈ 0.067em, or use pixels directly
-                            height_px = int(h_val) / 15  # Approximate conversion to pixels
-
+                            h_rule = trPr.find(f"{self.w_ns}hRule")
+                            h_rule_val = h_rule.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val") if h_rule is not None else None
+                            height_px = int(h_val) / 15
                             if h_rule_val == "exact":
-                                row_style += f" height: {height_px}px;"
-                                print(f"[_process_table_to_html] Row {row_idx} exact height: {h_val} twips ≈ {height_px}px")
-                            elif h_rule_val == "atLeast":
-                                row_style += f" min-height: {height_px}px;"
-                                print(f"[_process_table_to_html] Row {row_idx} min-height: {h_val} twips ≈ {height_px}px")
-                            else:  # auto or unspecified
-                                # For auto, still apply min-height to ensure visibility
-                                row_style += f" min-height: {height_px}px;"
-                                print(f"[_process_table_to_html] Row {row_idx} auto height: {h_val} twips ≈ {height_px}px (as min-height)")
+                                row_style = f" height: {height_px}px;"
+                            else:
+                                row_style = f" min-height: {height_px}px;"
             except Exception as e:
                 print(f"[_process_table_to_html] Error extracting row {row_idx} height: {e}")
 
             table_html.append(f'<tr style="{row_style}">')
-            for cell_idx, cell in enumerate(row.cells):
-                # Extract cell text while rendering paragraphs so we only walk the XML once.
-                cell_text_parts = []
+            for cell_data in cells_by_row.get(row_idx, []):
+                cell = cell_data["cell"]
+                col_idx = cell_data["col_idx"]
+                colspan = cell_data["colspan"]
+                rowspan = cell_data["rowspan"]
+
+                # Inline cell paragraphs processing (was _build_table_cell_paragraphs_html)
                 cell_paragraphs_html = []
-                para_index = 0  # Track paragraph index within cell for targeting
 
-                # Process paragraphs in cell
-                for para in cell.paragraphs:
-                    text_from_xml = "".join(
-                        t.text for t in para._p.findall(f".//{w_ns}t") if t.text
-                    )
-                    if text_from_xml:
-                        cell_text_parts.append(text_from_xml)
-
-                    # Process paragraph content
+                for para_index, para in enumerate(cell.paragraphs):
                     para_content = "".join(self._process_xml_element_to_html(child) for child in para._p)
+                    para_metadata = f'data-para-in-cell="{para_index}" data-cell="{col_idx}" data-cell-block-index="{current_cell_block_index}"'
 
-                    # Add metadata for each paragraph to enable precise targeting
-                    para_metadata = f'data-para-in-cell="{para_index}" data-cell="{cell_idx}" data-cell-block-index="{current_cell_block_index}"'
-
-                    pPr = para._p.find(f"{w_ns}pPr")
+                    pPr = para._p.find(f"{self.w_ns}pPr")
                     indent_styles = self._extract_paragraph_indentation_styles(pPr)
-                    jc = pPr.find(f"{w_ns}jc") if pPr is not None else None
+                    jc = pPr.find(f"{self.w_ns}jc") if pPr is not None else None
                     jc_val = jc.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "left") if jc is not None else "left"
-                    align_map = {
+                    css_align = {
                         "left": "left",
                         "center": "center",
                         "right": "right",
-                        "both": "justify"
-                    }
-                    css_align = align_map.get(jc_val, "left")
+                        "both": "justify",
+                    }.get(jc_val, "left")
 
                     if not para_content.strip():
-                        # Empty paragraph in cell - preserve it but make it clickable
                         para_style_parts = [
                             "min-height: 1.2em",
                             "margin: 2px 0",
@@ -1879,109 +1909,60 @@ JSON:"""
                         if indent_styles:
                             para_style_parts.extend(indent_styles)
                         para_style = "; ".join(para_style_parts) + ";"
-
-                        print(f"[_process_table_to_html] Empty Para[{para_index}] horizontal-align: {css_align} (PRESERVED)")
                         cell_paragraphs_html.append(
                             f'<p {para_metadata} class="cell-paragraph" style="{para_style}" title="Click để thêm placeholder">&nbsp;</p>'
                         )
-                    else:
-                        # Non-empty paragraph - wrap in p tag with metadata
-                        para_style_parts = ["margin: 2px 0"]
-                        if css_align != "left":
-                            para_style_parts.append(f"text-align: {css_align}")
-                        if indent_styles:
-                            para_style_parts.extend(indent_styles)
+                        continue
 
-                        text_content = re.sub(r'<[^>]+>', '', para_content)
-                        if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
-                            para_style_parts.append("white-space: pre-wrap")
+                    para_style_parts = ["margin: 2px 0"]
+                    if css_align != "left":
+                        para_style_parts.append(f"text-align: {css_align}")
+                    if indent_styles:
+                        para_style_parts.extend(indent_styles)
 
-                        para_style = "; ".join(para_style_parts) + ";"
-                        print(f"[_process_table_to_html] Para[{para_index}] horizontal-align: {css_align}")
-                        cell_paragraphs_html.append(
-                            f'<p {para_metadata} class="cell-paragraph" style="{para_style}">{para_content}</p>'
-                        )
+                    text_content = re.sub(r'<[^>]+>', '', para_content)
+                    if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
+                        para_style_parts.append("white-space: pre-wrap")
 
-                    para_index += 1
+                    para_style = "; ".join(para_style_parts) + ";"
+                    cell_paragraphs_html.append(
+                        f'<p {para_metadata} class="cell-paragraph" style="{para_style}">{para_content}</p>'
+                    )
 
-                cell_text = "".join(cell_text_parts).strip()
-                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}]: text=\"{cell_text[:30] if cell_text else '(empty)'}\", has_content={bool(cell_text)}")
-
-                # ALWAYS render cells (even empty ones) to maintain table structure
-                # This ensures HTML preview matches DOCX structure exactly
-                # Create cell content (empty string if no paragraphs)
                 cell_content = "".join(cell_paragraphs_html) if cell_paragraphs_html else "&nbsp;"
 
-                # Use td for all rows to prevent browser default th styling (like centering)
-                # Word tables don't always have a header row, so td is a safer default for preview
-                tag = "td"
+                cell_style = self._build_table_cell_style(
+                    cell,
+                    row_idx,
+                    cell_data["cell_idx"],
+                    col_idx,
+                    column_widths,
+                    table_borders,
+                    last_row_idx,
+                    last_col_idx,
+                )
 
-                # Extract cell formatting from tcPr (table cell properties)
-                # IMPORTANT: Reset browser defaults to prevent inherited styling
-                # - font-weight: normal prevents TH from being bold by default
-                # - font-style: normal prevents italic inheritance
-                # - text-decoration: none prevents underline inheritance
-                # - text-align: left provides a consistent starting point
-                cell_style = "padding: 5px; font-weight: normal; font-style: normal; text-decoration: none; text-align: left;"
+                colspan_attr = f' colspan="{colspan}"' if colspan > 1 else ''
+                rowspan_attr = f' rowspan="{rowspan}"' if rowspan > 1 else ''
+                table_html.append(
+                    '<td{0}{1} data-block-index="{2}" data-type="table_cell" data-table-index="{3}" data-row="{4}" data-col="{5}" style="{6}">{7}</td>'.format(
+                        colspan_attr,
+                        rowspan_attr,
+                        current_cell_block_index,
+                        table_index,
+                        row_idx,
+                        col_idx,
+                        cell_style,
+                        cell_content,
+                    )
+                )
 
-                # Add column width from tblGrid if available
-                if column_widths and cell_idx < len(column_widths):
-                    cell_style += f" width: {column_widths[cell_idx]};"
-
-                try:
-                    tcPr = cell._element.find(f"{self.w_ns}tcPr")
-                    if tcPr is not None:
-                        # Background color
-                        shd = tcPr.find(f"{self.w_ns}shd")
-                        if shd is not None:
-                            fill = shd.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}fill")
-                            if fill and fill != "auto":
-                                cell_style += f" background-color: #{fill};"
-                                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] background: #{fill}")
-
-                        # Vertical alignment (Default to 'top' to match Word)
-                        v_align = tcPr.find(f"{self.w_ns}vAlign")
-                        if v_align is not None:
-                            v_align_val = v_align.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "top")
-                            # Map Word values to CSS
-                            v_align_map = {"top": "top", "center": "middle", "bottom": "bottom"}
-                            css_v_align = v_align_map.get(v_align_val, "top")
-                            cell_style += f" vertical-align: {css_v_align};"
-                            print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] vertical-align: {css_v_align}")
-
-                        # Extract borders from tcBorders element first, then fall back to table borders.
-                        # If no border is defined anywhere, keep the cell borderless instead of inventing
-                        # a black default that does not exist in the DOCX.
-                        for side in ["top", "bottom", "left", "right"]:
-                            css_border = self._get_cell_border_css(
-                                tcPr,
-                                table_borders,
-                                side,
-                                row_idx,
-                                cell_idx,
-                                last_row_idx,
-                                last_col_idx
-                            )
-                            if css_border:
-                                cell_style += f" border-{side}: {css_border};"
-                                print(f"[_process_table_to_html] Cell[{row_idx},{cell_idx}] border-{side}: {css_border}")
-
-                except Exception as e:
-                    print(f"[_process_table_to_html] Error extracting cell formatting: {e}")
-
-                # Add data-block-index for this cell (matching extract_structured_content)
-                table_html.append('<{0} data-block-index="{1}" data-type="table_cell" data-table-index="{4}" data-row="{2}" data-col="{3}" style="{5}">{6}</{0}>'.format(
-                    tag, current_cell_block_index, row_idx, cell_idx, table_index, cell_style, cell_content
-                ))
-
-                # Increment block index for next cell
                 current_cell_block_index += 1
                 cells_processed += 1
 
             table_html.append('</tr>')
-        table_html.append('</table>')
+        table_html.append('</table></div>')
         html_result = "\n".join(table_html)
-        print(f"[_process_table_to_html] END Processed {cells_processed} cells, HTML length: {len(html_result)}")
-        print(f"[_process_table_to_html] HTML preview: {html_result[:200]}...")
-        return html_result
+        print(f"[_process_table_to_html] END Processed {cells_processed} cells")
+        return (html_result, cells_processed)
 

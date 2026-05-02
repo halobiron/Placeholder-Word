@@ -1,26 +1,41 @@
 """
 Smart Mail Merge Converter - Full implementation per INSTRUCTIONS.md
 Handles Vietnamese forms with XML surgical injection, offset mapping, and smart field naming
+
+Now uses Gemini for intelligent table analysis instead of complex rule-based code.
 """
 import re
-import unicodedata
 import copy
 from lxml import etree
 from docx import Document
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+from docx.text.paragraph import Paragraph
+from typing import List, Dict, Optional
+
+# Treat placeholder-like dot runs broadly:
+# - ASCII dot/underscore runs need at least 2 chars total
+# - Unicode ellipsis/dot-leader chars count as a placeholder by themselves
+# - Mixed runs such as "...…‥⋯..." stay a single placeholder
+# - Dots separated by spaces/newlines: ". . . ." or ". . . . . . ." or "... ..." or multi-line dots (ALL treated as ONE field)
+# - Pattern uses lookahead to ensure at least 2 dots/underscores total (including those separated by whitespace)
+# - Updated: (?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._] to match space/newline-separated dots with minimum count
+PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._]|[□■]+)')
 
 
 class SmartMailMergeConverter:
     """Convert Vietnamese .docx forms to Mail Merge templates with intelligent field naming"""
 
-    def __init__(self, doc_path):
+    def __init__(self, doc_path, gemini_api_key: Optional[str] = None):
         """Initialize converter with document
 
         Args:
             doc_path: Path to input .docx file
+            gemini_api_key: Optional Gemini API key for intelligent table analysis
         """
         self.doc = Document(doc_path)
+        self.gemini_api_key = gemini_api_key
+        self._gemini_client = None
         self.used_labels = {}   # base_label -> count of times used
         self.all_field_names = []  # ordered list of all generated field names (incl. _2, _3)
         self.last_section_label = "field"
@@ -28,31 +43,18 @@ class SmartMailMergeConverter:
         # Namespace chuẩn cho Word
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
-    def _slugify(self, text):
-        """Chuyển đổi tiếng Việt có dấu thành snake_case không dấu, tối đa 4 từ
+    @property
+    def gemini_client(self):
+        """Lazy-load Gemini client only when needed"""
+        if self._gemini_client is None and self.gemini_api_key:
+            from gemini_client import GeminiClient
+            try:
+                self._gemini_client = GeminiClient(self.gemini_api_key)
+            except ValueError:
+                # API key not configured, fall back to rule-based
+                pass
+        return self._gemini_client
 
-        Args:
-            text: Vietnamese text with accents
-
-        Returns:
-            Snake_case string or None
-        """
-        if not text or not text.strip():
-            return None
-
-        # Loại bỏ nhiễu: (nếu có), (ghi rõ...), các ký tự đặc biệt
-        text = re.sub(r'\(.*?\)|[:\-–—\._…□■]', ' ', text)
-
-        # Xử lý chữ đ/Đ đặc biệt trước khi normalize
-        text = text.replace('đ', 'd').replace('Đ', 'D')
-
-        # Bình thường hóa tiếng Việt
-        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-        words = re.findall(r'\w+', text.lower())
-
-        # Lấy tối đa 4 từ quan trọng ở cuối (sát với placeholder nhất)
-        slug = "_".join(words[-4:]) if len(words) > 4 else "_".join(words)
-        return slug if slug else None
 
     def _get_unique_label(self, base_label):
         """Đảm bảo tên field không bị trùng lặp
@@ -72,100 +74,572 @@ class SmartMailMergeConverter:
         self.all_field_names.append(result)
         return result
 
-    def _generate_label(self, pre_text, para_context):
-        """Tạo field name và format switch dựa trên text ngay trước placeholder"""
+    def _generate_label(self, pre_text, para_context, content=None):
+        """Tạo field name ĐƠN GIẢN - Gemini sẽ rename sau"""
+        label = "field"  # Cực kỳ đơn giản
+
+        # Checkbox prefix
+        if content in ('□', '■'):
+            label = f"ck_{label}"
+
+        # Hệ thống tự thêm _2, _3 nếu trùng
+        unique_label = self._get_unique_label(label)
+
+        # Format switch vẫn giữ (preserve uppercase/title case)
         parts = [p.strip() for p in re.split(r'[:\-–—\._…□■\n]', pre_text) if p.strip()]
         recent = parts[-1] if parts else ""
-        label = self._slugify(recent) or self._slugify(pre_text) or self._slugify(para_context) or "field"
-        unique_label = self._get_unique_label(label)
         sw = "\\* Upper" if recent.isupper() else "\\* Caps" if recent.istitle() else "\\* MERGEFORMAT"
+
         return unique_label, sw
 
-    def _process_paragraph(self, paragraph):
-        """Xử lý paragraph: inject Mail Merge field với định dạng chính xác"""
-        p_element, pattern = paragraph._p, re.compile(r'([._]{3,}|…+[._…]*)')
-        if not pattern.search(paragraph.text): return
+    def _get_special_elements(self, run_element):
+        """Extract special elements from a run (footnoteReference, endnoteReference, br, cr, etc.)
 
-        # Map định dạng và thu thập text
-        full_text, offset_map = "", []
+        Args:
+            run_element: The w:r element
+
+        Returns:
+            List of special elements that should be preserved
+
+        NOTE: Tab elements are EXCLUDED to avoid duplication with tab characters in text
+        """
+        special_elements = []
+        # Special elements to preserve (before text) - EXCLUDING 'tab'
+        for tag in ['footnoteReference', 'endnoteReference', 'br', 'cr', 'noBreakHyphen']:
+            elem = run_element.find(f"{self.w_ns}{tag}")
+            if elem is not None:
+                special_elements.append(copy.deepcopy(elem))
+        return special_elements
+
+    def _find_placeholder_tab_spans(self, paragraph, full_text):
+        """Locate placeholder tabs backed by tab stops with special leaders.
+
+        Only tabs whose corresponding paragraph tab stop uses a visible leader
+        are treated as placeholders. Plain alignment tabs are ignored.
+        """
+        if not full_text or "\t" not in full_text:
+            return []
+
+        p_pr = paragraph._p.find(f"{self.w_ns}pPr")
+        tabs = p_pr.find(f"{self.w_ns}tabs") if p_pr is not None else None
+        if tabs is None:
+            return []
+
+        placeholder_leaders = {"dot", "middleDot", "heavy", "underscore"}
+        tab_defs = tabs.findall(f"{self.w_ns}tab")
+        if not any(tab.get(qn("w:leader")) in placeholder_leaders for tab in tab_defs):
+            return []
+
+        spans = []
+        tab_index = 0
+        current_span = None
+
+        for pos, char in enumerate(full_text):
+            if char != "\t":
+                if current_span is not None:
+                    spans.append(current_span)
+                    current_span = None
+                continue
+
+            leader = tab_defs[tab_index].get(qn("w:leader")) if tab_index < len(tab_defs) else None
+            tab_index += 1
+
+            if leader not in placeholder_leaders:
+                if current_span is not None:
+                    spans.append(current_span)
+                    current_span = None
+                continue
+
+            visible_prefix = full_text[:pos].rstrip()
+            visible_suffix = full_text[pos + 1:].lstrip()
+            if not visible_prefix and not visible_suffix:
+                if current_span is not None:
+                    spans.append(current_span)
+                    current_span = None
+                continue
+
+            if current_span is None:
+                current_span = [pos, pos + 1]
+            elif current_span[1] == pos:
+                current_span[1] = pos + 1
+            else:
+                spans.append(current_span)
+                current_span = [pos, pos + 1]
+
+        if current_span is not None:
+            spans.append(current_span)
+
+        return [(start, end) for start, end in spans]
+
+    def _has_placeholder(self, paragraph, full_text):
+        """Return True when a paragraph contains a detectable placeholder."""
+        return bool(PLACEHOLDER_PATTERN.search(full_text)) or bool(
+            self._find_placeholder_tab_spans(paragraph, full_text)
+        )
+
+    def _strip_placeholder_markers(self, paragraph, text):
+        """Remove placeholder markers while preserving surrounding content."""
+        if not text:
+            return text
+
+        cleaned = PLACEHOLDER_PATTERN.sub(" ", text)
+        for start, end in reversed(self._find_placeholder_tab_spans(paragraph, text)):
+            cleaned = cleaned[:start] + " " + cleaned[end:]
+        return cleaned
+
+    def _process_paragraph(self, paragraph):
+        """Xử lý paragraph: inject Mail Merge field với định dạng chính xác
+
+        CRITICAL FIX: Preserve run-level formatting (superscript, subscript, etc.)
+        by tracking original run boundaries and splitting text segments accordingly.
+        EXTENDED: Also preserve special elements like footnoteReference, endnoteReference, tab, br.
+        """
+        p_element, pattern = paragraph._p, PLACEHOLDER_PATTERN
+
+        # Map định dạng với tracking run boundaries
+        # Track: (start_pos, end_pos, rPr, special_elements)
+        run_ranges = []  # List of (start_pos, end_pos, rPr, special_elements) tuples
+        full_text = ""
+        current_pos = 0
+
         for run in paragraph.runs:
             rPr = run.element.find(f"{self.w_ns}rPr")
-            for char in run.text:
-                full_text += char
-                offset_map.append(rPr)
+            special_elements = self._get_special_elements(run.element)
+            run_text = run.text
+            text_len = len(run_text)
+            if text_len > 0:
+                run_ranges.append((current_pos, current_pos + text_len, rPr, special_elements))
+                full_text += run_text
+                current_pos += text_len
+
+        has_pattern_placeholder = bool(pattern.search(full_text))
+        placeholder_tab_spans = self._find_placeholder_tab_spans(paragraph, full_text)
+        if not has_pattern_placeholder and not placeholder_tab_spans:
+            return
+
+        # Helper: find which run a position belongs to
+        def get_run_info_at_position(pos):
+            for start, end, rPr, special_elements in run_ranges:
+                if start <= pos < end:
+                    return rPr, special_elements
+            return None, []
+
+        # Helper: split a text range at run boundaries to preserve formatting
+        def split_text_by_runs(start_pos, end_pos):
+            """Split a text range into sub-ranges that respect original run boundaries"""
+            result = []  # List of (text, rPr, special_elements) tuples
+            current = start_pos
+
+            while current < end_pos:
+                rPr, special_elements = get_run_info_at_position(current)
+
+                # Find where this run ends (or where our range ends)
+                run_end = None
+                for r_start, r_end, _, _ in run_ranges:
+                    if r_start <= current < r_end:
+                        run_end = min(r_end, end_pos)
+                        break
+
+                if run_end is None:
+                    run_end = end_pos
+
+                text_segment = full_text[current:run_end]
+                if text_segment:
+                    # FIX: Append text segment even if rPr is None
+                    # Don't skip text just because formatting info is missing
+                    result.append((text_segment, rPr, special_elements))
+
+                current = run_end
+
+            return result
 
         # Phân mảnh paragraph
         segments, last_idx = [], 0
         for match in pattern.finditer(full_text):
             s, e = match.start(), match.end()
-            if s > last_idx: segments.append(('text', full_text[last_idx:s], last_idx))
+            if s > last_idx:
+                # Text segment - will be split by runs later
+                segments.append(('text', full_text[last_idx:s], last_idx))
             segments.append(('field', full_text[s:e], s))
             last_idx = e
-        if last_idx < len(full_text): segments.append(('text', full_text[last_idx:], last_idx))
+        if last_idx < len(full_text):
+            segments.append(('text', full_text[last_idx:], last_idx))
 
-        # Rebuild XML
+        for tab_start, tab_end in placeholder_tab_spans:
+            if any(
+                kind == 'field' and offset <= tab_start < offset + len(content)
+                for kind, content, offset in segments
+            ):
+                continue
+
+            updated_segments = []
+            inserted = False
+            for kind, content, offset in segments:
+                segment_end = offset + len(content)
+                if kind != 'text' or tab_end <= offset or tab_start >= segment_end:
+                    updated_segments.append((kind, content, offset))
+                    continue
+
+                leading_text = content[:tab_start - offset]
+                trailing_text = content[tab_end - offset:]
+                if leading_text:
+                    updated_segments.append(('text', leading_text, offset))
+                updated_segments.append(('field', full_text[tab_start:tab_end], tab_start))
+                if trailing_text:
+                    updated_segments.append(('text', trailing_text, tab_end))
+                inserted = True
+
+            if not inserted:
+                updated_segments.append(('field', full_text[tab_start:tab_end], tab_start))
+            segments = sorted(updated_segments, key=lambda item: item[2])
+
+        # Rebuild XML - text segments are split by original run boundaries
         for r in p_element.findall(f"{self.w_ns}r"): p_element.remove(r)
 
         for kind, content, offset in segments:
-            original_rPr = offset_map[offset] if offset < len(offset_map) else None
             if kind == 'text':
-                run = OxmlElement('w:r')
-                if original_rPr is not None: run.append(copy.deepcopy(original_rPr))
-                t = OxmlElement('w:t')
-                if ' ' in (content[0], content[-1]): t.set(qn('xml:space'), 'preserve')
-                t.text, _ = content, run.append(t)
-                p_element.append(run)
+                # Split text content by original run boundaries to preserve formatting
+                text_parts = split_text_by_runs(offset, offset + len(content))
+
+                for text_part, rPr, special_elements in text_parts:
+                    run = OxmlElement('w:r')
+                    if rPr is not None: run.append(copy.deepcopy(rPr))
+
+                    # Add special elements (footnoteReference, etc.) before text
+                    for elem in special_elements:
+                        run.append(copy.deepcopy(elem))
+
+                    t = OxmlElement('w:t')
+                    # Preserve whitespace at start OR end (handles tabs, spaces, etc.)
+                    if text_part and (text_part[0].isspace() or (len(text_part) > 1 and text_part[-1].isspace())):
+                        t.set(qn('xml:space'), 'preserve')
+                    t.text = text_part
+                    run.append(t)
+                    p_element.append(run)
             else:
-                text_no_dots = re.sub(r'([._]{3,}|…+[._…]*)', '', paragraph.text).strip()
+                # For fields, use rPr from the first character of the matched content
+                original_rPr, original_special = get_run_info_at_position(offset)
+                text_no_dots = self._strip_placeholder_markers(paragraph, paragraph.text).strip()
                 ctx = paragraph.text if len(text_no_dots) > 5 else self.last_meaningful_text
-                label, sw = self._generate_label(full_text[:offset], ctx)
+                label, sw = self._generate_label(full_text[:offset], ctx, content)
+
+                # Truncate placeholder text for instruction (max 50 chars to avoid XML issues)
+                content_short = content[:50] if len(content) > 50 else content
+                # Escape quotes in content
+                content_short = content_short.replace('"', '\\"')
+
                 fld = OxmlElement('w:fldSimple')
-                fld.set(qn('w:instr'), f' MERGEFIELD {label} {sw} \\z "{content}" ')
+                fld.set(qn('w:instr'), f' MERGEFIELD {label} {sw} \\z "{content_short}" ')
                 run = OxmlElement('w:r')
                 if original_rPr is not None: run.append(copy.deepcopy(original_rPr))
+                # Add special elements for merge fields too
+                for elem in original_special:
+                    run.append(copy.deepcopy(elem))
                 t = OxmlElement('w:t')
                 t.text, _ = f"«{label}»", run.append(t)
                 fld.append(run)
                 p_element.append(fld)
 
-    def convert(self, output_path):
+    def _is_cell_empty(self, cell):
+        """Check nếu cell trống hoặc chỉ có whitespace
+
+        Args:
+            cell: Table cell object
+
+        Returns:
+            True nếu cell trống
+        """
+        # Check nếu cell đã có merge field rồi → không considered empty
+        tc = cell._element
+        if tc.find(f"{self.w_ns}fldSimple") is not None:
+            return False
+        # Check các paragraph con có merge field không
+        for para in cell.paragraphs:
+            if para._element.find(f"{self.w_ns}fldSimple") is not None:
+                return False
+
+        text = cell.text.strip()
+        return not text or not any(c.isalpha() or c.isdigit() for c in text)
+
+    def _insert_field_in_cell(self, cell, field_name):
+        """Insert mail merge field vào empty cell
+
+        Args:
+            cell: Table cell object
+            field_name: Name cho merge field
+        """
+        # Clear existing content
+        for para in cell.paragraphs:
+            for run in para.runs:
+                run.text = ""
+
+        # Get first paragraph or create new
+        if not cell.paragraphs:
+            para = cell.add_paragraph()
+        else:
+            para = cell.paragraphs[0]
+
+        # Clear runs
+        for run in para.runs:
+            run._element.getparent().remove(run._element)
+
+        # Create merge field
+        unique_label = self._get_unique_label(field_name)
+        p_element = para._p
+
+        fld = OxmlElement('w:fldSimple')
+        fld.set(qn('w:instr'), f' MERGEFIELD {unique_label} \\* MERGEFORMAT ')
+        run = OxmlElement('w:r')
+        t = OxmlElement('w:t')
+        t.text = f"«{unique_label}»"
+        run.append(t)
+        fld.append(run)
+        p_element.append(fld)
+
+    def _process_table_auto_fill(self, table):
+        """Xử lý bảng: dùng Gemini để analyze và auto-fill placeholders vào empty cells
+
+        Args:
+            table: Table object
+        """
+        if len(table.rows) <= 1:
+            return  # Table chỉ có header, không có data rows
+
+        # Try Gemini first if available
+        if self.gemini_client:
+            try:
+                self._process_table_with_gemini(table)
+                return
+            except Exception as e:
+                print(f"  → Gemini table analysis failed: {e}, falling back to rule-based")
+                # Fall through to rule-based
+
+        # Fallback: simple rule-based (simplified version)
+        self._process_table_rule_based(table)
+
+    def _process_table_with_gemini(self, table):
+        """Dùng Gemini để analyze table và suggest placeholders
+
+        Args:
+            table: Table object
+        """
+        # Extract table data for Gemini
+        table_data = []
+        for row_idx, row in enumerate(table.rows):
+            row_data = []
+            for cell in row.cells:
+                text = cell.text.strip()
+                # Check if cell already has merge field or is truly empty
+                is_empty = self._is_cell_empty(cell)
+                row_data.append({
+                    "text": text,
+                    "is_empty": is_empty,
+                    "row": row_idx,
+                    "col": len(row_data)
+                })
+            table_data.append(row_data)
+
+        # Get document context (paragraphs before/after table)
+        context_parts = []
+        table_element = table._element
+        found_table = False
+
+        for child in self.doc.element.body.iterchildren():
+            if child == table_element:
+                found_table = True
+                break
+            if child.tag.endswith("p"):
+                para = Paragraph(child, self.doc)
+                if para.text.strip():
+                    context_parts.append(para.text.strip())
+                    if len(context_parts) >= 2:
+                        break
+
+        document_context = " | ".join(context_parts[-2:]) if context_parts else ""
+
+        # Ask Gemini for suggestions
+        result = self.gemini_client.analyze_table_for_placeholders(
+            table_data=table_data,
+            document_context=document_context
+        )
+
+        # Apply suggestions
+        for suggestion in result.get("suggestions", []):
+            row = suggestion.get("row")
+            col = suggestion.get("col")
+            field_name = suggestion.get("field_name")
+
+            if row is not None and col is not None and field_name:
+                if 0 <= row < len(table.rows):
+                    row_obj = table.rows[row]
+                    # Handle merged cells - find actual cell at column
+                    current_col = 0
+                    for cell in row_obj.cells:
+                        # Check grid span for merged cells
+                        tc = cell._element
+                        tcPr = tc.find(f"{self.w_ns}tcPr")
+                        grid_span = 1
+                        if tcPr is not None:
+                            gridSpan = tcPr.find(f"{self.w_ns}gridSpan")
+                            if gridSpan is not None:
+                                grid_span = int(gridSpan.get(f"{{{self.w_ns}}}val", 1))
+
+                        if current_col <= col < current_col + grid_span:
+                            if self._is_cell_empty(cell):
+                                self._insert_field_in_cell(cell, field_name)
+                            break
+                        current_col += grid_span
+
+    def _process_table_rule_based(self, table):
+        """Simple rule-based fallback for table auto-fill
+
+        Args:
+            table: Table object
+        """
+        # Assume row 0 is header
+        if len(table.rows) < 2:
+            return
+
+        header_row = table.rows[0]
+        header_texts = [cell.text.strip() for cell in header_row.cells]
+
+        # Process data rows
+        for row_idx in range(1, len(table.rows)):
+            row = table.rows[row_idx]
+
+            for col_idx, cell in enumerate(row.cells):
+                if self._is_cell_empty(cell) and col_idx < len(header_texts):
+                    # Rule-based fallback: extremely simple naming
+                    field_name = "field"
+                    self._insert_field_in_cell(cell, field_name)
+                    print(f"  → Rule-based auto-fill: «{field_name}» (column {col_idx})")
+
+
+
+
+
+    def convert(self, output_path, auto_fill_tables=True):
         """Duyệt toàn bộ tài liệu để thực thi chuyển đổi
 
         Args:
             output_path: Path to save converted document
+            auto_fill_tables: If True, auto-fill placeholders in empty table cells
 
         Returns:
             List of detected field names
         """
         print(f"Đang phân tích tài liệu...")
 
+        # First pass: collect paragraphs to identify placeholder patterns
+        paragraphs_info = []
         for para in self.doc.paragraphs:
-            # Kiểm tra nếu dòng này là tiêu đề mục để lưu context (Section-Based)
-            text_strip = para.text.strip()
-            if text_strip and (text_strip[0].isdigit() or text_strip.isupper()) and len(text_strip) < 50:
-                potential_label = self._slugify(text_strip)
-                if potential_label:
-                    self.last_section_label = potential_label
+            text = para.text
+            text_strip = text.strip()
+            # Check if paragraph has placeholders
+            has_placeholders = self._has_placeholder(para, text)
+            # Check if paragraph only contains placeholders (no meaningful text)
+            cleaned = self._strip_placeholder_markers(para, text_strip).strip()
+            is_placeholder_only = has_placeholders and (not cleaned or not any(c.isalpha() or c.isdigit() for c in cleaned))
+            paragraphs_info.append({
+                'para': para,
+                'text': text,
+                'text_strip': text_strip,
+                'has_placeholders': has_placeholders,
+                'is_placeholder_only': is_placeholder_only
+            })
 
-            self._process_paragraph(para)
+        # Process paragraphs with placeholder merging logic
+        i = 0
+        while i < len(paragraphs_info):
+            info = paragraphs_info[i]
 
-            # Cập nhật context text để dùng cho paragraph sau nếu cần
-            cleaned = re.sub(r'([._]{3,}|…+[._…]*)', ' ', text_strip).strip()
+            # Check for section headers (for context)
+            if info['text_strip'] and (info['text_strip'][0].isdigit() or info['text_strip'].isupper()) and len(info['text_strip']) < 50:
+                # Extremely simple text normalization for section labels
+                simple_text = info['text_strip'].lower().replace(' ', '_')[:20]
+                self.last_section_label = simple_text if simple_text else "field"
+
+            # If this paragraph has placeholders, check if next paragraphs should be merged
+            if info['has_placeholders']:
+                # Look ahead to find consecutive paragraphs with placeholders that should be merged
+                # Case 1: Paragraph with text + placeholders followed by placeholder-only paragraphs
+                # Case 2: Multiple placeholder-only paragraphs in a row
+                streak_start = i
+                streak_end = i
+
+                # Determine if we should merge with next paragraphs
+                should_merge = False
+
+                # Check next paragraphs
+                while streak_end + 1 < len(paragraphs_info):
+                    next_info = paragraphs_info[streak_end + 1]
+
+                    # Merge if next paragraph is placeholder-only
+                    if next_info['is_placeholder_only']:
+                        should_merge = True
+                        streak_end += 1
+                    else:
+                        break
+
+                # If we have a streak that should be merged (> 1 paragraph)
+                if should_merge and streak_end > streak_start:
+                    # Merge placeholder-only paragraphs into the first paragraph
+                    # by copying their runs, then process the merged paragraph
+                    first_para = paragraphs_info[streak_start]['para']
+                    first_para_element = first_para._p
+
+                    # Copy runs from all subsequent paragraphs in the streak
+                    # (skip the first paragraph as it's already in first_para_element)
+                    for j in range(streak_start + 1, streak_end + 1):
+                        current_para = paragraphs_info[j]['para']
+                        current_para_element = current_para._p
+
+                        # Copy all runs from current paragraph
+                        for run in current_para.runs:
+                            run_element = run._element
+                            # Deep copy the run element to preserve all formatting
+                            run_copy = copy.deepcopy(run_element)
+                            first_para_element.append(run_copy)
+
+                    # Process the merged first paragraph (now contains all runs)
+                    self._process_paragraph(first_para)
+
+                    # Delete the merged paragraphs (they've been incorporated into the first one)
+                    for j in range(streak_end, streak_start, -1):  # Reverse order to avoid index shifting
+                        para_to_delete = paragraphs_info[j]['para']
+                        para_element = para_to_delete._element
+                        para_element.getparent().remove(para_element)
+
+                    # Skip the rest of the streak
+                    i = streak_end + 1
+                    continue
+
+            # Process normal paragraph
+            self._process_paragraph(info['para'])
+
+            # Update context
+            cleaned = self._strip_placeholder_markers(info['para'], info['text_strip']).strip()
             if cleaned and any(c.isalpha() for c in cleaned):
                 self.last_meaningful_text = cleaned
 
-        # Xử lý Table nếu có
+            i += 1
+
+        # Xử lý Table
         for table in self.doc.tables:
+            # First pass: Process existing placeholders
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         text_strip = para.text.strip()
                         self._process_paragraph(para)
-                        cleaned = re.sub(r'([._]{3,}|…+[._…]*)', ' ', text_strip).strip()
+                        cleaned = self._strip_placeholder_markers(para, text_strip).strip()
                         if cleaned and any(c.isalpha() for c in cleaned):
                             self.last_meaningful_text = cleaned
 
+            # Second pass: Auto-fill empty cells if enabled
+            if auto_fill_tables:
+                self._process_table_auto_fill(table)
+
         self.doc.save(output_path)
-        print(f"Chuyển đổi hoàn tất! File đã lưu tại: {output_path}")
 
         return self.all_field_names

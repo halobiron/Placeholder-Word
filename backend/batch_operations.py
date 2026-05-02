@@ -53,10 +53,11 @@ def validate_table_coordinates(editor: DocxFullEditor, table_index: int,
                                row_index: Optional[int] = None,
                                col_index: Optional[int] = None) -> None:
     """Validate table coordinates"""
-    if table_index >= len(editor.doc.tables):
+    all_tables = editor._get_all_tables_in_doc_order()
+    if table_index >= len(all_tables):
         raise ValueError(f"Invalid table_index: {table_index}")
 
-    table = editor.doc.tables[table_index]
+    table = all_tables[table_index]
     if row_index is not None and row_index >= len(table.rows):
         raise ValueError(f"Invalid row_index: {row_index}")
     if col_index is not None:
@@ -181,7 +182,8 @@ def _validate_structural_op(editor: DocxFullEditor, op: Operation) -> None:
 def _validate_table_op(editor: DocxFullEditor, op: Operation) -> None:
     """Validate table operations"""
     validate_table_coordinates(editor, op.table_index)
-    table = editor.doc.tables[op.table_index]
+    all_tables = editor._get_all_tables_in_doc_order()
+    table = all_tables[op.table_index]
 
     if op.type == "delete_table_row" and len(table.rows) <= 1:
         raise ValueError("Không thể xóa hàng cuối cùng")
@@ -208,7 +210,7 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
 
     if op.type == "rename_placeholder":
         old_actual = find_actual_name(op.old_name)
-        if not editor.rename_placeholder(old_actual, op.new_name):
+        if not editor.rename_placeholder(old_actual, op.new_name, op.occurrence_index):
             raise ValueError(f"Failed to rename '{old_actual}'")
 
     elif op.type == "delete_placeholder":
@@ -247,11 +249,15 @@ def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
         block_map = getattr(editor, "_block_to_para_index_map", None) or {}
         block_data = block_map.get(op.block_index)
         if block_data and block_data.get("type") == "table_cell":
-            cell = None
-            for table in editor.doc.tables:
-                if block_data["row"] < len(table.rows) and block_data["col"] < len(table.rows[block_data["row"]].cells):
-                    cell = table.rows[block_data["row"]].cells[block_data["col"]]
-                    break
+            # CRITICAL FIX: Use the stored cell object directly if available
+            # This works correctly with merged cells
+            cell = block_data.get("cell")
+            if cell is None:
+                # Fallback to old method if cell object is not stored
+                for table in editor.doc.tables:
+                    if block_data["row"] < len(table.rows) and block_data["col"] < len(table.rows[block_data["row"]].cells):
+                        cell = table.rows[block_data["row"]].cells[block_data["col"]]
+                        break
             if cell is not None and len(cell.paragraphs) > 1:
                 logger.warning(
                     "update_text without para_in_cell on multi-paragraph cell: block_index=%s row=%s col=%s para_count=%s",
@@ -336,7 +342,8 @@ def _execute_delete_paragraph(editor: DocxFullEditor, op: Operation) -> None:
     success = False
 
     if all(v is not None for v in [op.table_index, op.row_index, op.col_index]):
-        table = editor.doc.tables[op.table_index]
+        all_tables = editor._get_all_tables_in_doc_order()
+        table = all_tables[op.table_index]
         cell = table.rows[op.row_index].cells[op.col_index]
         if op.para_in_cell is not None and op.para_in_cell < len(cell.paragraphs):
             success = editor.delete_paragraph(cell.paragraphs[op.para_in_cell])
@@ -364,7 +371,8 @@ def _execute_delete_multiple(editor: DocxFullEditor, op: Operation) -> None:
             is_partial = (start_offset is not None and end_offset is not None)
 
             if all(k in block_data for k in ["table_index", "row_index", "col_index"]):
-                table = editor.doc.tables[block_data["table_index"]]
+                all_tables = editor._get_all_tables_in_doc_order()
+                table = all_tables[block_data["table_index"]]
                 cell = table.rows[block_data["row_index"]].cells[block_data["col_index"]]
 
                 para_in_cell = block_data.get("para_in_cell")
@@ -466,9 +474,15 @@ def _execute_structural_op(editor: DocxFullEditor, op: Operation) -> None:
 
 def _execute_table_op(editor: DocxFullEditor, op: Operation) -> None:
     """Execute table operations"""
+    all_tables = editor._get_all_tables_in_doc_order()
+    if op.table_index >= len(all_tables):
+        raise ValueError(f"Table index {op.table_index} out of range")
+    
+    table = all_tables[op.table_index]
+
     if op.type == "add_table_row":
         insert_index = (op.row_index + 1 if op.position == "below" else op.row_index
-                        if op.row_index is not None else len(editor.doc.tables[op.table_index].rows))
+                        if op.row_index is not None else len(table.rows))
         if not editor.insert_table_row(op.table_index, insert_index):
             raise ValueError(f"Failed to add table row")
     elif op.type == "delete_table_row":
@@ -476,7 +490,7 @@ def _execute_table_op(editor: DocxFullEditor, op: Operation) -> None:
             raise ValueError(f"Failed to delete table row")
     elif op.type == "add_table_column":
         insert_index = (op.col_index + 1 if op.position == "right" else op.col_index
-                        if op.col_index is not None else len(editor.doc.tables[op.table_index].rows[0].cells))
+                        if op.col_index is not None else len(table.rows[0].cells))
         if not editor.insert_table_column(op.table_index, insert_index):
             raise ValueError(f"Failed to add table column")
     elif op.type == "delete_table_column":

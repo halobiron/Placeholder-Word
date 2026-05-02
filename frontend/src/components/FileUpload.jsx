@@ -35,7 +35,8 @@ function FileUpload({ onComplete }) {
         templateId: result.template_id,
         fields: result.fields,
         previewHtml: result.html_preview || '',
-        previewFields: result.fields
+        previewFields: result.fields,
+        geminiUsage: result.gemini_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       })
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Upload thất bại. Vui lòng thử lại.')

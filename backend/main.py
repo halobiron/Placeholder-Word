@@ -4,11 +4,13 @@ import re
 import uuid
 import tempfile
 import shutil
+from functools import wraps
 from pathlib import Path
-from typing import Dict, Literal
+from typing import Dict, Literal, Callable, Optional, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, ConfigDict
 from dotenv import load_dotenv
 import json
 from docx import Document
@@ -20,6 +22,7 @@ from gemini_client import GeminiClient
 from docx_editor import DocxFullEditor
 from batch_update_models import BatchUpdateRequest, Operation, BatchUpdateResponse
 from batch_operations import validate_operation, execute_operation
+from smart_mail_merge_converter import SmartMailMergeConverter
 import traceback
 
 # Configure logging
@@ -32,22 +35,10 @@ logger = logging.getLogger(__name__)
 # ===== HELPER FUNCTIONS =====
 
 def save_and_regenerate_preview(editor: DocxFullEditor, template_path: str) -> tuple[list, str]:
-    """Save template và regenerate HTML preview
-
-    Args:
-        editor: DocxFullEditor instance
-        template_path: Path to save template
-
-    Returns:
-        Tuple of (fields, html_preview)
-    """
+    """Save template và regenerate HTML preview"""
     editor.save(str(template_path))
-
-    executor = MergeExecutor()
-    fields = executor.get_template_fields(str(template_path))
-
-    processor = MailMergeProcessor()
-    html_preview = processor._generate_html_preview(str(template_path))
+    fields = MergeExecutor().get_template_fields(str(template_path))
+    html_preview = MailMergeProcessor()._generate_html_preview(str(template_path))
 
     return fields, html_preview
 
@@ -77,6 +68,38 @@ def handle_endpoint_error(endpoint_name: str, error: Exception) -> HTTPException
     return HTTPException(status_code=500, detail=error_detail)
 
 
+def handle_endpoint_errors(endpoint_name: str):
+    """
+    Decorator để xử lý lỗi chuẩn cho các endpoint.
+
+    Tự động log traceback và raise HTTPException 500 với detail đầy đủ.
+    HTTPException được pass-through để giữ status code gốc.
+
+    Args:
+        endpoint_name: Tên endpoint cho log (vd: "suggest placeholders", "batch update")
+
+    Usage:
+        @app.post("/suggest-placeholders")
+        @handle_endpoint_errors("suggest placeholders")
+        async def suggest_placeholders(...):
+            # Logic - không cần try-except
+            pass
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except HTTPException:
+                # Pass-through HTTPException với status code gốc
+                raise
+            except Exception as e:
+                # Log traceback và raise HTTPException 500 với detail đầy đủ
+                raise handle_endpoint_error(endpoint_name, e)
+        return wrapper
+    return decorator
+
+
 def parse_json_list(raw_value: str | None) -> list[str]:
     """Parse a JSON array form field into a list of strings."""
     if not raw_value:
@@ -87,6 +110,14 @@ def parse_json_list(raw_value: str | None) -> list[str]:
         raise ValueError("Expected a JSON array")
 
     return [str(item) for item in parsed if item is not None]
+
+
+def empty_gemini_usage() -> dict:
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
 
 
 # Setup paths
@@ -149,11 +180,16 @@ async def root():
 
 
 @app.post("/convert")
-async def convert_to_template(file: UploadFile = File(...)):
+@handle_endpoint_errors("convert to template")
+async def convert_to_template(
+    file: UploadFile = File(...),
+    auto_fill_tables: bool = Form(True)
+):
     """Upload .docx and convert to Mail Merge template
 
     Args:
         file: Uploaded .docx file
+        auto_fill_tables: Auto-fill placeholders in empty table cells (default: True)
 
     Returns:
         JSON with template_id and list of detected fields
@@ -182,7 +218,7 @@ async def convert_to_template(file: UploadFile = File(...)):
         processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
-        result = processor.convert_to_mail_merge(str(temp_path), str(output_path))
+        result = processor.convert_to_mail_merge(str(temp_path), str(output_path), auto_fill_tables=auto_fill_tables)
 
         # Build response
         response_data = {
@@ -191,13 +227,13 @@ async def convert_to_template(file: UploadFile = File(...)):
             "field_count": result["field_count"],
             "html_preview": result["html_preview"],
             "download_url": f"/download/{result['template_id']}",
-            "method": result.get("method", "smart_converter")
+            "method": result.get("method", "smart_converter"),
+            "gemini_usage": result.get("gemini_usage", empty_gemini_usage()),
+            "gemini_usage_steps": result.get("gemini_usage_steps", [])
         }
 
         return JSONResponse(content=response_data)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
     finally:
         # Clean up temp file
         if temp_path.exists():
@@ -205,6 +241,7 @@ async def convert_to_template(file: UploadFile = File(...)):
 
 
 @app.post("/merge")
+@handle_endpoint_errors("merge template")
 async def merge_template(
     template_id: str = Form(...),
     context: str = Form(None),
@@ -224,70 +261,69 @@ async def merge_template(
     Returns:
         JSON with result_id and download_url
     """
-    template_path = TEMPLATE_DIR / f"{template_id}.docx"
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail=f"Template not found: {template_id}")
+    template_path = validate_template_path(template_id)
+    gemini_usage = empty_gemini_usage()
 
-    try:
-        executor = MergeExecutor()
-        template_fields = executor.get_template_fields(str(template_path))
+    executor = MergeExecutor()
+    template_field_metadata = executor.get_template_field_metadata(str(template_path))
+    template_fields = [item["field_name"] for item in template_field_metadata]
 
-        # Determine data source
-        if field_values:
-            data = json.loads(field_values)
+    # Determine data source
+    if field_values:
+        data = json.loads(field_values)
 
-            # Ensure all required fields have values (empty string if missing)
-            for field in template_fields:
-                if field not in data:
-                    data[field] = ""
+        # Ensure all required fields have values (empty string if missing)
+        for field in template_fields:
+            if field not in data:
+                data[field] = ""
 
-        elif context:
-            # Use Gemini to extract from context
-            try:
-                gemini_client = GeminiClient(GEMINI_API_KEY)
-            except ValueError as e:
-                raise HTTPException(status_code=500, detail=str(e))
-            
-            active_f = set(parse_json_list(active_fields))
-            locked_f = set(parse_json_list(locked_fields))
+    elif context:
+        # Use Gemini to extract from context
+        gemini_client = GeminiClient(GEMINI_API_KEY)
 
-            if active_f:
-                template_fields = [f for f in template_fields if f in active_f]
-            if locked_f:
-                template_fields = [f for f in template_fields if f not in locked_f]
-
-            logger.debug("=== MERGE DEBUG ===")
-            logger.debug(f"Template fields to extract: {template_fields}")
-            data = gemini_client.extract_data_from_context(
-                context,
-                template_fields
-            )
-            logger.debug("Extracted data: {data}")
-            logger.debug("=== END MERGE DEBUG ===")
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Either 'context' or 'field_values' must be provided"
-            )
-
-        # Execute merge
+        active_f = set(parse_json_list(active_fields))
         locked_f = set(parse_json_list(locked_fields))
-        result_path, result_id = executor.execute_merge(
-            str(template_path),
-            data,
-            locked_fields=locked_f
+
+        if active_f:
+            template_field_metadata = [
+                item for item in template_field_metadata if item["field_name"] in active_f
+            ]
+        if locked_f:
+            template_field_metadata = [
+                item for item in template_field_metadata if item["field_name"] not in locked_f
+            ]
+        template_fields = [item["field_name"] for item in template_field_metadata]
+
+        logger.debug("=== MERGE DEBUG ===")
+        logger.debug(f"Template fields to extract: {template_fields}")
+        data = gemini_client.extract_data_from_context(
+            context,
+            template_fields,
+            template_field_metadata=template_field_metadata,
+        )
+        logger.debug(f"Extracted data: {data}")
+        logger.debug("=== END MERGE DEBUG ===")
+        gemini_usage = gemini_client.get_usage_summary()
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Either 'context' or 'field_values' must be provided"
         )
 
-        return JSONResponse(content={
-            "result_id": result_id,
-            "download_url": f"/download/{result_id}",
-            "fields_filled": len(data)
-        })
+    # Execute merge
+    locked_f = set(parse_json_list(locked_fields))
+    result_path, result_id = executor.execute_merge(
+        str(template_path),
+        data,
+        locked_fields=locked_f
+    )
 
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Merge failed: {str(e)}")
+    return JSONResponse(content={
+        "result_id": result_id,
+        "download_url": f"/download/{result_id}",
+        "fields_filled": sum(1 for value in data.values() if str(value).strip()),
+        "gemini_usage": gemini_usage if context else empty_gemini_usage()
+    })
 
 
 @app.get("/download/{file_id}")
@@ -319,6 +355,7 @@ async def download_file(file_id: str):
 
 
 @app.get("/preview/{file_id}")
+@handle_endpoint_errors("preview file")
 async def preview_file(file_id: str):
     """Get HTML preview of template or result
 
@@ -344,29 +381,26 @@ async def preview_file(file_id: str):
     else:
         raise HTTPException(status_code=404, detail=f"File not found: {file_id}")
 
-    try:
-        # Generate HTML preview
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(file_path))
+    # Generate HTML preview
+    processor = MailMergeProcessor()
+    html_preview = processor._generate_html_preview(str(file_path))
 
-        # Get fields if it's a template
-        fields = []
-        if file_type == "template":
-            executor = MergeExecutor()
-            fields = executor.get_template_fields(str(file_path))
+    # Get fields if it's a template
+    fields = []
+    if file_type == "template":
+        executor = MergeExecutor()
+        fields = executor.get_template_fields(str(file_path))
 
-        return JSONResponse(content={
-            "file_id": file_id,
-            "file_type": file_type,
-            "html_preview": html_preview,
-            "fields": fields
-        })
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+    return JSONResponse(content={
+        "file_id": file_id,
+        "file_type": file_type,
+        "html_preview": html_preview,
+        "fields": fields
+    })
 
 
 @app.post("/suggest-placeholders")
+@handle_endpoint_errors("suggest placeholders")
 async def suggest_placeholders(template_id: str = Form(...)):
     """Analyze template with AI to detect missing placeholders
 
@@ -376,49 +410,41 @@ async def suggest_placeholders(template_id: str = Form(...)):
     Returns:
         JSON with AI suggestions for missing placeholders
     """
-    template_path = TEMPLATE_DIR / f"{template_id}.docx"
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail="Template not found")
+    template_path = validate_template_path(template_id)
 
-    try:
-        # Get existing fields from template
-        executor = MergeExecutor()
-        existing_fields = executor.get_template_fields(str(template_path))
+    # Get existing fields from template
+    executor = MergeExecutor()
+    existing_fields = executor.get_template_fields(str(template_path))
 
-        # Extract structured content for analysis
-        processor = MailMergeProcessor()
-        structured_content = processor.extract_structured_content(str(template_path))
+    # Extract structured content for analysis
+    processor = MailMergeProcessor()
+    structured_content = processor.extract_structured_content(str(template_path))
 
-        if not structured_content:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to extract content from template"
-            )
-
-        # Analyze with Gemini
-        gemini_client = GeminiClient(GEMINI_API_KEY)
-        analysis = gemini_client.analyze_document_for_placeholders(
-            structured_content,
-            existing_fields
-        )
-
-        suggestions = analysis.get("suggestions", [])
-
-        return {
-            "template_id": template_id,
-            "suggestions": suggestions
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
+    if not structured_content:
         raise HTTPException(
             status_code=500,
-            detail=f"Analysis failed: {str(e)}"
+            detail="Failed to extract content from template"
         )
+
+    # Analyze with Gemini
+    gemini_client = GeminiClient(GEMINI_API_KEY)
+    analysis = gemini_client.analyze_document_for_placeholders(
+        structured_content,
+        existing_fields
+    )
+
+    suggestions = analysis.get("suggestions", [])
+    gemini_usage = gemini_client.get_usage_summary()
+
+    return {
+        "template_id": template_id,
+        "suggestions": suggestions,
+        "gemini_usage": gemini_usage,
+    }
 
 
 @app.post("/apply-suggestions")
+@handle_endpoint_errors("apply AI suggestions")
 async def apply_ai_suggestions(
     template_id: str = Form(...),
     suggestions: str = Form(...)  # JSON string of suggestions to apply
@@ -432,85 +458,73 @@ async def apply_ai_suggestions(
     Returns:
         JSON with update results
     """
-    template_path = TEMPLATE_DIR / f"{template_id}.docx"
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail="Template not found")
+    template_path = validate_template_path(template_id)
 
-    try:
-        suggestions_list = json.loads(suggestions)
+    suggestions_list = json.loads(suggestions)
 
-        if not suggestions_list:
-            raise HTTPException(
-                status_code=400,
-                detail="No suggestions provided"
-            )
-
-        # Apply each suggestion
-        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
-        results = {
-            "template_id": template_id,
-            "total_suggestions": len(suggestions_list),
-            "successful": 0,
-            "failed": 0,
-            "applied_fields": []
-        }
-
-        for suggestion in suggestions_list:
-            block_index = suggestion.get("block_index")
-            field_name = suggestion.get("suggested_name")
-            context = suggestion.get("context", "")
-            before_context = suggestion.get("before_context", [])
-            after_context = suggestion.get("after_context", [])
-            position = suggestion.get("position", "right")
-            insert_after = suggestion.get("insert_after", None)
-
-            if block_index is None or not field_name:
-                results["failed"] += 1
-                continue
-
-            # Inject placeholder with full context and position
-            success = processor.inject_placeholder_at_location(
-                str(template_path),
-                block_index,
-                field_name,
-                context,
-                before_context,
-                after_context,
-                position,
-                None,  # cell_index
-                None,  # para_in_cell
-                insert_after
-            )
-
-            if success:
-                results["successful"] += 1
-                results["applied_fields"].append(field_name)
-            else:
-                results["failed"] += 1
-
-        # Get updated field list and HTML preview
-        executor = MergeExecutor()
-        updated_fields = executor.get_template_fields(str(template_path))
-
-        # Generate HTML preview with updated placeholders
-        html_preview = processor._generate_html_preview(str(template_path))
-
-        results["updated_field_count"] = len(updated_fields)
-        results["updated_fields"] = updated_fields
-        results["html_preview"] = html_preview
-
-        return results
-
-    except HTTPException:
-        raise
-    except Exception as e:
+    if not suggestions_list:
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to apply suggestions: {str(e)}"
+            status_code=400,
+            detail="No suggestions provided"
         )
+
+    # Apply each suggestion
+    processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+    results = {
+        "template_id": template_id,
+        "total_suggestions": len(suggestions_list),
+        "successful": 0,
+        "failed": 0,
+        "applied_fields": [],
+        "gemini_usage": empty_gemini_usage()
+    }
+
+    for suggestion in suggestions_list:
+        block_index = suggestion.get("block_index")
+        field_name = suggestion.get("suggested_name")
+        context = suggestion.get("context", "")
+        before_context = suggestion.get("before_context", [])
+        after_context = suggestion.get("after_context", [])
+        position = suggestion.get("position", "right")
+        insert_after = suggestion.get("insert_after", None)
+
+        if block_index is None or not field_name:
+            results["failed"] += 1
+            continue
+
+        # Inject placeholder with full context and position
+        success = processor.inject_placeholder_at_location(
+            str(template_path),
+            block_index,
+            field_name,
+            context,
+            before_context,
+            after_context,
+            position,
+            None,  # cell_index
+            None,  # para_in_cell
+            insert_after
+        )
+
+        if success:
+            results["successful"] += 1
+            results["applied_fields"].append(field_name)
+        else:
+            results["failed"] += 1
+
+    # Get updated field list and HTML preview using helper function
+    editor = DocxFullEditor(str(template_path))
+    updated_fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
+
+    results["updated_field_count"] = len(updated_fields)
+    results["updated_fields"] = updated_fields
+    results["html_preview"] = html_preview
+
+    return results
 
 
 @app.post("/suggest-field-name")
+@handle_endpoint_errors("suggest field name")
 async def suggest_field_name(
     template_id: str = Form(...),
     block_index: int = Form(...),
@@ -526,68 +540,42 @@ async def suggest_field_name(
     Returns:
         JSON with suggested field name
     """
-    template_path = TEMPLATE_DIR / f"{template_id}.docx"
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail="Template not found")
+    template_path = validate_template_path(template_id)
 
-    try:
-        # Initialize processor
-        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+    # Initialize processor
+    processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
 
-        # Extract structured content
-        structured_content = processor.extract_structured_content(str(template_path))
+    # Extract structured content
+    structured_content = processor.extract_structured_content(str(template_path))
 
-        # Extract text from block with fallback
-        extracted_text = processor.extract_text_from_block_with_fallback(
-            structured_content,
-            block_index,
-            para_in_cell
-        )
+    # Extract text from block with fallback
+    extracted_text = processor.extract_text_from_block_with_fallback(
+        structured_content,
+        block_index,
+        para_in_cell
+    )
 
-        if not extracted_text:
-            raise HTTPException(
-                status_code=400,
-                detail="Could not extract meaningful text from selected location"
-            )
-
-        # Generate smart field name
-        field_name = processor.generate_smart_field_name(
-            extracted_text,
-            structured_content,
-            block_index
-        )
-
-        return {
-            "success": True,
-            "field_name": field_name
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
+    if not extracted_text:
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to suggest field name: {str(e)}"
+            status_code=400,
+            detail="Could not extract meaningful text from selected location"
         )
 
+    # Generate smart field name
+    field_name = processor.generate_smart_field_name(
+        extracted_text,
+        structured_content,
+        block_index
+    )
 
-def map_camel_to_snake(format_data: dict) -> dict:
-    """Map camelCase keys to snake_case for Python functions"""
-    format_mapping = {
-        'fontSize': 'font_size',
-        'fontName': 'font_name',
-        'allCaps': 'all_caps',
-        'lineSpacing': 'line_spacing',
-        'spaceBefore': 'space_before',
-        'spaceAfter': 'space_after',
-        'firstLineIndent': 'first_line_indent',
-        'alignment': 'alignment'
+    return {
+        "success": True,
+        "field_name": field_name
     }
-    return {format_mapping.get(k, k): v for k, v in format_data.items()}
-
 
 
 @app.post("/get-selection-format")
+@handle_endpoint_errors("get selection format")
 async def get_selection_format(
     template_id: str = Form(...),
     selected_text: str = Form(...),
@@ -620,68 +608,57 @@ async def get_selection_format(
             'fontName': str
         }
     """
-    template_path = TEMPLATE_DIR / f"{template_id}.docx"
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail="Template not found")
+    template_path = validate_template_path(template_id)
 
-    try:
-        editor = DocxFullEditor(str(template_path))
+    editor = DocxFullEditor(str(template_path))
 
-        # Map block_index to paragraph_index if provided
-        actual_para_index = None
-        if block_index is not None:
-            # CRITICAL FIX: For table cells with para_in_cell, use get_table_cell_paragraph_index
-            # This correctly maps to the specific paragraph within the cell, not just the first one
-            if para_in_cell is not None:
-                actual_para_index = editor.get_table_cell_paragraph_index(block_index, para_in_cell)
-            else:
-                actual_para_index = editor.get_paragraph_index_from_block(block_index)
+    # Map block_index to paragraph_index if provided
+    actual_para_index = None
+    if block_index is not None:
+        # CRITICAL FIX: For table cells with para_in_cell, use get_table_cell_paragraph_index
+        # This correctly maps to the specific paragraph within the cell, not just the first one
+        if para_in_cell is not None:
+            actual_para_index = editor.get_table_cell_paragraph_index(block_index, para_in_cell)
+        else:
+            actual_para_index = editor.get_paragraph_index_from_block(block_index)
 
-        # Get format using offset (frontend always provides this)
-        format_info = editor.get_format(
-            paragraph_index=actual_para_index,
-            offset=offset,
-            end_offset=end_offset,
-            para_in_cell=para_in_cell
-        ) or {}
+    # Get format using offset (frontend always provides this)
+    format_info = editor.get_format(
+        paragraph_index=actual_para_index,
+        offset=offset,
+        end_offset=end_offset,
+        para_in_cell=para_in_cell
+    ) or {}
 
-        # Convert to frontend format
-        frontend_format = {
-            'bold': format_info.get('bold', False),
-            'italic': format_info.get('italic', False),
-            'underline': format_info.get('underline', 'none') != 'none',
-            'strikethrough': format_info.get('strikethrough', False),
-            'subscript': format_info.get('subscript', False),
-            'superscript': format_info.get('superscript', False),
-            'color': '#' + format_info.get('color', '000000'),
-            'fontSize': format_info.get('font_size', 12),
-            'fontName': format_info.get('font_name', 'Times New Roman')
-        }
+    # Convert to frontend format
+    frontend_format = {
+        'bold': format_info.get('bold', False),
+        'italic': format_info.get('italic', False),
+        'underline': format_info.get('underline', 'none') != 'none',
+        'strikethrough': format_info.get('strikethrough', False),
+        'subscript': format_info.get('subscript', False),
+        'superscript': format_info.get('superscript', False),
+        'color': '#' + format_info.get('color', '000000'),
+        'fontSize': format_info.get('font_size', 12),
+        'fontName': format_info.get('font_name', 'Times New Roman')
+    }
 
-        # Include highlight color if present
-        if format_info.get('highlight'):
-            frontend_format['highlight'] = '#' + format_info['highlight']
+    # Include highlight color if present
+    if format_info.get('highlight'):
+        frontend_format['highlight'] = '#' + format_info['highlight']
 
-        return {
-            'template_id': template_id,
-            'selected_text': selected_text,
-            'format': frontend_format
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_detail = f"Format extraction failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-        logger.error("=== /get-selection-format ERROR ===")
-        logger.error(error_detail)
-        logger.error("=== END ERROR ===")
-        raise HTTPException(status_code=500, detail=error_detail)
+    return {
+        'template_id': template_id,
+        'selected_text': selected_text,
+        'format': frontend_format
+    }
 
 
 # Table operations now handled by /batch-update endpoint
 # Use: batchUpdate(templateId, [{type: "add_table_row", ...}])
 
 @app.get("/get-cell-format")
+@handle_endpoint_errors("get cell format")
 async def get_cell_format(
     template_id: str,
     table_index: int,
@@ -692,42 +669,36 @@ async def get_cell_format(
 
     Returns background color, vertical alignment, and horizontal alignment
     """
-    try:
-        # Validate required parameters
-        if not template_id:
-            raise HTTPException(status_code=400, detail="template_id is required")
+    # Validate required parameters
+    if not template_id:
+        raise HTTPException(status_code=400, detail="template_id is required")
 
-        # Validate template exists
-        template_path = validate_template_path(template_id)
+    # Validate template exists
+    template_path = validate_template_path(template_id)
 
-        # Create editor
-        editor = DocxFullEditor(str(template_path))
+    # Create editor
+    editor = DocxFullEditor(str(template_path))
 
-        # Get cell format
-        cell_format = editor.get_cell_format(table_index, row_index, col_index)
+    # Get cell format
+    cell_format = editor.get_cell_format(table_index, row_index, col_index)
 
-        if cell_format is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid table_index, row_index, or col_index"
-            )
+    if cell_format is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid table_index, row_index, or col_index"
+        )
 
-        return {
-            "template_id": template_id,
-            "table_index": table_index,
-            "row_index": row_index,
-            "col_index": col_index,
-            "format": cell_format
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Get cell format error: {str(e)}")
-        raise handle_endpoint_error("Get cell format", e)
+    return {
+        "template_id": template_id,
+        "table_index": table_index,
+        "row_index": row_index,
+        "col_index": col_index,
+        "format": cell_format
+    }
 
 
 @app.post("/add-image-at-cursor")
+@handle_endpoint_errors("add image at cursor")
 async def add_image_at_cursor(request: Request):
     """Thêm ảnh tại vị trí cursor chính xác
 
@@ -741,128 +712,185 @@ async def add_image_at_cursor(request: Request):
     Returns:
         Updated template với ảnh mới và HTML preview
     """
+    # Parse form data
+    form = await request.form()
+    template_id = form.get("template_id")
+    block_index = form.get("block_index")
+    offset = form.get("offset")
+    width = form.get("width", "4.0")
+
+    # Get uploaded file
+    image_file = form.get("image")
+    if not image_file:
+        raise HTTPException(status_code=400, detail="image file is required")
+
+    # Validate required parameters
+    if not template_id:
+        raise HTTPException(status_code=400, detail="template_id is required")
+    if block_index is None:
+        raise HTTPException(status_code=400, detail="block_index is required")
+    if offset is None:
+        raise HTTPException(status_code=400, detail="offset is required")
+
+    # Parse numeric parameters
     try:
-        # Parse form data
-        form = await request.form()
-        template_id = form.get("template_id")
-        block_index = form.get("block_index")
-        offset = form.get("offset")
-        width = form.get("width", "4.0")
+        block_index = int(block_index)
+        offset = int(offset)
+        width = float(width)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid numeric parameters")
 
-        # Get uploaded file
-        image_file = form.get("image")
-        if not image_file:
-            raise HTTPException(status_code=400, detail="image file is required")
+    # Validate ranges
+    if width < 1.0 or width > 8.0:
+        raise HTTPException(status_code=400, detail="width must be between 1.0 and 8.0 inches")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
 
-        # Validate required parameters
-        if not template_id:
-            raise HTTPException(status_code=400, detail="template_id is required")
-        if block_index is None:
-            raise HTTPException(status_code=400, detail="block_index is required")
-        if offset is None:
-            raise HTTPException(status_code=400, detail="offset is required")
+    # Check template exists
+    template_path = validate_template_path(template_id)
 
-        # Parse numeric parameters
-        try:
-            block_index = int(block_index)
-            offset = int(offset)
-            width = float(width)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid numeric parameters")
+    logger.info(f" add_image_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, width={width}")
 
-        # Validate ranges
-        if width < 1.0 or width > 8.0:
-            raise HTTPException(status_code=400, detail="width must be between 1.0 and 8.0 inches")
-        if offset < 0:
-            raise HTTPException(status_code=400, detail="offset must be >= 0")
+    # Validate image file
+    if not image_file.filename:
+        raise HTTPException(status_code=400, detail="Invalid image file")
 
-        # Check template exists
-        template_path = TEMPLATE_DIR / f"{template_id}.docx"
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
+    # Check file extension
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
+    file_ext = Path(image_file.filename).suffix.lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}"
+        )
 
-        logger.info(f" add_image_at_cursor called: template_id={template_id}, block_index={block_index}, offset={offset}, width={width}")
+    # Generate unique filename
+    import uuid
+    unique_filename = f"{uuid.uuid4()}{file_ext}"
+    image_path = IMAGE_DIR / unique_filename
 
-        # Validate image file
-        if not image_file.filename:
-            raise HTTPException(status_code=400, detail="Invalid image file")
+    # Save uploaded image
+    with open(image_path, "wb") as buffer:
+        content = await image_file.read()
+        buffer.write(content)
+    logger.debug(f" Image saved to: {image_path}")
 
-        # Check file extension
-        allowed_extensions = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
-        file_ext = Path(image_file.filename).suffix.lower()
-        if file_ext not in allowed_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}"
-            )
+    # Open and edit template
+    editor = DocxFullEditor(str(template_path))
 
-        # Generate unique filename
-        import uuid
-        unique_filename = f"{uuid.uuid4()}{file_ext}"
-        image_path = IMAGE_DIR / unique_filename
+    # Map block_index to paragraph_index
+    paragraph_index = editor.get_paragraph_index_from_block(block_index)
+    if paragraph_index is None:
+        raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
 
-        # Save uploaded image
-        try:
-            with open(image_path, "wb") as buffer:
-                content = await image_file.read()
-                buffer.write(content)
-            logger.debug(f" Image saved to: {image_path}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save image: {str(e)}")
+    logger.debug(f" Mapped block_index={block_index} to paragraph_index={paragraph_index}")
 
-        # Open and edit template
-        editor = DocxFullEditor(str(template_path))
+    # Add image at cursor position
+    editor.add_image_at_cursor(
+        paragraph_index=paragraph_index,
+        offset=offset,
+        image_path=str(image_path),
+        width=width
+    )
+    logger.info(f" Successfully added image at cursor position")
 
-        # Map block_index to paragraph_index
-        paragraph_index = editor.get_paragraph_index_from_block(block_index)
-        if paragraph_index is None:
-            raise HTTPException(status_code=400, detail=f"Invalid block_index: {block_index}")
+    # Save and regenerate preview using helper function
+    fields, html_preview = save_and_regenerate_preview(editor, str(template_path))
 
-        logger.debug(f" Mapped block_index={block_index} to paragraph_index={paragraph_index}")
+    return {
+        "template_id": template_id,
+        "success": True,
+        "fields": fields,
+        "field_count": len(fields),
+        "html_preview": html_preview,
+        "operation": "add_image_at_cursor",
+        "image_width": f"{width} inches"
+    }
 
-        # Add image at cursor position
-        try:
-            editor.add_image_at_cursor(
-                paragraph_index=paragraph_index,
-                offset=offset,
-                image_path=str(image_path),
-                width=width
-            )
-            logger.info(f" Successfully added image at cursor position")
-        except Exception as e:
-            error_detail = f"Failed to add image at cursor: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            logger.error("=== add_image_at_cursor ERROR ===")
-            logger.error(error_detail)
-            logger.error("=== END ERROR ===")
-            raise HTTPException(status_code=500, detail=error_detail)
 
-        # Save updated template
-        editor.save(str(template_path))
+# =============================================================================
+# PYDANTIC MODELS FOR TABLE EXPANSION
+# =============================================================================
 
-        # IMPORTANT: Reload editor from saved file
-        editor = DocxFullEditor(str(template_path))
-
-        # Regenerate HTML preview
-        executor = MergeExecutor()
-        fields = executor.get_template_fields(str(template_path))
-
-        processor = MailMergeProcessor()
-        html_preview = processor._generate_html_preview(str(template_path))
-
-        return {
-            "template_id": template_id,
-            "success": True,
-            "fields": fields,
-            "field_count": len(fields),
-            "html_preview": html_preview,
-            "operation": "add_image_at_cursor",
-            "image_width": f"{width} inches"
+class TableExpansionPreviewRequest(BaseModel):
+    """Request model cho table expansion preview"""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "template_id": "778c04c8-d477-49ff-a791-274bc4ee9a9e",
+                "context_data": {
+                    "thong_tin_nha_dau_tu": ["ho_ten", "ngay_sinh", "quoc_tich"],
+                    "ty_le_gop_von": ["nha_dau_tu_1", "nha_dau_tu_2", "nha_dau_tu_3"]
+                },
+                "auto_expand": True
+            }
         }
+    )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise handle_endpoint_error("Add image at cursor", e)
+    template_id: str = Field(..., description="Template ID from /convert endpoint")
+    context_data: Dict[str, List[str]] = Field(..., description="Context data với field names organized by sections")
+    auto_expand: bool = Field(True, description="Tự động expand tables nếu cần")
+
+
+class TableExpansionRequest(BaseModel):
+    """Request model cho merge với table expansion"""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "template_id": "778c04c8-d477-49ff-a791-274bc4ee9a9e",
+                "context_data": {
+                    "thong_tin_nha_dau_tu": ["ho_ten", "ngay_sinh", "quoc_tich"],
+                    "ty_le_gop_von": ["nha_dau_tu_1", "nha_dau_tu_2", "nha_dau_tu_3"]
+                },
+                "field_values": {
+                    "ho_ten": "Nguyễn Văn A",
+                    "ngay_sinh": "01/01/1990"
+                },
+                "auto_expand": True,
+                "preview_only": False
+            }
+        }
+    )
+
+    template_id: str = Field(..., description="Template ID from /convert endpoint")
+    context_data: Dict[str, List[str]] = Field(..., description="Context data organized by sections")
+    field_values: Optional[Dict[str, str]] = Field(None, description="Optional field values để merge")
+    auto_expand: bool = Field(True, description="Tự động expand tables nếu cần")
+    preview_only: bool = Field(False, description="Nếu True, chỉ preview mà không execute")
+
+
+class TableAnalysis(BaseModel):
+    """Model cho table analysis result"""
+    table_index: int
+    total_rows: int
+    data_rows: int
+    columns: int
+    empty_cells: int
+    needs_expansion: bool
+    rows_to_add: int
+    empty_cells_after_expansion: int
+
+
+class TableExpansionPreviewResponse(BaseModel):
+    """Response model cho table expansion preview"""
+    template_id: str
+    needs_expansion: bool
+    total_fields_required: int
+    table_fields_required: int
+    tables_analysis: List[TableAnalysis]
+    summary: str
+
+
+class TableExpansionResponse(BaseModel):
+    """Response model cho merge với expansion"""
+    template_id: str
+    result_id: Optional[str] = None
+    success: Optional[bool] = None  # None for preview mode
+    message: str
+    tables_expanded: int
+    total_rows_added: int
+    fields_filled: int
+    download_url: Optional[str] = None
 
 
 # =============================================================================
@@ -870,6 +898,7 @@ async def add_image_at_cursor(request: Request):
 # =============================================================================
 
 @app.post("/batch-update")
+@handle_endpoint_errors("batch update")
 async def batch_update(request: Request):
     """
     Universal batch update endpoint - executes ALL operations in a single atomic transaction
@@ -894,7 +923,7 @@ async def batch_update(request: Request):
     {
         "template_id": "778c04c8-d477-49ff-a791-274bc4ee9a9e",
         "operations": [
-            {"type": "rename_placeholder", "old_name": "ho_ten", "new_name": "ten_day_du"},
+            {"type": "rename_placeholder", "old_name": "ho_ten", "new_name": "ten_day_du", "occurrence_index": 0},
             {"type": "delete_placeholder", "field_name": "dia_chi_cu"},
             {"type": "update_text", "block_index": 5, "old_text": "Hello", "new_text": "Hi"},
             {"type": "format_text", "block_index": 10, "selected_text": "Important",
@@ -916,43 +945,59 @@ async def batch_update(request: Request):
         "html_preview": "..."
     }
     """
-    try:
-        # Parse request body as JSON
-        request_data = await request.json()
+    # Parse request body as JSON
+    request_data = await request.json()
 
-        # Validate and parse request
-        batch_request = BatchUpdateRequest(**request_data)
+    # Validate and parse request
+    batch_request = BatchUpdateRequest(**request_data)
 
-        template_path = validate_template_path(batch_request.template_id)
+    template_path = validate_template_path(batch_request.template_id)
 
-        results = {
-            "template_id": batch_request.template_id,
-            "total_operations": len(batch_request.operations),
-            "successful": 0,
-            "failed": 0,
-            "operation_results": [],
-            "validation_errors": [],
-            "execution_errors": []
-        }
+    results = {
+        "template_id": batch_request.template_id,
+        "total_operations": len(batch_request.operations),
+        "successful": 0,
+        "failed": 0,
+        "operation_results": [],
+        "validation_errors": [],
+        "execution_errors": []
+    }
 
-        logger.info(f" ===== BATCH UPDATE START =====")
-        logger.info(f" Template ID: {batch_request.template_id}")
-        logger.info(f" Total operations: {len(batch_request.operations)}")
-        logger.info(f" Validate only: {batch_request.validate_only}")
-        logger.info(f" Stop on error: {batch_request.stop_on_error}")
+    logger.info(f" ===== BATCH UPDATE START =====")
+    logger.info(f" Template ID: {batch_request.template_id}")
+    logger.info(f" Total operations: {len(batch_request.operations)}")
+    logger.info(f" Validate only: {batch_request.validate_only}")
+    logger.info(f" Stop on error: {batch_request.stop_on_error}")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            working_template_path = Path(tmpdir) / template_path.name
-            shutil.copy2(template_path, working_template_path)
-            editor = DocxFullEditor(str(working_template_path))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        working_template_path = Path(tmpdir) / template_path.name
+        shutil.copy2(template_path, working_template_path)
+        editor = DocxFullEditor(str(working_template_path))
 
-            logger.info(" ===== PHASE 1: VALIDATE AND APPLY =====")
+        logger.info(" ===== PHASE 1: VALIDATE AND APPLY =====")
 
-            for i, op in enumerate(batch_request.operations):
-                try:
-                    validate_operation(editor, op)
-                except ValueError as e:
-                    error_msg = f"Op {i} ({op.type}): {str(e)}"
+        for i, op in enumerate(batch_request.operations):
+            try:
+                validate_operation(editor, op)
+            except ValueError as e:
+                error_msg = f"Op {i} ({op.type}): {str(e)}"
+                results["validation_errors"].append(error_msg)
+                results["operation_results"].append({
+                    "index": i,
+                    "type": op.type,
+                    "status": "validation_failed",
+                    "error": str(e)
+                })
+                logger.debug(f" Op {i} ({op.type}): ✗ VALIDATION FAILED - {str(e)}")
+                if batch_request.stop_on_error:
+                    break
+                continue
+
+            try:
+                execute_operation(editor, op)
+            except Exception as e:
+                error_msg = f"Op {i} ({op.type}): {str(e)}"
+                if batch_request.validate_only:
                     results["validation_errors"].append(error_msg)
                     results["operation_results"].append({
                         "index": i,
@@ -960,116 +1005,310 @@ async def batch_update(request: Request):
                         "status": "validation_failed",
                         "error": str(e)
                     })
-                    logger.debug(f" Op {i} ({op.type}): ✗ VALIDATION FAILED - {str(e)}")
-                    if batch_request.stop_on_error:
-                        break
-                    continue
-
-                try:
-                    execute_operation(editor, op)
-                except Exception as e:
-                    error_msg = f"Op {i} ({op.type}): {str(e)}"
+                else:
+                    results["failed"] += 1
+                    results["execution_errors"].append(error_msg)
+                    results["operation_results"].append({
+                        "index": i,
+                        "type": op.type,
+                        "status": "failed",
+                        "error": str(e)
+                    })
+                logger.debug(f" Op {i} ({op.type}): ✗ EXECUTION FAILED - {str(e)}")
+                if batch_request.stop_on_error:
                     if batch_request.validate_only:
-                        results["validation_errors"].append(error_msg)
-                        results["operation_results"].append({
-                            "index": i,
-                            "type": op.type,
-                            "status": "validation_failed",
-                            "error": str(e)
-                        })
-                    else:
-                        results["failed"] += 1
-                        results["execution_errors"].append(error_msg)
-                        results["operation_results"].append({
-                            "index": i,
-                            "type": op.type,
-                            "status": "failed",
-                            "error": str(e)
-                        })
-                    logger.debug(f" Op {i} ({op.type}): ✗ EXECUTION FAILED - {str(e)}")
-                    if batch_request.stop_on_error:
-                        if batch_request.validate_only:
-                            break
-                        raise HTTPException(
-                            status_code=500,
-                            detail={
-                                "error": "Batch update failed",
-                                "failed_operation": error_msg,
-                                "message": f"Operation {i} failed during execution."
-                            }
-                        )
-                    continue
+                        break
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "error": "Batch update failed",
+                            "failed_operation": error_msg,
+                            "message": f"Operation {i} failed during execution."
+                        }
+                    )
+                continue
 
-                results["successful"] += 1
-                results["operation_results"].append({
-                    "index": i,
-                    "type": op.type,
-                    "status": "validated" if batch_request.validate_only else "executed"
-                })
-                logger.debug(f" Op {i} ({op.type}): ✓ SUCCESS")
+            results["successful"] += 1
+            results["operation_results"].append({
+                "index": i,
+                "type": op.type,
+                "status": "validated" if batch_request.validate_only else "executed"
+            })
+            logger.debug(f" Op {i} ({op.type}): ✓ SUCCESS")
 
-            if results["validation_errors"]:
-                logger.info(" ===== VALIDATION FAILED =====")
-                logger.info(f" Validation errors: {len(results['validation_errors'])}")
+        if results["validation_errors"]:
+            logger.info(" ===== VALIDATION FAILED =====")
+            logger.info(f" Validation errors: {len(results['validation_errors'])}")
 
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        **results,
-                        "success": False,
-                        "message": "Validation failed - no changes made",
-                        "fields": [],
-                        "field_count": 0,
-                        "html_preview": ""
-                    }
-                )
-
-            if batch_request.validate_only:
-                logger.info(" ===== VALIDATE ONLY MODE - SKIPPING SAVE =====")
-
-                return {
+            return JSONResponse(
+                status_code=400,
+                content={
                     **results,
-                    "success": True,
-                    "message": "Validation passed - no changes made (validate_only mode)",
+                    "success": False,
+                    "message": "Validation failed - no changes made",
                     "fields": [],
                     "field_count": 0,
                     "html_preview": ""
                 }
+            )
 
-            # =============================================================================
-            # PHASE 2: SAVE & REGENERATE
-            # =============================================================================
-            logger.info(" ===== PHASE 2: SAVE & REGENERATE =====")
+        if batch_request.validate_only:
+            logger.info(" ===== VALIDATE ONLY MODE - SKIPPING SAVE =====")
 
-            # Save updated template in the isolated working copy first, then
-            # commit the final file back to the real template path.
-            fields, html_preview = save_and_regenerate_preview(editor, str(working_template_path))
-            shutil.copy2(working_template_path, template_path)
+            return {
+                **results,
+                "success": True,
+                "message": "Validation passed - no changes made (validate_only mode)",
+                "fields": [],
+                "field_count": 0,
+                "html_preview": ""
+            }
 
-        logger.info(f" ===== BATCH UPDATE COMPLETE =====")
-        logger.info(f" Successful: {results['successful']}")
-        logger.info(f" Failed: {results['failed']}")
-        logger.info(f" Total fields: {len(fields)}")
+        # =============================================================================
+        # PHASE 2: SAVE & REGENERATE
+        # =============================================================================
+        logger.info(" ===== PHASE 2: SAVE & REGENERATE =====")
 
-        return {
-            **results,
-            "success": results["failed"] == 0,
-            "fields": fields,
-            "field_count": len(fields),
-            "html_preview": html_preview,
-            "message": f"Batch update completed: {results['successful']} succeeded, {results['failed']} failed"
-        }
+        # Save updated template in the isolated working copy first, then
+        # commit the final file back to the real template path.
+        fields, html_preview = save_and_regenerate_preview(editor, str(working_template_path))
+        shutil.copy2(working_template_path, template_path)
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f" ===== BATCH UPDATE FAILED =====")
-        logger.error(f" {str(e)}")
-        logger.debug(f"[TRACEBACK] {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Batch update failed: {str(e)}"
+    logger.info(f" ===== BATCH UPDATE COMPLETE =====")
+    logger.info(f" Successful: {results['successful']}")
+    logger.info(f" Failed: {results['failed']}")
+    logger.info(f" Total fields: {len(fields)}")
+
+    return {
+        **results,
+        "success": results["failed"] == 0,
+        "fields": fields,
+        "field_count": len(fields),
+        "html_preview": html_preview,
+        "message": f"Batch update completed: {results['successful']} succeeded, {results['failed']} failed"
+    }
+
+
+# =============================================================================
+# TABLE EXPANSION ENDPOINTS
+# =============================================================================
+
+@app.post("/api/preview-table-expansion")
+@handle_endpoint_errors("preview table expansion")
+async def preview_table_expansion(request: TableExpansionPreviewRequest):
+    """
+    Preview table expansion plan trước khi execute
+
+    Analyzes context data và table structure để determine:
+    - Có cần expansion không?
+    - Bao nhiêu rows cần thêm?
+    - Bảng nào sẽ được expanded?
+
+    Args:
+        request: TableExpansionPreviewRequest với template_id và context_data
+
+    Returns:
+        TableExpansionPreviewResponse với detailed analysis
+    """
+    template_path = validate_template_path(request.template_id)
+
+    # Initialize converter
+    converter = SmartMailMergeConverter(str(template_path), gemini_api_key=GEMINI_API_KEY)
+
+    # Analyze context requirements
+    requirements = converter._analyze_context_requirements(request.context_data)
+
+    # Analyze each table
+    tables_analysis = []
+    total_rows_to_add = 0
+    needs_expansion = False
+
+    for table_idx, table in enumerate(converter.doc.tables):
+        structure = converter._get_table_structure(table)
+        empty_cells = converter._count_empty_cells_in_table(table)
+
+        # Determine if this table needs expansion
+        # Use table_fields if available, otherwise use total_fields
+        table_required_fields = len(requirements["table_fields"]) if requirements["table_fields"] else 0
+
+        # For preview, we'll show what WOULD happen if we expanded
+        # Calculate expansion needed
+        if empty_cells < table_required_fields:
+            expansion_result = converter._expand_table_for_context(table, table_required_fields)
+            needs_expansion_table = True
+        else:
+            expansion_result = {
+                "rows_added": 0,
+                "total_rows": len(table.rows),
+                "empty_cells": empty_cells
+            }
+            needs_expansion_table = False
+
+        if needs_expansion_table:
+            needs_expansion = True
+            total_rows_to_add += expansion_result["rows_added"]
+
+        table_analysis = TableAnalysis(
+            table_index=table_idx,
+            total_rows=structure["data_rows"] + (1 if structure["has_header"] else 0),
+            data_rows=structure["data_rows"],
+            columns=structure["columns"],
+            empty_cells=empty_cells,
+            needs_expansion=needs_expansion_table,
+            rows_to_add=expansion_result["rows_added"],
+            empty_cells_after_expansion=expansion_result["empty_cells"]
         )
+        tables_analysis.append(table_analysis)
+
+    # Generate summary
+    if needs_expansion:
+        summary = f"Cần mở rộng {total_rows_to_add} rows across {len([t for t in tables_analysis if t.needs_expansion])} tables"
+    else:
+        summary = "Tất cả bảng đã có đủ chỗ, không cần mở rộng"
+
+    return TableExpansionPreviewResponse(
+        template_id=request.template_id,
+        needs_expansion=needs_expansion,
+        total_fields_required=requirements["total_fields"],
+        table_fields_required=len(requirements["table_fields"]),
+        tables_analysis=tables_analysis,
+        summary=summary
+    )
+
+
+@app.post("/api/merge-with-expansion")
+@handle_endpoint_errors("merge with table expansion")
+async def merge_with_table_expansion(request: TableExpansionRequest):
+    """
+    Execute merge với automatic table expansion
+
+    Process:
+    1. Analyze context và determine expansion needs
+    2. Create working copy of template
+    3. Expand tables if needed
+    4. Execute merge
+    5. Save result
+
+    Args:
+        request: TableExpansionRequest với template_id, context_data, và options
+
+    Returns:
+        TableExpansionResponse với result details và download URL
+    """
+    template_path = validate_template_path(request.template_id)
+
+    # Analyze context requirements
+    converter = SmartMailMergeConverter(str(template_path), gemini_api_key=GEMINI_API_KEY)
+    requirements = converter._analyze_context_requirements(request.context_data)
+
+    if request.preview_only:
+        # Preview mode - just return what would happen
+        preview = await preview_table_expansion(
+            TableExpansionPreviewRequest(
+                template_id=request.template_id,
+                context_data=request.context_data,
+                auto_expand=request.auto_expand
+            )
+        )
+        return TableExpansionResponse(
+            template_id=request.template_id,
+            success=None,
+            message="Preview mode - no changes made",
+            tables_expanded=0,
+            total_rows_added=0,
+            fields_filled=0,
+            download_url=None
+        )
+
+    # Execute mode
+    logger.info(f" ===== MERGE WITH EXPANSION START =====")
+    logger.info(f" Template ID: {request.template_id}")
+    logger.info(f" Total fields required: {requirements['total_fields']}")
+    logger.info(f" Table fields required: {len(requirements['table_fields'])}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create working copy
+        working_template = Path(tmpdir) / template_path.name
+        shutil.copy2(template_path, working_template)
+
+        # Re-initialize converter with working copy
+        converter = SmartMailMergeConverter(str(working_template), gemini_api_key=GEMINI_API_KEY)
+
+        # Expand tables if needed
+        tables_expanded = 0
+        total_rows_added = 0
+
+        if request.auto_expand:
+            logger.info(" ===== EXPANDING TABLES =====")
+
+            for table_idx, table in enumerate(converter.doc.tables):
+                structure = converter._get_table_structure(table)
+                empty_cells = converter._count_empty_cells_in_table(table)
+
+                # Determine required fields for this table
+                table_required_fields = len(requirements["table_fields"]) if requirements["table_fields"] else 0
+
+                if empty_cells < table_required_fields and table_required_fields > 0:
+                    expansion_result = converter._expand_table_for_context(table, table_required_fields)
+
+                    if expansion_result["rows_added"] > 0:
+                        tables_expanded += 1
+                        total_rows_added += expansion_result["rows_added"]
+                        logger.info(f" Table {table_idx}: Added {expansion_result['rows_added']} rows")
+                        logger.info(f"   Before: {structure['data_rows']} data rows × {structure['columns']} cols")
+                        logger.info(f"   After: {expansion_result['total_rows']} total rows")
+
+        # Save expanded template using doc object directly
+        converter.doc.save(str(working_template))
+
+        # Execute merge
+        logger.info(" ===== EXECUTING MERGE =====")
+
+        executor = MergeExecutor()
+        template_field_metadata = executor.get_template_field_metadata(str(working_template))
+        template_fields = [item["field_name"] for item in template_field_metadata]
+
+        # Determine data source
+        if request.field_values:
+            data = request.field_values
+
+            # Ensure all required fields have values
+            for field in template_fields:
+                if field not in data:
+                    data[field] = ""
+
+            logger.info(f" Using provided field_values: {len(data)} fields")
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="field_values must be provided for merge"
+            )
+
+        # Execute merge
+        result_path, result_id = executor.execute_merge(
+            str(working_template),
+            data,
+            locked_fields=set()
+        )
+
+        # Note: execute_merge already saves to RESULT_DIR, so result_path is the final location
+        # No need to copy again
+
+        logger.info(f" ===== MERGE COMPLETE =====")
+        logger.info(f" Tables expanded: {tables_expanded}")
+        logger.info(f" Total rows added: {total_rows_added}")
+        logger.info(f" Fields filled: {sum(1 for v in data.values() if str(v).strip())}")
+
+    return TableExpansionResponse(
+        template_id=request.template_id,
+        result_id=result_id,
+        success=True,
+        message=f"Merge completed: {tables_expanded} tables expanded, {total_rows_added} rows added",
+        tables_expanded=tables_expanded,
+        total_rows_added=total_rows_added,
+        fields_filled=sum(1 for v in data.values() if str(v).strip()),
+        download_url=f"/download/{result_id}"
+    )
 
 
 if __name__ == "__main__":

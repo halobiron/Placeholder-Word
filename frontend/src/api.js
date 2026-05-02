@@ -302,13 +302,6 @@ export const deleteParagraph = async (templateId, blockIndex, tableIndex = null,
   }])
 }
 
-export const deleteMultipleParagraphs = async (templateId, blocks) => {
-  return await batchUpdate(templateId, [{
-    type: 'delete_multiple_paragraphs',
-    blocks: blocks
-  }])
-}
-
 export const addTableAtCursor = async (templateId, blockIndex, offset, rows = 3, cols = 3) => {
   return await batchUpdate(templateId, [{
     type: 'add_table_at_cursor',
@@ -367,7 +360,7 @@ export const addHyperlink = async (templateId, blockIndex, startOffset, endOffse
  * @example
  * // Rename and delete placeholders
  * const result = await batchUpdate(templateId, [
- *   { type: 'rename_placeholder', old_name: 'ho_ten', new_name: 'ten_day_du' },
+ *   { type: 'rename_placeholder', old_name: 'ho_ten', new_name: 'ten_day_du', occurrence_index: 0 },
  *   { type: 'delete_placeholder', field_name: 'dia_chi_cu' }
  * ])
  *
