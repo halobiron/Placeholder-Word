@@ -20,6 +20,7 @@ from docx_editor import DocxFullEditor
 
 class MailMergeProcessor:
     """Convert .docx to Mail Merge template using SmartMailMergeConverter"""
+    PAGE_BREAK_TOKEN = "__DOCX_PAGE_BREAK__"
 
     def __init__(self, gemini_api_key: str = None, timeout: int = 30):
         """Initialize processor
@@ -1511,7 +1512,13 @@ JSON:"""
                     # and better match standard tab width
                     text_parts.append("    ")
                 elif c_tag == 'br':
-                    text_parts.append("<br>")
+                    br_type = child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type")
+                    if br_type == "page":
+                        # Preserve page breaks as a separate token so the paragraph
+                        # renderer can place the visual indicator before the next line.
+                        text_parts.append(self.PAGE_BREAK_TOKEN)
+                    else:
+                        text_parts.append("<br>")
                 # Note: footnoteReference and endnoteReference are handled above
                 # by adding superscript style to the entire run
                 elif c_tag == 'drawing':
@@ -1529,14 +1536,23 @@ JSON:"""
                     field_name = match.group(1).strip()
                     return f'<span class="mail-merge-placeholder" data-field="{field_name}" contenteditable="false" style="{style_text}">«{field_name}»</span>'
 
-                text_with_highlights = re.sub(r'«([^»]+)»', highlight_placeholder, text)
-                
-                # CRITICAL FIX: Always wrap the entire run content in the run style if style exists.
-                # This ensures text surrounding a placeholder doesn't lose its formatting.
-                if style_text:
-                    result_parts.append(f'<span style="{style_text}">{text_with_highlights}</span>')
+                def wrap_fragment(fragment: str) -> str:
+                    fragment_with_highlights = re.sub(r'«([^»]+)»', highlight_placeholder, fragment)
+                    # CRITICAL FIX: Always wrap the entire run content in the run style if style exists.
+                    # This ensures text surrounding a placeholder doesn't lose its formatting.
+                    if style_text:
+                        return f'<span style="{style_text}">{fragment_with_highlights}</span>'
+                    return fragment_with_highlights
+
+                if self.PAGE_BREAK_TOKEN in text:
+                    fragments = text.split(self.PAGE_BREAK_TOKEN)
+                    for idx, fragment in enumerate(fragments):
+                        if fragment:
+                            result_parts.append(wrap_fragment(fragment))
+                        if idx < len(fragments) - 1:
+                            result_parts.append(self.PAGE_BREAK_TOKEN)
                 else:
-                    result_parts.append(text_with_highlights)
+                    result_parts.append(wrap_fragment(text))
 
             # Add images
             result_parts.extend(image_html)
@@ -1711,48 +1727,6 @@ JSON:"""
                 has_page_break = True
                 break
 
-        content = "".join(self._process_xml_element_to_html(child) for child in para._p)
-        if is_empty or not content.strip():
-            # Empty paragraph - preserve for visual layout, selectable for adding placeholders
-            cursor_style = "cursor: crosshair;" if block_index >= 0 else "cursor: default;"
-
-            # FIX: Use empty content with CSS min-height instead of &nbsp;
-            # This prevents non-breaking space from appearing when users type in empty paragraphs
-            # The min-height: 1.2em + display: block ensures the paragraph is visible and clickable
-            empty_content = ""
-
-            # Check if this empty paragraph has a page break
-            if has_page_break:
-                # Empty paragraph WITH page break - show visual indicator
-                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para page-break-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}" title="Ngắt trang (Page Break)">{3}</p>'.format(
-                    block_index, str(has_page_break).lower(), cursor_style, empty_content
-                ) + '''
-                <div class="page-break-indicator" contenteditable="false" style="
-                    margin: 20px 0 !important;
-                    padding: 10px !important;
-                    border-top: 2px dashed #666 !important;
-                    border-bottom: 2px dashed #666 !important;
-                    text-align: center !important;
-                    color: #666 !important;
-                    font-size: 12px !important;
-                    font-style: italic !important;
-                    background-color: #f9f9f9 !important;
-                    user-select: none !important;
-                    -webkit-user-select: none !important;
-                    -moz-user-select: none !important;
-                    -ms-user-select: none !important;
-                    pointer-events: none !important;
-                    cursor: default !important;
-                " title="Ngắt trang (Page Break) - Không thể chỉnh sửa">
-                    📄 Ngắt trang
-                </div>
-                '''
-            else:
-                # Regular empty paragraph - NO &nbsp; to prevent spacing issues when typing
-                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}" title="Click để thêm placeholder">{3}</p>'.format(
-                    block_index, str(has_page_break).lower(), cursor_style, empty_content
-                )
-
         align_style = f"text-align: {alignment};" if alignment != "left" else ""
         align_style += margin_right  # Add margin-right if calculated
 
@@ -1760,21 +1734,10 @@ JSON:"""
         if para_styles:
             align_style += "; ".join(para_styles) + ";"
 
-        # Preserve leading/trailing whitespace by adding white-space: pre-wrap when needed
-        # This fixes issue where leading spaces used for right-alignment are collapsed in HTML
-        # Check the actual text content (stripping HTML tags) to detect leading/trailing spaces
-        text_content = re.sub(r'<[^>]+>', '', content)
-        if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
-            align_style += " white-space: pre-wrap;"
+        content = "".join(self._process_xml_element_to_html(child) for child in para._p)
 
-        # Build paragraph HTML
-        para_html = '<{0} data-block-index="{1}" data-type="paragraph" data-page-break="{2}" style="{3}">{4}</{0}>'.format(
-            tag, block_index, str(has_page_break).lower(), align_style, content
-        )
-
-        # Add visual page break indicator if this paragraph has a page break
-        if has_page_break:
-            page_break_indicator = '''
+        def build_page_break_indicator() -> str:
+            return '''
             <div class="page-break-indicator" contenteditable="false" style="
                 margin: 20px 0 !important;
                 padding: 10px !important;
@@ -1795,7 +1758,53 @@ JSON:"""
                 📄 Ngắt trang
             </div>
             '''
-            para_html += page_break_indicator
+
+        def build_paragraph_html(fragment_content: str) -> str:
+            return '<{0} data-block-index="{1}" data-type="paragraph" data-page-break="{2}" style="{3}">{4}</{0}>'.format(
+                tag, block_index, str(has_page_break).lower(), align_style, fragment_content
+            )
+
+        # Preserve leading/trailing whitespace by adding white-space: pre-wrap when needed
+        # This fixes issue where leading spaces used for right-alignment are collapsed in HTML
+        # Check the actual text content (stripping HTML tags) to detect leading/trailing spaces
+        text_content = re.sub(r'<[^>]+>', '', content)
+        if text_content and (text_content[0] in ' \t\n' or text_content[-1] in ' \t\n'):
+            align_style += " white-space: pre-wrap;"
+
+        if has_page_break and content.startswith(self.PAGE_BREAK_TOKEN):
+            # Page break at the start of a paragraph should render before the
+            # following text, not after the entire paragraph.
+            content = content.replace(self.PAGE_BREAK_TOKEN, "", 1)
+            para_html = build_page_break_indicator() + build_paragraph_html(content)
+            return para_html
+
+        if is_empty or not content.strip():
+            # Empty paragraph - preserve for visual layout, selectable for adding placeholders
+            cursor_style = "cursor: crosshair;" if block_index >= 0 else "cursor: default;"
+
+            # FIX: Use empty content with CSS min-height instead of &nbsp;
+            # This prevents non-breaking space from appearing when users type in empty paragraphs
+            # The min-height: 1.2em + display: block ensures the paragraph is visible and clickable
+            empty_content = ""
+
+            # Check if this empty paragraph has a page break
+            if has_page_break:
+                # Empty paragraph WITH page break - show visual indicator
+                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para page-break-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}" title="Ngắt trang (Page Break)">{3}</p>'.format(
+                    block_index, str(has_page_break).lower(), cursor_style, empty_content
+                ) + build_page_break_indicator()
+            else:
+                # Regular empty paragraph - NO &nbsp; to prevent spacing issues when typing
+                return '<p data-block-index="{0}" data-type="paragraph" data-page-break="{1}" data-empty="true" class="docx-empty-para" style="min-height: 1.2em; margin: 5px 0; padding: 0; {2}" title="Click để thêm placeholder">{3}</p>'.format(
+                    block_index, str(has_page_break).lower(), cursor_style, empty_content
+                )
+
+        # Build paragraph HTML
+        para_html = build_paragraph_html(content)
+
+        # Add visual page break indicator if this paragraph has a page break
+        if has_page_break:
+            para_html += build_page_break_indicator()
 
         return para_html
 
