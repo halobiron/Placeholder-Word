@@ -120,10 +120,10 @@ class MergeExecutor:
                 yield fld, instr, match.group(1)
 
     def get_template_field_metadata(self, template_path: str) -> list[dict]:
-        """Get ordered field metadata from template for better extraction prompts.
+        """Get ordered field metadata from template.
 
-        Returns minimal context without redundant paragraph_text since
-        prev_text + field + next_text provides sufficient context for AI.
+        NOTE: Metadata chỉ dùng cho merge execution, KHÔNG Dùng cho Gemini nữa
+        vì giờ Gemini đọc full template và tự tìm vị trí field.
         """
         try:
             doc = Document(template_path)
@@ -159,6 +159,50 @@ class MergeExecutor:
             )
 
         return metadata
+
+    def get_template_fields_and_text(self, template_path: str) -> tuple[list[str], str]:
+        """Get field names AND full template text in ONE pass
+
+        Tối ưu: Đọc template 1 lần duy nhất, trả về:
+        - Danh sách tên field (cho Gemini)
+        - Full text (cho Gemini tự tìm vị trí)
+
+        Args:
+            template_path: Path to template file
+
+        Returns:
+            Tuple of (field_names, full_template_text)
+        """
+        try:
+            doc = Document(template_path)
+        except Exception as e:
+            raise ValueError(f"Failed to read template: {e}")
+
+        # Extract ONLY field names (KHÔNG CẦN metadata cho Gemini)
+        field_names = []
+        for fld, instr, field_name in self._iter_merge_fields(doc):
+            field_names.append(field_name)
+
+        # Extract full template text
+        paragraphs_text = []
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text:
+                paragraphs_text.append(text)
+
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = []
+                for cell in row.cells:
+                    text = cell.text.strip()
+                    if text:
+                        row_text.append(text)
+                if row_text:
+                    paragraphs_text.append(" | ".join(row_text))
+
+        full_text = "\n\n".join(paragraphs_text)
+
+        return field_names, full_text
 
     def execute_merge(
         self,
@@ -373,3 +417,37 @@ class MergeExecutor:
     def get_template_fields(self, template_path: str) -> list:
         """Get ordered field names from template."""
         return [item["field_name"] for item in self.get_template_field_metadata(template_path)]
+
+    def get_full_template_text(self, template_path: str) -> str:
+        """Extract full text content from template for context understanding
+
+        Args:
+            template_path: Path to template file
+
+        Returns:
+            Full text content of the document
+        """
+        try:
+            doc = Document(template_path)
+        except Exception as e:
+            raise ValueError(f"Failed to read template for text extraction: {e}")
+
+        # Extract all paragraphs text
+        paragraphs_text = []
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text:
+                paragraphs_text.append(text)
+
+        # Extract all tables text
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = []
+                for cell in row.cells:
+                    text = cell.text.strip()
+                    if text:
+                        row_text.append(text)
+                if row_text:
+                    paragraphs_text.append(" | ".join(row_text))
+
+        return "\n\n".join(paragraphs_text)

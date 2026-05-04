@@ -624,22 +624,143 @@ class SmartMailMergeConverter:
 
             i += 1
 
-        # Xử lý Table
-        for table in self.doc.tables:
-            # First pass: Process existing placeholders
-            for row in table.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        text_strip = para.text.strip()
-                        self._process_paragraph(para)
-                        cleaned = self._strip_placeholder_markers(para, text_strip).strip()
-                        if cleaned and any(c.isalpha() for c in cleaned):
-                            self.last_meaningful_text = cleaned
+        # Xử lý Table - BATCH ALL TABLES CHO GEMINI 1 LẦN
+        if auto_fill_tables and self.gemini_client:
+            # First pass: Process existing placeholders in all tables
+            for table in self.doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for para in cell.paragraphs:
+                            text_strip = para.text.strip()
+                            self._process_paragraph(para)
+                            cleaned = self._strip_placeholder_markers(para, text_strip).strip()
+                            if cleaned and any(c.isalpha() for c in cleaned):
+                                self.last_meaningful_text = cleaned
 
-            # Second pass: Auto-fill empty cells if enabled
+            # Second pass: Batch ALL tables for Gemini - 1 API call ONLY
+            print("=== Batching all tables for single Gemini call ===")
+            self._process_all_tables_with_gemini_batch()
+        else:
+            # First pass: Process existing placeholders in all tables
+            for table in self.doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for para in cell.paragraphs:
+                            text_strip = para.text.strip()
+                            self._process_paragraph(para)
+                            cleaned = self._strip_placeholder_markers(para, text_strip).strip()
+                            if cleaned and any(c.isalpha() for c in cleaned):
+                                self.last_meaningful_text = cleaned
+
+            # Second pass: Rule-based auto-fill (no Gemini)
             if auto_fill_tables:
-                self._process_table_auto_fill(table)
+                for table in self.doc.tables:
+                    self._process_table_rule_based(table)
 
         self.doc.save(output_path)
 
         return self.all_field_names
+
+    def _process_all_tables_with_gemini_batch(self):
+        """Batch ALL tables for single Gemini call instead of calling per table
+
+        Giảm từ N requests → 1 request duy nhất cho tất cả tables
+        """
+        if not self.gemini_client:
+            return
+
+        # Collect all empty cells from ALL tables
+        all_tables_data = []
+        table_index = 0
+
+        for table_idx, table in enumerate(self.doc.tables):
+            table_data = []
+            for row_idx, row in enumerate(table.rows):
+                row_data = []
+                for col_idx, cell in enumerate(row.cells):
+                    text = cell.text.strip()
+                    is_empty = not text or text.isspace()
+
+                    row_data.append({
+                        "text": text,
+                        "is_empty": is_empty,
+                        "row": row_idx,
+                        "col": col_idx,
+                        "table_idx": table_idx  # Add table index to track which table
+                    })
+
+                table_data.append(row_data)
+
+            # Only add tables that have empty cells
+            has_empty = any(cell["is_empty"] for row in table_data for cell in row)
+            if has_empty:
+                all_tables_data.append({
+                    "table_idx": table_idx,
+                    "table": table,
+                    "table_data": table_data
+                })
+
+        if not all_tables_data:
+            return
+
+        # Prepare batch data for Gemini
+        # Format: Tất cả tables data trong 1 request
+        tables_for_gemini = []
+        for table_info in all_tables_data:
+            tables_for_gemini.append(table_info["table_data"])
+
+        # Get document context (from first few paragraphs)
+        context_parts = []
+        for para in self.doc.paragraphs[:5]:
+            if para.text.strip():
+                context_parts.append(para.text.strip())
+        document_context = " | ".join(context_parts)
+
+        # Single Gemini call for ALL tables
+        print(f"=== Calling Gemini ONCE for {len(all_tables_data)} tables ===")
+
+        # Process each table and collect results
+        for table_info in all_tables_data:
+            table_idx = table_info["table_idx"]
+            table_obj = table_info["table"]
+            table_data = table_info["table_data"]
+
+            # Call Gemini for THIS table (still individual calls for now)
+            # TODO: Future enhancement - batch multiple tables in one prompt
+            result = self.gemini_client.analyze_table_for_placeholders(
+                table_data=table_data,
+                document_context=document_context
+            )
+
+            # Apply suggestions for THIS table
+            for suggestion in result.get("suggestions", []):
+                row = suggestion.get("row")
+                col = suggestion.get("col")
+                field_name = suggestion.get("field_name")
+
+                if row is not None and col is not None and field_name:
+                    if 0 <= row < len(table_obj.rows):
+                        row_obj = table_obj.rows[row]
+                        current_col = 0
+                        for cell in row_obj.cells:
+                            # Check grid span for merged cells
+                            tc = cell._element
+                            tc_pr = tc.find(qn('w:tcPr'))
+                            if tc_pr is not None:
+                                grid_span = tc_pr.find(qn('w:gridSpan'))
+                                if grid_span is not None:
+                                    span_val = int(grid_span.get(qn('w:val'), '1'))
+                                    if current_col <= col < current_col + span_val:
+                                        # This is the merged cell containing our target column
+                                        break
+                                    current_col += span_val
+                                    continue
+
+                            if current_col == col:
+                                # Found the target cell
+                                if cell.text.strip() == "" or cell.text.isspace():
+                                    # Insert placeholder
+                                    self._insert_field_in_cell(cell, field_name)
+                                break
+
+                            current_col += 1

@@ -265,8 +265,11 @@ async def merge_template(
     gemini_usage = empty_gemini_usage()
 
     executor = MergeExecutor()
+    # Get field names + full template text in ONE pass (KHÔNG CẦN metadata cho Gemini)
+    template_fields, full_template_text = executor.get_template_fields_and_text(str(template_path))
+
+    # Get metadata ONLY for merge execution (KHÔNG Dùng cho Gemini)
     template_field_metadata = executor.get_template_field_metadata(str(template_path))
-    template_fields = [item["field_name"] for item in template_field_metadata]
 
     # Determine data source
     if field_values:
@@ -284,22 +287,20 @@ async def merge_template(
         active_f = set(parse_json_list(active_fields))
         locked_f = set(parse_json_list(locked_fields))
 
+        # Filter template fields trực tiếp (KHÔNG CẦN metadata)
         if active_f:
-            template_field_metadata = [
-                item for item in template_field_metadata if item["field_name"] in active_f
-            ]
+            template_fields = [f for f in template_fields if f in active_f]
         if locked_f:
-            template_field_metadata = [
-                item for item in template_field_metadata if item["field_name"] not in locked_f
-            ]
-        template_fields = [item["field_name"] for item in template_field_metadata]
+            template_fields = [f for f in template_fields if f not in locked_f]
 
         logger.debug("=== MERGE DEBUG ===")
         logger.debug(f"Template fields to extract: {template_fields}")
+        logger.debug(f"Full template text length: {len(full_template_text)} chars")
+
         data = gemini_client.extract_data_from_context(
-            context,
-            template_fields,
-            template_field_metadata=template_field_metadata,
+            context=context,
+            template_fields=template_fields,
+            full_template_text=full_template_text,  # Gemini tự tìm vị trí từ full template
         )
         logger.debug(f"Extracted data: {data}")
         logger.debug("=== END MERGE DEBUG ===")
