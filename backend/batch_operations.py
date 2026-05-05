@@ -241,13 +241,13 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
 def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
     """Execute text operations"""
     para_index = validate_block_index(editor, op.block_index)
+    block_map = getattr(editor, "_block_to_para_index_map", None) or {}
+    block_data = block_map.get(op.block_index)
     if op.para_in_cell is not None:
         para_index = editor.get_table_cell_paragraph_index(op.block_index, op.para_in_cell)
         if para_index is None:
             raise ValueError(f"Invalid para_in_cell")
     else:
-        block_map = getattr(editor, "_block_to_para_index_map", None) or {}
-        block_data = block_map.get(op.block_index)
         if block_data and block_data.get("type") == "table_cell":
             # CRITICAL FIX: Use the stored cell object directly if available
             # This works correctly with merged cells
@@ -270,7 +270,44 @@ def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
             op.block_index, para_index, op.para_in_cell,
             len(op.old_text or ""), len(op.new_text or "")
         )
-        if not editor.replace_text_at_position(op.old_text, op.new_text, para_index):
+        replaced = editor.replace_text_at_position(op.old_text, op.new_text, para_index)
+        if not replaced:
+            paragraph = get_paragraph_at_index(editor, para_index)
+            current_text = ""
+            if paragraph is not None:
+                current_text, _ = editor._extract_paragraph_full_text(paragraph)
+
+            logger.warning(
+                "update_text primary match failed; block_index=%s para_index=%s para_in_cell=%s old=%r current=%r",
+                op.block_index, para_index, op.para_in_cell, op.old_text, current_text
+            )
+
+            cell = block_data.get("cell") if block_data else None
+            non_empty_cell_paragraphs = 0
+            if cell is not None:
+                for cell_paragraph in cell.paragraphs:
+                    cell_text, _ = editor._extract_paragraph_full_text(cell_paragraph)
+                    if cell_text.strip():
+                        non_empty_cell_paragraphs += 1
+
+            single_meaningful_paragraph_cell = bool(
+                block_data
+                and block_data.get("type") == "table_cell"
+                and cell is not None
+                and non_empty_cell_paragraphs <= 1
+            )
+            allow_fallback = paragraph is not None and (
+                op.para_in_cell is not None
+                or not (block_data and block_data.get("type") == "table_cell")
+                or single_meaningful_paragraph_cell
+            )
+            if allow_fallback and editor.replace_paragraph_text_at_index(para_index, op.new_text):
+                logger.info(
+                    "update_text fallback paragraph rewrite succeeded: block_index=%s para_index=%s para_in_cell=%s",
+                    op.block_index, para_index, op.para_in_cell
+                )
+                return
+
             raise ValueError(f"Failed to update text")
     elif op.type == "delete_text_range":
         logger.info(

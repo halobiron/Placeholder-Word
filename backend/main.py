@@ -44,28 +44,11 @@ def save_and_regenerate_preview(editor: DocxFullEditor, template_path: str) -> t
 
 
 def validate_template_path(template_id: str) -> Path:
-    """Validate template exists và return path
-
-    Args:
-        template_id: Template identifier
-
-    Returns:
-        Path object to template
-
-    Raises:
-        HTTPException: If template not found
-    """
+    """Validate template exists và return path"""
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
         raise HTTPException(status_code=404, detail="Template not found")
     return template_path
-
-
-def handle_endpoint_error(endpoint_name: str, error: Exception) -> HTTPException:
-    """Standard error handling với traceback logging"""
-    error_detail = f"{endpoint_name} failed: {str(error)}\n\nTraceback:\n{traceback.format_exc()}"
-    logger.error(f"=== /{endpoint_name.replace(' ', '-').lower()} ERROR ===\n{error_detail}\n=== END ERROR ===")
-    return HTTPException(status_code=500, detail=error_detail)
 
 
 def handle_endpoint_errors(endpoint_name: str):
@@ -77,13 +60,6 @@ def handle_endpoint_errors(endpoint_name: str):
 
     Args:
         endpoint_name: Tên endpoint cho log (vd: "suggest placeholders", "batch update")
-
-    Usage:
-        @app.post("/suggest-placeholders")
-        @handle_endpoint_errors("suggest placeholders")
-        async def suggest_placeholders(...):
-            # Logic - không cần try-except
-            pass
     """
     def decorator(func: Callable):
         @wraps(func)
@@ -95,7 +71,9 @@ def handle_endpoint_errors(endpoint_name: str):
                 raise
             except Exception as e:
                 # Log traceback và raise HTTPException 500 với detail đầy đủ
-                raise handle_endpoint_error(endpoint_name, e)
+                error_detail = f"{endpoint_name} failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+                logger.error(f"=== /{endpoint_name.replace(' ', '-').lower()} ERROR ===\n{error_detail}\n=== END ERROR ===")
+                raise HTTPException(status_code=500, detail=error_detail)
         return wrapper
     return decorator
 
@@ -268,8 +246,6 @@ async def merge_template(
     # Get field names + full template text in ONE pass (KHÔNG CẦN metadata cho Gemini)
     template_fields, full_template_text = executor.get_template_fields_and_text(str(template_path))
 
-    # Get metadata ONLY for merge execution (KHÔNG Dùng cho Gemini)
-    template_field_metadata = executor.get_template_field_metadata(str(template_path))
 
     # Determine data source
     if field_values:
@@ -1266,8 +1242,7 @@ async def merge_with_table_expansion(request: TableExpansionRequest):
         logger.info(" ===== EXECUTING MERGE =====")
 
         executor = MergeExecutor()
-        template_field_metadata = executor.get_template_field_metadata(str(working_template))
-        template_fields = [item["field_name"] for item in template_field_metadata]
+        template_fields = executor.get_template_fields(str(working_template))
 
         # Determine data source
         if request.field_values:

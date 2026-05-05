@@ -1489,6 +1489,8 @@ JSON:"""
             image_html = []
             rPr = element.find(f"{self.w_ns}rPr")
             style_text = self._get_run_style_text(rPr)
+            footnote_markers = []
+            endnote_markers = []
 
             # Check for footnote/endnote references in this run
             has_footnote_ref = any((child.tag.split('}')[1] if '}' in child.tag else child.tag) == 'footnoteReference'
@@ -1519,8 +1521,14 @@ JSON:"""
                         text_parts.append(self.PAGE_BREAK_TOKEN)
                     else:
                         text_parts.append("<br>")
-                # Note: footnoteReference and endnoteReference are handled above
-                # by adding superscript style to the entire run
+                elif c_tag == 'footnoteReference':
+                    footnote_markers.append(
+                        child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id") or "*"
+                    )
+                elif c_tag == 'endnoteReference':
+                    endnote_markers.append(
+                        child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id") or "*"
+                    )
                 elif c_tag == 'drawing':
                     # Extract image from drawing element
                     img_html = self._extract_image_from_element(child)
@@ -1553,6 +1561,13 @@ JSON:"""
                             result_parts.append(self.PAGE_BREAK_TOKEN)
                 else:
                     result_parts.append(wrap_fragment(text))
+
+            if not text and (footnote_markers or endnote_markers):
+                markers = "".join(footnote_markers + endnote_markers)
+                if style_text:
+                    result_parts.append(f'<span style="{style_text}">{markers}</span>')
+                else:
+                    result_parts.append(markers)
 
             # Add images
             result_parts.extend(image_html)
@@ -1965,4 +1980,3 @@ JSON:"""
         html_result = "\n".join(table_html)
         print(f"[_process_table_to_html] END Processed {cells_processed} cells")
         return (html_result, cells_processed)
-

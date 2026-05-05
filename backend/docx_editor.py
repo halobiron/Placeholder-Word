@@ -643,6 +643,54 @@ class DocxFullEditor:
 
         return True
 
+    def replace_paragraph_text_at_index(self, paragraph_index: int, new_text: str) -> bool:
+        """
+        Replace the full visible text of a single paragraph while preserving
+        the paragraph structure and the formatting of the first text run.
+
+        This is a fallback path for block-targeted edits when the client sends
+        stale or whitespace-normalized old_text that no longer matches exactly.
+        It intentionally refuses paragraphs containing MERGEFIELD placeholders
+        because flattening those would destroy field structure.
+        """
+        paragraph = self._find_paragraph_by_index(paragraph_index)
+        if paragraph is None:
+            return False
+
+        full_text, text_segments = self._extract_paragraph_full_text(paragraph)
+        if any(seg.get('is_field') for seg in text_segments):
+            print(f"[REPLACE] Fallback refused for paragraph {paragraph_index}: contains placeholders")
+            return False
+
+        text_run_segments = [seg for seg in text_segments if not seg.get('is_field')]
+        if text_run_segments:
+            first_segment = text_run_segments[0]
+            if not self._modify_segment_text(first_segment, "set", text=new_text):
+                return False
+
+            for seg in text_run_segments[1:]:
+                self._modify_segment_text(seg, "clear")
+
+            print(
+                f"[REPLACE] Fallback paragraph rewrite succeeded at paragraph {paragraph_index}: "
+                f"old='{self._normalize_text(full_text)[:80]}' new='{self._normalize_text(new_text)[:80]}'"
+            )
+            return True
+
+        if new_text:
+            r = OxmlElement('w:r')
+            t = OxmlElement('w:t')
+            if new_text.startswith(' ') or new_text.endswith(' '):
+                t.set(qn('xml:space'), 'preserve')
+            t.text = new_text
+            r.append(t)
+            paragraph._element.append(r)
+            print(f"[REPLACE] Fallback paragraph rewrite created new run at paragraph {paragraph_index}")
+            return True
+
+        print(f"[REPLACE] Fallback paragraph rewrite cleared empty paragraph {paragraph_index}")
+        return True
+
     def replace_text_at_position(
         self,
         old_text: str,

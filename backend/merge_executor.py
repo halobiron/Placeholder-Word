@@ -13,102 +13,10 @@ import copy
 
 RESULT_DIR = Path(__file__).parent / "uploads" / "results"
 
-
 class MergeExecutor:
     """Execute mail merge operations with formatting preservation"""
 
     W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    TBL_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-
-    def _find_ancestor_table(self, element):
-        """Find the ancestor w:tbl element if element is inside a table."""
-        parent = element.getparent()
-        while parent is not None:
-            if parent.tag == f"{self.W_NS}tbl":
-                return parent
-            parent = parent.getparent()
-        return None
-
-    def _get_table_header_rpr(self, tbl_element, field_cell):
-        """
-        Get run properties from the header cell of the column containing the field.
-
-        Args:
-            tbl_element: The w:tbl element
-            field_cell: The w:tc element containing the merge field
-
-        Returns:
-            rPr element from the header cell, or None if not found
-        """
-        # Find all rows in the table
-        rows = tbl_element.findall(f"{self.W_NS}tr")
-        if len(rows) < 2:
-            return None  # No header row or only one row
-
-        # Assume first row is header
-        header_row = rows[0]
-
-        # Find the column index of the field cell
-        field_row = field_cell.getparent()
-        if field_row is None or field_row.tag != f"{self.W_NS}tr":
-            return None
-
-        cells_in_field_row = field_row.findall(f"{self.W_NS}tc")
-        field_col_idx = None
-        for idx, cell in enumerate(cells_in_field_row):
-            if cell == field_cell:
-                field_col_idx = idx
-                break
-
-        if field_col_idx is None:
-            return None
-
-        # Handle gridSpan for merged cells - calculate logical column index
-        logical_col_idx = 0
-        for idx, cell in enumerate(cells_in_field_row):
-            if idx == field_col_idx:
-                break
-            grid_span_elem = cell.find(f"{self.W_NS}tcPr/{self.W_NS}gridSpan")
-            if grid_span_elem is not None:
-                span = int(grid_span_elem.get(f"{self.W_NS}val", "1"))
-                logical_col_idx += span - 1
-            logical_col_idx += 1
-
-        # Find the corresponding header cell, accounting for gridSpan
-        header_col_idx = 0
-        target_header_cell = None
-        for cell in header_row.findall(f"{self.W_NS}tc"):
-            if header_col_idx == logical_col_idx:
-                target_header_cell = cell
-                break
-
-            grid_span_elem = cell.find(f"{self.W_NS}tcPr/{self.W_NS}gridSpan")
-            if grid_span_elem is not None:
-                span = int(grid_span_elem.get(f"{self.W_NS}val", "1"))
-                header_col_idx += span
-            else:
-                header_col_idx += 1
-
-        if target_header_cell is None:
-            return None
-
-        # Find rPr in header cell - check paragraphs and runs
-        for paragraph in target_header_cell.findall(f"{self.W_NS}p"):
-            for run in paragraph.findall(f"{self.W_NS}r"):
-                rpr = run.find(f"{self.W_NS}rPr")
-                if rpr is not None:
-                    return rpr
-
-        return None
-
-    def _get_field_cell(self, fld):
-        """Find the w:tc element containing the merge field."""
-        parent = fld.getparent()
-        while parent is not None:
-            if parent.tag == f"{self.W_NS}tc":
-                return parent
-            parent = parent.getparent()
-        return None
 
     def _iter_merge_fields(self, doc: Document):
         for fld in doc.element.iter(f"{self.W_NS}fldSimple"):
@@ -119,72 +27,15 @@ class MergeExecutor:
             if match:
                 yield fld, instr, match.group(1)
 
-    def get_template_field_metadata(self, template_path: str) -> list[dict]:
-        """Get ordered field metadata from template.
+    def get_template_fields(self, template_path: str) -> list[str]:
+        """Get ordered field names from template."""
+        doc = Document(template_path)
+        return [field_name for _, _, field_name in self._iter_merge_fields(doc)]
 
-        NOTE: Metadata chỉ dùng cho merge execution, KHÔNG Dùng cho Gemini nữa
-        vì giờ Gemini đọc full template và tự tìm vị trí field.
-        """
-        try:
-            doc = Document(template_path)
-        except Exception as e:
-            raise ValueError(f"Failed to read template metadata: {e}")
-
-        metadata = []
-        for fld, instr, field_name in self._iter_merge_fields(doc):
-            z_match = re.search(r'\\z\s*"([^"]*)"', instr)
-            prev_text = ""
-            next_text = ""
-
-            if fld.getprevious() is not None:
-                prev_text = "".join(
-                    child.text
-                    for child in fld.getprevious().iter()
-                    if child.tag == f"{self.W_NS}t" and child.text
-                ).strip()
-            if fld.getnext() is not None:
-                next_text = "".join(
-                    child.text
-                    for child in fld.getnext().iter()
-                    if child.tag == f"{self.W_NS}t" and child.text
-                ).strip()
-
-            metadata.append(
-                {
-                    "field_name": field_name,
-                    "original_placeholder": z_match.group(1) if z_match else "",
-                    "context_before": prev_text,
-                    "context_after": next_text,
-                }
-            )
-
-        return metadata
-
-    def get_template_fields_and_text(self, template_path: str) -> tuple[list[str], str]:
-        """Get field names AND full template text in ONE pass
-
-        Tối ưu: Đọc template 1 lần duy nhất, trả về:
-        - Danh sách tên field (cho Gemini)
-        - Full text (cho Gemini tự tìm vị trí)
-
-        Args:
-            template_path: Path to template file
-
-        Returns:
-            Tuple of (field_names, full_template_text)
-        """
-        try:
-            doc = Document(template_path)
-        except Exception as e:
-            raise ValueError(f"Failed to read template: {e}")
-
-        # Extract ONLY field names (KHÔNG CẦN metadata cho Gemini)
-        field_names = []
-        for fld, instr, field_name in self._iter_merge_fields(doc):
-            field_names.append(field_name)
-
-        # Extract full template text
+    def _extract_full_template_text(self, doc: Document) -> str:
+        """Extract full text content from document for context understanding."""
         paragraphs_text = []
+
         for para in doc.paragraphs:
             text = para.text.strip()
             if text:
@@ -200,7 +51,24 @@ class MergeExecutor:
                 if row_text:
                     paragraphs_text.append(" | ".join(row_text))
 
-        full_text = "\n\n".join(paragraphs_text)
+        return "\n\n".join(paragraphs_text)
+
+    def get_template_fields_and_text(self, template_path: str) -> tuple[list[str], str]:
+        """Get field names AND full template text in ONE pass
+
+        Tối ưu: Đọc template 1 lần duy nhất, trả về:
+        - Danh sách tên field (cho Gemini)
+        - Full text (cho Gemini tự tìm vị trí)
+
+        Args:
+            template_path: Path to template file
+
+        Returns:
+            Tuple of (field_names, full_template_text)
+        """
+        doc = Document(template_path)
+        field_names = [field_name for _, _, field_name in self._iter_merge_fields(doc)]
+        full_text = self._extract_full_template_text(doc)
 
         return field_names, full_text
 
@@ -211,14 +79,7 @@ class MergeExecutor:
         locked_fields: set[str] | None = None
     ) -> str:
         """Execute mail merge with provided data while preserving formatting"""
-        template_path = Path(template_path)
-        if not template_path.exists():
-            raise ValueError(f"Template not found: {template_path}")
-
-        try:
-            doc = Document(str(template_path))
-        except Exception as e:
-            raise ValueError(f"Failed to load template: {e}")
+        doc = Document(template_path)
 
         # Execute merge with formatting preservation
         self._merge_with_formatting(doc, data, locked_fields or set())
@@ -238,13 +99,13 @@ class MergeExecutor:
         data: Dict[str, str],
         locked_fields: set[str]
     ):
-        """Replace mail merge fields with values while preserving formatting.
+        """Replace mail merge fields with values using the field's own formatting.
 
-        Locked fields are treated as empty values so they resolve back to the
-        original placeholder text stored in the field's ``\\z`` switch instead of
-        leaving raw MERGEFIELD markup behind.
+        Placeholder marker cleanup belongs to the converter stage, which already
+        rewrites paragraphs/tables into clean ``fldSimple`` nodes. Merge only
+        resolves values and swaps each field with a plain run that preserves the
+        formatting stored inside that field.
         """
-        # Find all fldSimple elements in the entire document (including tables, headers, footers)
         flds = [fld for fld, _, _ in self._iter_merge_fields(doc)]
 
         for fld in flds:
@@ -259,195 +120,71 @@ class MergeExecutor:
             if field_name in locked_fields:
                 replacement = original_text
             else:
-                # Get replacement value
                 replacement = data.get(field_name, "")
-                
-                # Logic đặc biệt cho Checkbox: Nếu field bắt đầu bằng "ck_" và có giá trị "x" hoặc tương đương
                 if field_name.startswith("ck_"):
-                    # Coi x, X, 1, true là đã chọn
                     is_checked = str(replacement).lower().strip() in ('x', '1', 'true', 'checked', 'v')
                     replacement = "☑" if is_checked else "☐"
 
             if replacement is None or (str(replacement).strip() == "" and not field_name.startswith("ck_")):
                 replacement = original_text
             else:
-                prev_text = ""
-                next_text = ""
-                prev_node = fld.getprevious().find(f".//{self.W_NS}t") if fld.getprevious() is not None else None
-                next_node = fld.getnext().find(f".//{self.W_NS}t") if fld.getnext() is not None else None
-
-                # Xử lý tất cả các runs trước field: xóa pattern, tab, whitespace
-                # Duyệt ngược từ runs gần nhất đến runs xa nhất
-                current_run = fld.getprevious()
-                found_tab_or_dots = False  # Flag để kiểm tra xem có tab/pattern trong các runs trước không
-                while current_run is not None:
-                    # Xóa tab element
-                    tab_elem = current_run.find(f"{self.W_NS}tab")
-                    has_tab_elem = tab_elem is not None
-                    if tab_elem is not None:
-                        found_tab_or_dots = True
-                        current_run.remove(tab_elem)
-
-                    # Xóa pattern dots trong text node
-                    text_node = current_run.find(f"{self.W_NS}t")
-                    if text_node is not None and text_node.text:
-                        # Kiểm tra xem có pattern dots ở cuối không
-                        has_trailing_dots = bool(re.search(r'[._…]+$', text_node.text))
-                        # Kiểm tra xem có tab character trong text không
-                        has_tab_char = '\t' in text_node.text
-
-                        if has_tab_elem or has_tab_char or has_trailing_dots:
-                            found_tab_or_dots = True
-
-                        # Xóa pattern dots ở cuối text
-                        text_content = re.sub(r'[._…]+$', '', text_node.text)
-                        # Xóa tab characters và whitespace ở cuối nếu có tab/pattern
-                        if found_tab_or_dots:
-                            text_content = text_content.rstrip().replace('\t', '')
-
-                        if text_content != text_node.text:
-                            text_node.text = text_content
-
-                        # Nếu text rỗng sau khi xóa, xóa text node
-                        if not text_content:
-                            current_run.remove(text_node)
-
-                    # Kiểm tra run có còn content không
-                    has_content = False
-                    for child in current_run:
-                        if not child.tag.endswith('}rPr'):  # Bỏ qua rPr
-                            has_content = True
-                            break
-
-                    # Nếu run rỗng, xóa run và tiếp tục
-                    if not has_content:
-                        next_to_check = current_run.getprevious()  # Lưu trước khi xóa
-                        current_run.getparent().remove(current_run)
-                        current_run = next_to_check
-                    else:
-                        # Run có content, dừng
-                        break  # Dừng sau khi xử lý run có content đầu tiên
-
-                # Xử lý next: xóa pattern dots, tab, whitespace
-                if fld.getnext() is not None:
-                    next_run = fld.getnext()
-                    # Xóa tab element
-                    tab_elem = next_run.find(f"{self.W_NS}tab")
-                    if tab_elem is not None:
-                        next_run.remove(tab_elem)
-                    # Xóa pattern dots và whitespace trong text node
-                    next_node = next_run.find(f"{self.W_NS}t")
-                    if next_node is not None and next_node.text:
-                        next_text = re.sub(r'^[._…]+', '', next_node.text)
-                        next_text = next_text.lstrip()  # Xóa cả whitespace/tab ở đầu
-                        if next_text != next_node.text:
-                            next_node.text = next_text
-                        # Nếu text rỗng sau khi xóa, xóa text node
-                        if not next_text:
-                            next_run.remove(next_node)
-                    # Xóa run rỗng (chỉ còn rPr hoặc không có content)
-                    # Kiểm tra xem run có content không (ngoài rPr)
-                    has_content = False
-                    for child in next_run:
-                        if not child.tag.endswith('}rPr'):  # Bỏ qua rPr (formatting)
-                            has_content = True
-                            break
-                    if not has_content:
-                        next_run.getparent().remove(next_run)
-
-                # Recalculate prev_text và next_text sau khi đã xóa
-                prev_node = fld.getprevious().find(f".//{self.W_NS}t") if fld.getprevious() is not None else None
-                next_node = fld.getnext().find(f".//{self.W_NS}t") if fld.getnext() is not None else None
-                prev_text = prev_node.text if prev_node is not None else ""
-                next_text = next_node.text if next_node is not None else ""
-
-                replacement = str(replacement).strip()
-
-                # Auto-add spacing for adjacent text (Vietnamese-aware)
-                if prev_text and not prev_text[-1].isspace() and re.search(r'[A-Za-zÀ-ỹ]$', prev_text) and re.match(r'[\wÀ-ỹ]', replacement):
-                    replacement = f" {replacement}"
-                if next_text and not next_text[0].isspace() and re.match(r'[\wÀ-ỹ]', next_text) and re.search(r'[\wÀ-ỹ]$', replacement):
-                    replacement = f"{replacement} "
-
-                # Apply Word format switches
+                replacement = str(replacement)
                 if re.search(r'\\\*\s*Upper', instr, re.IGNORECASE):
-                    replacement = str(replacement).upper()
+                    replacement = replacement.upper()
                 elif re.search(r'\\\*\s*Caps', instr, re.IGNORECASE):
-                    replacement = str(replacement).title()
+                    replacement = replacement.title()
 
-            # Create new run with replacement value
             new_run = OxmlElement('w:r')
 
-            # Priority order for formatting:
-            # 1. If field is in a table, use formatting from the header cell of that column
-            # 2. Otherwise, use formatting from the field's own nested run
             rPr = None
-
-            # Check if field is in a table
-            tbl_element = self._find_ancestor_table(fld)
-            if tbl_element is not None:
-                # Get formatting from table header
-                field_cell = self._get_field_cell(fld)
-                if field_cell is not None:
-                    rPr = self._get_table_header_rpr(tbl_element, field_cell)
-
-            # Fallback to field's own formatting if no table formatting found
-            if rPr is None:
-                nested_run = fld.find(f"{self.W_NS}r")
-                if nested_run is not None:
-                    rPr = nested_run.find(f"{self.W_NS}rPr")
+            nested_run = fld.find(f"{self.W_NS}r")
+            if nested_run is not None:
+                rPr = nested_run.find(f"{self.W_NS}rPr")
 
             if rPr is not None:
                 new_run.append(copy.deepcopy(rPr))
 
-            # Add text with space preservation
             t = OxmlElement('w:t')
             replacement_str = str(replacement)
 
-            # Preserve leading/trailing whitespace by setting xml:space
+            # Auto-pad spaces if adjacent to text to prevent missing spaces in merged values
+            if replacement_str:
+                parent = fld.getparent()
+                if parent is not None:
+                    try:
+                        idx = parent.index(fld)
+                        # Check previous sibling for missing space
+                        if not replacement_str[0].isspace():
+                            last_char = ""
+                            for i in range(idx - 1, -1, -1):
+                                prev_el = parent[i]
+                                prev_texts = prev_el.findall(f".//{self.W_NS}t")
+                                text_contents = [t.text for t in prev_texts if t.text]
+                                if text_contents:
+                                    last_char = text_contents[-1][-1]
+                                    break
+                            if last_char and (last_char.isalpha() or last_char in '.,:;>)]}'):
+                                replacement_str = " " + replacement_str
+                        
+                        # Check next sibling for missing space
+                        if not replacement_str[-1].isspace():
+                            first_char = ""
+                            for i in range(idx + 1, len(parent)):
+                                next_el = parent[i]
+                                next_texts = next_el.findall(f".//{self.W_NS}t")
+                                text_contents = [t.text for t in next_texts if t.text]
+                                if text_contents:
+                                    first_char = text_contents[0][0]
+                                    break
+                            if first_char and (first_char.isalpha() or first_char in '<([{'):
+                                replacement_str = replacement_str + " "
+                    except ValueError:
+                        pass
+
             if replacement_str != replacement_str.strip():
                 t.set(qn('xml:space'), 'preserve')
 
             t.text = replacement_str
             new_run.append(t)
 
-            # Surgical replacement
             fld.getparent().replace(fld, new_run)
-
-    def get_template_fields(self, template_path: str) -> list:
-        """Get ordered field names from template."""
-        return [item["field_name"] for item in self.get_template_field_metadata(template_path)]
-
-    def get_full_template_text(self, template_path: str) -> str:
-        """Extract full text content from template for context understanding
-
-        Args:
-            template_path: Path to template file
-
-        Returns:
-            Full text content of the document
-        """
-        try:
-            doc = Document(template_path)
-        except Exception as e:
-            raise ValueError(f"Failed to read template for text extraction: {e}")
-
-        # Extract all paragraphs text
-        paragraphs_text = []
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if text:
-                paragraphs_text.append(text)
-
-        # Extract all tables text
-        for table in doc.tables:
-            for row in table.rows:
-                row_text = []
-                for cell in row.cells:
-                    text = cell.text.strip()
-                    if text:
-                        row_text.append(text)
-                if row_text:
-                    paragraphs_text.append(" | ".join(row_text))
-
-        return "\n\n".join(paragraphs_text)
