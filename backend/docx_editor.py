@@ -14,9 +14,10 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
-from docx.table import Table, _Cell
+from docx.table import Table
 from docx.text.paragraph import Paragraph
 from lxml import etree
+import table_utils
 
 
 # Alignment mappings - centralized to avoid duplication
@@ -270,101 +271,6 @@ class DocxFullEditor:
         print(f"[REPLACE] ✓ Success (text between placeholders)")
         return True
 
-    def _calculate_rowspan_for_cell(self, table, start_row_idx: int, col_idx: int) -> int:
-        """Calculate rowspan for a vertically merged cell.
-
-        Counts how many consecutive rows have vMerge="continue" at the same column.
-        Matches the logic in template_manager.py _calculate_rowspan.
-        """
-        rowspan = 1
-        total_rows = len(table.rows)
-
-        for row_idx in range(start_row_idx + 1, total_rows):
-            if row_idx >= total_rows:
-                break
-
-            row = table.rows[row_idx]
-            cell, _, _ = self._find_row_cell_at_column(row, col_idx)
-            try:
-                if cell is not None:
-                    tcPr = cell._element.find(f"{self.w_ns}tcPr")
-                    if tcPr is not None:
-                        vmerge_elem = tcPr.find(f"{self.w_ns}vMerge")
-                        if vmerge_elem is not None:
-                            vmerge_val = vmerge_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "continue")
-                            if vmerge_val == "continue":
-                                rowspan += 1
-                            else:
-                                break
-                        else:
-                            break
-                    else:
-                        break
-                else:
-                    break
-            except Exception:
-                break
-
-        return rowspan
-
-    def _iter_xml_row_cells(self, row):
-        """Yield actual XML cells in a row without python-docx merge expansion."""
-        return [_Cell(tc, row) for tc in row._tr.tc_lst]
-
-    def _get_cell_grid_span(self, cell) -> int:
-        tcPr = cell._element.find(f"{self.w_ns}tcPr")
-        if tcPr is None:
-            return 1
-
-        grid_span_elem = tcPr.find(f"{self.w_ns}gridSpan")
-        if grid_span_elem is None:
-            return 1
-
-        grid_span_val = grid_span_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
-        if not grid_span_val:
-            return 1
-
-        try:
-            return max(1, int(grid_span_val))
-        except (TypeError, ValueError):
-            return 1
-
-    def _find_row_cell_at_column(self, row, logical_col_idx: int):
-        """Resolve a logical column index to the backing XML cell in that row."""
-        current_col = 0
-        for cell in self._iter_xml_row_cells(row):
-            colspan = self._get_cell_grid_span(cell)
-            if current_col <= logical_col_idx < current_col + colspan:
-                return cell, current_col, colspan
-            current_col += colspan
-        return None, None, None
-
-    def _get_vertical_merge_value(self, cell):
-        tcPr = cell._element.find(f"{self.w_ns}tcPr")
-        if tcPr is None:
-            return None
-
-        vmerge_elem = tcPr.find(f"{self.w_ns}vMerge")
-        if vmerge_elem is None:
-            return None
-
-        return vmerge_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "continue")
-
-    def _iter_visible_table_cells(self, table):
-        """Yield visible table cells with logical column and merge metadata."""
-        for row_idx, row in enumerate(table.rows):
-            logical_col_idx = 0
-            for cell in self._iter_xml_row_cells(row):
-                colspan = self._get_cell_grid_span(cell)
-                vmerge_val = self._get_vertical_merge_value(cell)
-                if vmerge_val == "continue":
-                    logical_col_idx += colspan
-                    continue
-
-                rowspan = self._calculate_rowspan_for_cell(table, row_idx, logical_col_idx) if vmerge_val == "restart" else 1
-                yield row_idx, logical_col_idx, cell, colspan, rowspan
-                logical_col_idx += colspan
-
     def _build_block_index_map(self):
         """
         Build mapping from block_index (HTML preview) to paragraph_index (DOCX)
@@ -377,33 +283,31 @@ class DocxFullEditor:
         if self._block_to_para_index_map is not None:
             return
 
-
         self._block_to_para_index_map = {}
         block_index = 0
+        para_index = 0
 
-        # Build map using EXACTLY the same logic as _generate_html_preview
-        # Use body children directly to preserve document order
         for child in self.doc.element.body.iterchildren():
             if isinstance(child, CT_P):
                 para = Paragraph(child, self.doc)
 
-                # Extract text from XML to match _generate_html_preview logic
                 text_from_xml = ""
                 for t in child.findall(f".//{self.w_ns}t"):
                     if t.text:
                         text_from_xml += t.text
-                # Process ALL paragraphs (including empty ones) like _generate_html_preview
-                # Store reference to paragraph object instead of index
+
                 self._block_to_para_index_map[block_index] = {
                     'type': 'paragraph',
-                    'paragraph': para,  # Store paragraph object directly
-                    'table_context': None
+                    'paragraph': para,
+                    'table_context': None,
+                    'para_index': para_index
                 }
                 block_index += 1
+                para_index += 1
 
             elif isinstance(child, CT_Tbl):
                 table = Table(child, self.doc)
-                for row_idx, col_idx, cell, colspan, rowspan in self._iter_visible_table_cells(table):
+                for row_idx, col_idx, cell, colspan, rowspan in table_utils.iter_visible_table_cells(table):
                     cell_text = ""
                     for para in cell.paragraphs:
                         for t in para._p.findall(f".//{self.w_ns}t"):
@@ -412,8 +316,6 @@ class DocxFullEditor:
                     is_empty = not cell_text.strip()
                     para = cell.paragraphs[0] if cell.paragraphs else None
 
-                    # CRITICAL FIX: Store the actual cell object instead of just row/col indices
-                    # This ensures we can find the correct cell even with merged cells
                     self._block_to_para_index_map[block_index] = {
                         'type': 'table_cell',
                         'paragraph': para,
@@ -423,9 +325,11 @@ class DocxFullEditor:
                         'is_empty': is_empty if para else True,
                         'colspan': colspan,
                         'rowspan': rowspan,
-                        'cell': cell  # Store actual cell object for direct access
+                        'cell': cell,
+                        'para_index': para_index
                     }
                     block_index += 1
+                    para_index += len(cell.paragraphs)
 
     def get_table_cell_paragraph_index(self, block_index: int, para_in_cell: int) -> int:
         """
@@ -463,18 +367,11 @@ class DocxFullEditor:
         if not target_cell:
             return None
 
-        # Check if para_in_cell is valid
         if para_in_cell >= len(target_cell.paragraphs):
             return None
 
-        # Find the specific paragraph in document order
-        target_paragraph = target_cell.paragraphs[para_in_cell]
-
-        for idx, para in enumerate(self._iterate_paragraphs_in_doc_order()):
-            if para._element == target_paragraph._element:
-                return idx
-
-        return None
+        base_para_index = self._block_to_para_index_map[block_index]['para_index']
+        return base_para_index + para_in_cell
 
     def get_paragraph_index_from_block(self, block_index: int) -> int:
         """
@@ -492,15 +389,7 @@ class DocxFullEditor:
         if block_index not in self._block_to_para_index_map:
             return None
 
-        block_data = self._block_to_para_index_map[block_index]
-        target_paragraph = block_data['paragraph']
-
-        # Use the same iteration logic to find the index
-        for idx, para in enumerate(self._iterate_paragraphs_in_doc_order()):
-            if para._element == target_paragraph._element:
-                return idx
-
-        return None
+        return self._block_to_para_index_map[block_index]['para_index']
 
     # ===== HELPER METHODS =====
 
@@ -520,7 +409,7 @@ class DocxFullEditor:
             elif isinstance(child, CT_Tbl):
                 table = Table(child, self.doc)
                 # Process visible cells only so merged cells are not duplicated.
-                for _, _, cell, _, _ in self._iter_visible_table_cells(table):
+                for _, _, cell, _, _ in table_utils.iter_visible_table_cells(table):
                     if cell.paragraphs:
                         for para in cell.paragraphs:
                             yield para

@@ -422,99 +422,6 @@ class SmartMailMergeConverter:
         fld.append(run)
         p_element.append(fld)
 
-    def _process_table_auto_fill(self, table):
-        """Xử lý bảng: dùng Gemini để analyze và auto-fill placeholders vào empty cells
-
-        Args:
-            table: Table object
-        """
-        if len(table.rows) <= 1:
-            return  # Table chỉ có header, không có data rows
-
-        # Try Gemini first if available
-        if self.gemini_client:
-            try:
-                self._process_table_with_gemini(table)
-                return
-            except Exception as e:
-                print(f"  → Gemini table analysis failed: {e}, falling back to rule-based")
-                # Fall through to rule-based
-
-        # Fallback: simple rule-based (simplified version)
-        self._process_table_rule_based(table)
-
-    def _process_table_with_gemini(self, table):
-        """Dùng Gemini để analyze table và suggest placeholders
-
-        Args:
-            table: Table object
-        """
-        # Extract table data for Gemini
-        table_data = []
-        for row_idx, row in enumerate(table.rows):
-            row_data = []
-            for cell in row.cells:
-                text = cell.text.strip()
-                # Check if cell already has merge field or is truly empty
-                is_empty = self._is_cell_empty(cell)
-                row_data.append({
-                    "text": text,
-                    "is_empty": is_empty,
-                    "row": row_idx,
-                    "col": len(row_data)
-                })
-            table_data.append(row_data)
-
-        # Get document context (paragraphs before/after table)
-        context_parts = []
-        table_element = table._element
-        found_table = False
-
-        for child in self.doc.element.body.iterchildren():
-            if child == table_element:
-                found_table = True
-                break
-            if child.tag.endswith("p"):
-                para = Paragraph(child, self.doc)
-                if para.text.strip():
-                    context_parts.append(para.text.strip())
-                    if len(context_parts) >= 2:
-                        break
-
-        document_context = " | ".join(context_parts[-2:]) if context_parts else ""
-
-        # Ask Gemini for suggestions
-        result = self.gemini_client.analyze_table_for_placeholders(
-            table_data=table_data,
-            document_context=document_context
-        )
-
-        # Apply suggestions
-        for suggestion in result.get("suggestions", []):
-            row = suggestion.get("row")
-            col = suggestion.get("col")
-            field_name = suggestion.get("field_name")
-
-            if row is not None and col is not None and field_name:
-                if 0 <= row < len(table.rows):
-                    row_obj = table.rows[row]
-                    # Handle merged cells - find actual cell at column
-                    current_col = 0
-                    for cell in row_obj.cells:
-                        # Check grid span for merged cells
-                        tc = cell._element
-                        tcPr = tc.find(f"{self.w_ns}tcPr")
-                        grid_span = 1
-                        if tcPr is not None:
-                            gridSpan = tcPr.find(f"{self.w_ns}gridSpan")
-                            if gridSpan is not None:
-                                grid_span = int(gridSpan.get(f"{{{self.w_ns}}}val", 1))
-
-                        if current_col <= col < current_col + grid_span:
-                            if self._is_cell_empty(cell):
-                                self._insert_field_in_cell(cell, field_name)
-                            break
-                        current_col += grid_span
 
     def _process_table_rule_based(self, table):
         """Simple rule-based fallback for table auto-fill
@@ -747,36 +654,25 @@ class SmartMailMergeConverter:
 
             i += 1
 
-        # Xử lý Table - BATCH ALL TABLES CHO GEMINI 1 LẦN
-        if auto_fill_tables and self.gemini_client:
-            # First pass: Process existing placeholders in all tables
-            for table in self.doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
-                            text_strip = para.text.strip()
-                            self._process_paragraph(para)
-                            cleaned = self._strip_placeholder_markers(para, text_strip).strip()
-                            if cleaned and any(c.isalpha() for c in cleaned):
-                                self.last_meaningful_text = cleaned
+        # First pass: Process existing placeholders in all tables (Always required)
+        for table in self.doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        text_strip = para.text.strip()
+                        self._process_paragraph(para)
+                        cleaned = self._strip_placeholder_markers(para, text_strip).strip()
+                        if cleaned and any(c.isalpha() for c in cleaned):
+                            self.last_meaningful_text = cleaned
 
-            # Second pass: Batch ALL tables for Gemini - 1 API call ONLY
-            print("=== Batching all tables for single Gemini call ===")
-            self._process_all_tables_with_gemini_batch()
-        else:
-            # First pass: Process existing placeholders in all tables
-            for table in self.doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
-                            text_strip = para.text.strip()
-                            self._process_paragraph(para)
-                            cleaned = self._strip_placeholder_markers(para, text_strip).strip()
-                            if cleaned and any(c.isalpha() for c in cleaned):
-                                self.last_meaningful_text = cleaned
-
-            # Second pass: Rule-based auto-fill (no Gemini)
-            if auto_fill_tables:
+        # Second pass: Auto-fill empty cells if requested
+        if auto_fill_tables:
+            if self.gemini_client:
+                # Batch ALL tables for Gemini - 1 API call ONLY
+                print("=== Batching all tables for single Gemini call ===")
+                self._process_all_tables_with_gemini_batch()
+            else:
+                # Rule-based auto-fill (no Gemini fallback)
                 for table in self.doc.tables:
                     self._process_table_rule_based(table)
 

@@ -10,12 +10,13 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
-from docx.table import Table, _Cell
+from docx.table import Table
 from docx.text.paragraph import Paragraph
 import copy
 from smart_mail_merge_converter import PLACEHOLDER_PATTERN, SmartMailMergeConverter
 from gemini_client import GeminiClient
 from docx_editor import DocxFullEditor
+import table_utils
 
 
 class MailMergeProcessor:
@@ -78,11 +79,11 @@ class MailMergeProcessor:
         rows: dict[int, list[tuple[int, str]]] = {}
         table_has_content = False
 
-        for cell_data in self._iter_visible_table_cells(table):
-            cell_text = self._extract_table_cell_text(cell_data["cell"])
+        for row_idx, col_idx, cell, _, _ in table_utils.iter_visible_table_cells(table):
+            cell_text = self._extract_table_cell_text(cell)
             if cell_text:
                 table_has_content = True
-            rows.setdefault(cell_data["row_idx"], []).append((cell_data["col_idx"], cell_text))
+            rows.setdefault(row_idx, []).append((col_idx, cell_text))
 
         table_text = "\n".join(
             " | ".join(text for _, text in sorted(row_cells, key=lambda item: item[0]))
@@ -92,55 +93,7 @@ class MailMergeProcessor:
 
         return table_text, table_has_content
 
-    def _build_block_candidates(self, doc: Document) -> list:
-        """Build a stable block list that matches structured extraction order."""
-        candidates = []
-        current_index = 0
 
-        for child in doc.element.body.iterchildren():
-            if isinstance(child, CT_P):
-                para = Paragraph(child, doc)
-                text = self._extract_xml_text(child)
-
-                candidates.append({
-                    "type": "paragraph",
-                    "index": current_index,
-                    "text": text if text else "[EMPTY LINE]",
-                    "para": para,
-                    "is_empty": not text,
-                })
-                current_index += 1
-
-            elif isinstance(child, CT_Tbl):
-                table = Table(child, doc)
-                table_text, table_has_content = self._build_visible_table_summary(table)
-
-                for cell_data in self._iter_visible_table_cells(table):
-                    cell = cell_data["cell"]
-                    cell_text = self._extract_table_cell_text(cell)
-
-                    candidates.append({
-                        "type": "table_cell",
-                        "index": current_index,
-                        "text": cell_text if cell_text else "[EMPTY CELL]",
-                        "table": table,
-                        "row": cell_data["row_idx"],
-                        "col": cell_data["col_idx"],
-                        "cell": cell,
-                        "is_empty": not cell_text,
-                    })
-                    current_index += 1
-
-                if table_has_content:
-                    candidates.append({
-                        "type": "table_summary",
-                        "index": current_index,
-                        "text": table_text,
-                        "table": table,
-                    })
-                    current_index += 1
-
-        return candidates
 
     def _add_neighbor_context(self, blocks: list, window: int = 2) -> None:
         """Attach before/after context snippets to each block in-place."""
@@ -239,121 +192,6 @@ class MailMergeProcessor:
 
         res = self._word_border_to_css(table_border)
         return "none" if res == "__NONE__" else res
-
-    def _calculate_rowspan(self, table, start_row_idx: int, col_idx: int) -> int:
-        """Calculate rowspan for a vertically merged cell.
-
-        Counts how many consecutive rows have vMerge="continue" at the same column
-        starting from the row after start_row_idx.
-
-        Args:
-            table: docx Table object
-            start_row_idx: Row index where vMerge="restart" is found
-            col_idx: Column index of the merged cell
-
-        Returns:
-            Number of rows spanned (minimum 1)
-        """
-        rowspan = 1
-        total_rows = len(table.rows)
-
-        for row_idx in range(start_row_idx + 1, total_rows):
-            if row_idx >= total_rows:
-                break
-            row = table.rows[row_idx]
-            cell, _, _ = self._find_row_cell_at_column(row, col_idx)
-            try:
-                if cell is not None:
-                    tcPr = cell._element.find(f"{self.w_ns}tcPr")
-                    if tcPr is not None:
-                        vmerge_elem = tcPr.find(f"{self.w_ns}vMerge")
-                        if vmerge_elem is not None:
-                            vmerge_val = vmerge_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "continue")
-                            if vmerge_val == "continue":
-                                rowspan += 1
-                            else:
-                                # Found "restart" or no vMerge, vertical merge ends
-                                break
-                        else:
-                            # No vMerge element, vertical merge ends
-                            break
-                    else:
-                        # No tcPr, vertical merge ends
-                        break
-                else:
-                    # Column index out of range
-                    break
-            except Exception as e:
-                print(f"[_calculate_rowspan] Error checking row {row_idx}: {e}")
-                break
-
-        return rowspan
-
-    def _iter_xml_row_cells(self, row):
-        """Yield actual XML cells in a row without python-docx merge expansion."""
-        return [_Cell(tc, row) for tc in row._tr.tc_lst]
-
-    def _get_cell_grid_span(self, cell) -> int:
-        tcPr = cell._element.find(f"{self.w_ns}tcPr")
-        if tcPr is None:
-            return 1
-
-        grid_span_elem = tcPr.find(f"{self.w_ns}gridSpan")
-        if grid_span_elem is None:
-            return 1
-
-        grid_span_val = grid_span_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val")
-        if not grid_span_val:
-            return 1
-
-        try:
-            return max(1, int(grid_span_val))
-        except (TypeError, ValueError):
-            return 1
-
-    def _find_row_cell_at_column(self, row, logical_col_idx: int):
-        """Resolve a logical column index to the backing XML cell in that row."""
-        current_col = 0
-        for cell in self._iter_xml_row_cells(row):
-            colspan = self._get_cell_grid_span(cell)
-            if current_col <= logical_col_idx < current_col + colspan:
-                return cell, current_col, colspan
-            current_col += colspan
-        return None, None, None
-
-    def _get_vertical_merge_value(self, cell):
-        tcPr = cell._element.find(f"{self.w_ns}tcPr")
-        if tcPr is None:
-            return None
-
-        vmerge_elem = tcPr.find(f"{self.w_ns}vMerge")
-        if vmerge_elem is None:
-            return None
-
-        return vmerge_elem.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}val", "continue")
-
-    def _iter_visible_table_cells(self, table):
-        """Yield visible table cells with logical column and merge metadata."""
-        for row_idx, row in enumerate(table.rows):
-            logical_col_idx = 0
-            for cell_idx, cell in enumerate(self._iter_xml_row_cells(row)):
-                colspan = self._get_cell_grid_span(cell)
-                vmerge_val = self._get_vertical_merge_value(cell)
-                if vmerge_val == "continue":
-                    logical_col_idx += colspan
-                    continue
-
-                rowspan = self._calculate_rowspan(table, row_idx, logical_col_idx) if vmerge_val == "restart" else 1
-                yield {
-                    "row_idx": row_idx,
-                    "row": row,
-                    "cell_idx": cell_idx,
-                    "cell": cell,
-                    "col_idx": logical_col_idx,
-                    "colspan": colspan,
-                    "rowspan": rowspan,
-                }
-                logical_col_idx += colspan
 
     def _build_table_cell_style(
         self,
@@ -610,16 +448,16 @@ class MailMergeProcessor:
 
                     # Process each visible cell as a separate content block to keep merged
                     # tables aligned with HTML preview and editor block maps.
-                    for cell_data in self._iter_visible_table_cells(table):
-                        cell_text = self._extract_table_cell_text(cell_data["cell"])
+                    for row_idx, col_idx, cell, _, _ in table_utils.iter_visible_table_cells(table):
+                        cell_text = self._extract_table_cell_text(cell)
 
                         content_blocks.append({
                             "type": "table_cell",
                             "text": cell_text if cell_text else "",
-                            "table_row": cell_data["row_idx"],
-                            "table_col": cell_data["col_idx"],
+                            "table_row": row_idx,
+                            "table_col": col_idx,
                             "docx_index": len(content_blocks),
-                            "table_context": f"Row {cell_data['row_idx']}, Col {cell_data['col_idx']}",
+                            "table_context": f"Row {row_idx}, Col {col_idx}",
                             "is_empty": not cell_text
                         })
 
@@ -804,17 +642,12 @@ JSON:"""
 
         try:
             editor = DocxFullEditor(docx_path)
-            doc = editor.doc
+            editor._build_block_index_map()
 
-            candidates = self._build_block_candidates(doc)
-            self._add_neighbor_context(candidates)
-
-            # Find best match using the block_index returned by Gemini
-            best_match = next((candidate for candidate in candidates if candidate["index"] == block_index), None)
+            # Find best match using the block_index directly from editor's map
+            best_match = editor._block_to_para_index_map.get(block_index)
 
             # Fail closed if the verified block index does not match any current candidate.
-            # Context similarity is intentionally not used here because it can select the wrong location.
-
             if best_match:
                 if best_match['type'] == 'paragraph':
                     if position == "inline":
@@ -823,7 +656,7 @@ JSON:"""
                             return False
                         if self._inject_inline_placeholder_via_offset(
                             editor,
-                            best_match['para'],
+                            best_match['paragraph'],
                             editor.get_paragraph_index_from_block(block_index),
                             placeholder_name,
                             insert_after,
@@ -831,7 +664,7 @@ JSON:"""
                             editor.save(docx_path)
                             print(f"✓ INJECTION SUCCESSFUL")
                             return True
-                    elif self._inject_placeholder_in_paragraph(best_match['para'], placeholder_name, context_hint, position, insert_after):
+                    elif self._inject_placeholder_in_paragraph(best_match['paragraph'], placeholder_name, context_hint, position, insert_after):
                         editor.save(docx_path)
                         print(f"✓ INJECTION SUCCESSFUL")
                         return True
@@ -1866,8 +1699,14 @@ JSON:"""
         last_row_idx = len(table.rows) - 1
         last_col_idx = len(table.columns) - 1
         cells_by_row = {}
-        for cell_data in self._iter_visible_table_cells(table):
-            cells_by_row.setdefault(cell_data["row_idx"], []).append(cell_data)
+        for row_idx, col_idx, cell, colspan, rowspan in table_utils.iter_visible_table_cells(table):
+            cells_by_row.setdefault(row_idx, []).append({
+                "cell": cell,
+                "col_idx": col_idx,
+                "colspan": colspan,
+                "rowspan": rowspan,
+                "cell_idx": len(cells_by_row.get(row_idx, [])),
+            })
 
         for row_idx, row in enumerate(table.rows):
             # Inline row style extraction (was _get_row_style)
