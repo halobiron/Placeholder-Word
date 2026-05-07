@@ -6,6 +6,7 @@ Now uses Gemini for intelligent table analysis instead of complex rule-based cod
 """
 import re
 import copy
+import math
 from lxml import etree
 from docx import Document
 from docx.oxml.ns import qn
@@ -491,7 +492,6 @@ class SmartMailMergeConverter:
                 empty_in_template = cells_per_row  # Tránh chia cho 0
                 
             cells_needed = required_empty_cells - empty_cells
-            import math
             rows_to_add = math.ceil(cells_needed / empty_in_template)
             
             for row_idx in range(rows_to_add):
@@ -503,9 +503,8 @@ class SmartMailMergeConverter:
                         # Copy nguyên XML của paragraph từ dòng mẫu để giữ nguyên định dạng và MERGEFIELD
                         for para in cell.paragraphs:
                             new_para = copy.deepcopy(para._element)
-                            
+
                             # Cập nhật tên MERGEFIELD (tăng hậu tố số)
-                            import re
                             for instrText in new_para.iter(qn('w:instrText')):
                                 if instrText.text and 'MERGEFIELD' in instrText.text:
                                     match = re.search(r'MERGEFIELD\s+([^\s\\]+)', instrText.text)
@@ -759,27 +758,12 @@ class SmartMailMergeConverter:
 
                 if row is not None and col is not None and field_name:
                     if 0 <= row < len(table_obj.rows):
+                        from table_utils import find_row_cell_at_column
                         row_obj = table_obj.rows[row]
-                        current_col = 0
-                        for cell in row_obj.cells:
-                            # Check grid span for merged cells
-                            tc = cell._element
-                            tc_pr = tc.find(qn('w:tcPr'))
-                            if tc_pr is not None:
-                                grid_span = tc_pr.find(qn('w:gridSpan'))
-                                if grid_span is not None:
-                                    span_val = int(grid_span.get(qn('w:val'), '1'))
-                                    if current_col <= col < current_col + span_val:
-                                        # This is the merged cell containing our target column
-                                        break
-                                    current_col += span_val
-                                    continue
+                        cell, _, _ = find_row_cell_at_column(row_obj, col)
 
-                            if current_col == col:
-                                # Found the target cell
-                                if cell.text.strip() == "" or cell.text.isspace():
-                                    # Insert placeholder
-                                    self._insert_field_in_cell(cell, field_name)
-                                break
-
-                            current_col += 1
+                        if cell is not None:
+                            # Found the target cell
+                            if cell.text.strip() == "" or cell.text.isspace():
+                                # Insert placeholder
+                                self._insert_field_in_cell(cell, field_name)

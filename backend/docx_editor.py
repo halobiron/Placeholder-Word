@@ -211,8 +211,6 @@ class DocxFullEditor:
         Returns:
             True if successful
         """
-        import copy
-
         if not target_segments:
             return False
 
@@ -269,8 +267,6 @@ class DocxFullEditor:
         fld_simple = self._create_element(f"{self.w_ns}fldSimple")
 
         # Extract switches and display text from original field
-        import re
-
         original_elem = original_field_seg.get('element')
         if original_elem is None or not original_field_seg:
             raise ValueError("Original field segment is required for this operation")
@@ -296,7 +292,6 @@ class DocxFullEditor:
         # Copy formatting from source
         rpr_element = self._get_segment_rpr(format_source)
         if rpr_element is not None:
-            import copy
             r_elem.append(copy.deepcopy(rpr_element))
 
         # Create text element
@@ -2890,31 +2885,27 @@ class DocxFullEditor:
         """Extract table-level borders from tblPr."""
         table_borders = {}
         try:
-            tbl_pr = table_obj._element.find(qn('w:tblPr'))
-            if tbl_pr is None:
-                return table_borders
-
-            tbl_borders = tbl_pr.find(qn('w:tblBorders'))
-            if tbl_borders is None:
-                return table_borders
-
+            borders = table_obj.borders
             for side in ['top', 'bottom', 'left', 'right', 'insideH', 'insideV']:
-                border = tbl_borders.find(qn(f'w:{side}'))
-                if border is not None:
-                    table_borders[side] = border
+                border = getattr(borders, side, None)
+                if border is not None and border._element is not None:
+                    table_borders[side] = border._element
         except Exception as e:
             print(f"Error extracting table borders: {e}")
 
         return table_borders
 
-    def _get_effective_border(self, tc_pr, table_borders, side, row_idx, col_idx, last_row_idx, last_col_idx):
+    def _get_effective_border(self, cell, table_borders, side, row_idx, col_idx, last_row_idx, last_col_idx):
         """Resolve effective border for one cell side."""
-        tc_borders = tc_pr.find(qn('w:tcBorders')) if tc_pr is not None else None
-        if tc_borders is not None:
-            direct_border = tc_borders.find(qn(f'w:{side}'))
-            direct_format = self._word_border_to_format(direct_border)
-            if direct_format is not None:
-                return direct_format
+        try:
+            borders = cell.borders
+            direct_border = getattr(borders, side, None)
+            if direct_border is not None and direct_border._element is not None:
+                direct_format = self._word_border_to_format(direct_border._element)
+                if direct_format is not None:
+                    return direct_format
+        except (AttributeError, TypeError):
+            pass
 
         # Fallback to table borders
         table_border = None
@@ -3053,36 +3044,30 @@ class DocxFullEditor:
         format_info = self._get_default_cell_format()
 
         try:
-            tc_pr = cell._element.find(qn('w:tcPr'))
-            if tc_pr is not None:
-                # Background color from shd element
-                shd = tc_pr.find(qn('w:shd'))
-                if shd is not None:
-                    fill = shd.get(qn('w:fill'))
-                    if fill and fill != 'auto':
-                        format_info['background_color'] = f'#{fill}' if fill and not fill.startswith('#') else fill or '#000000'
+            # Background color from shading
+            shading = cell.shading
+            if shading is not None and shading.background_color is not None:
+                format_info['background_color'] = shading.background_color
 
-                # Vertical alignment from vAlign element
-                v_align = tc_pr.find(qn('w:vAlign'))
-                if v_align is not None:
-                    v_align_val = v_align.get(qn('w:val'), 'top')
-                    if v_align_val in ['top', 'center', 'bottom']:
-                        format_info['vertical_align'] = v_align_val
+            # Vertical alignment
+            v_align = cell.vertical_alignment
+            if v_align is not None:
+                format_info['vertical_align'] = str(v_align).split('.')[-1].lower()
 
-                # Resolve borders
-                table_borders = self._get_table_borders(table)
-                last_row_idx = len(table.rows) - 1
-                last_col_idx = len(table.columns) - 1
+            # Resolve borders
+            table_borders = self._get_table_borders(table)
+            last_row_idx = len(table.rows) - 1
+            last_col_idx = len(table.columns) - 1
 
-                for side in ['top', 'bottom', 'left', 'right']:
-                    effective_border = self._get_effective_border(
-                        tc_pr, table_borders, side,
-                        row_index, col_index, last_row_idx, last_col_idx
-                    )
-                    if effective_border is not None:
-                        format_info['borders'][side] = effective_border
+            for side in ['top', 'bottom', 'left', 'right']:
+                effective_border = self._get_effective_border(
+                    cell, table_borders, side,
+                    row_index, col_index, last_row_idx, last_col_idx
+                )
+                if effective_border is not None:
+                    format_info['borders'][side] = effective_border
 
-            # Horizontal alignment from first paragraph (paragraph property, not cell)
+        # Horizontal alignment from first paragraph (paragraph property, not cell)
             if cell.paragraphs:
                 first_para = cell.paragraphs[0]
                 if first_para.alignment is not None:

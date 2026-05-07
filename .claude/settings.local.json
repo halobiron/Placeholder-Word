@@ -85,7 +85,15 @@
       "mcp__mcp-document-reader__read_document",
       "mcp__code-review-graph__list_communities_tool",
       "mcp__code-review-graph__list_flows_tool",
-      "mcp__code-review-graph__build_or_update_graph_tool"
+      "mcp__code-review-graph__build_or_update_graph_tool",
+      "mcp__web-search-prime__web_search_prime",
+      "mcp__plugin_everything-claude-code_exa__web_search_exa",
+      "mcp__web-reader__webReader",
+      "Bash(pip uninstall:*)",
+      "Bash(awk 'NR>=80 && NR<=120')",
+      "mcp__zread__read_file",
+      "mcp__plugin_everything-claude-code_github__search_repositories",
+      "mcp__plugin_everything-claude-code_github__get_file_contents"
     ]
   },
   "enabledMcpjsonServers": [
