@@ -165,9 +165,8 @@ class DocxFullEditor:
                                    end_idx: int, new_text: str,
                                    success_msg: str = "Success (text replaced)") -> bool:
         """
-        Unified text replacement for segments (simple or placeholder change cases).
-        Handle simple case: single or multiple non-field segments.
-        Clears all segments after the first, then replaces the first segment.
+        Unified text replacement for simple cases (no placeholder changes).
+        Only handles non-field segments.
         """
         first_non_field_seg = None
         for seg in target_segments:
@@ -198,6 +197,120 @@ class DocxFullEditor:
             if nested_r is not None:
                 return nested_r.find(f"{self.w_ns}rPr")
         return None
+
+    def _replace_text_with_new_placeholders(self, paragraph: Paragraph, target_segments: list, new_text: str) -> bool:
+        """
+        Replace text segments with new text that contains placeholders.
+        Creates actual merge fields for placeholders found in new_text.
+
+        Args:
+            paragraph: Paragraph object
+            target_segments: Segments to replace
+            new_text: New text with placeholders like «field_name»
+
+        Returns:
+            True if successful
+        """
+        import copy
+
+        if not target_segments:
+            return False
+
+        # Find original field segment ONCE (preserve switches)
+        original_field_seg = next((seg for seg in target_segments if seg['is_field']), None)
+
+        first_seg = target_segments[0]
+        insert_index = list(paragraph._element).index(first_seg['element'])
+        format_source = first_seg
+
+        # Remove all target segments from XML tree
+        for seg in target_segments:
+            element = seg.get('element')
+            if element is not None:
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+
+        # Parse and insert new text with placeholders
+        placeholder_pattern = r'«([^»]+)»'
+        parts = re.split(placeholder_pattern, new_text)
+        current_index = insert_index
+
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+
+            if i % 2 == 0:  # Text part
+                new_run = self._create_run_with_format(paragraph, self._get_segment_rpr(format_source), part)
+                paragraph._element.remove(new_run._element)
+                paragraph._element.insert(current_index, new_run._element)
+                current_index += 1
+            else:  # Placeholder part
+                field_elem = self._create_merge_field_element(part, format_source, original_field_seg)
+                paragraph._element.insert(current_index, field_elem)
+                current_index += 1
+
+        print(f"[REPLACE] ✓ Created new merge fields for: {re.findall(placeholder_pattern, new_text)}")
+        return True
+
+    def _create_merge_field_element(self, field_name: str, format_source: dict, original_field_seg: dict = None) -> object:
+        """
+        Create a fldSimple element for a merge field.
+
+        Args:
+            field_name: Name of the field
+            format_source: Segment to copy formatting from
+            original_field_seg: Original field segment to preserve switches from
+
+        Returns:
+            fldSimple XML element
+        """
+        # Create fldSimple element
+        fld_simple = self._create_element(f"{self.w_ns}fldSimple")
+
+        # Extract switches and display text from original field
+        import re
+
+        original_elem = original_field_seg.get('element')
+        if original_elem is None or not original_field_seg:
+            raise ValueError("Original field segment is required for this operation")
+
+        original_instr = original_elem.get(f"{self.w_ns}instr", "")
+        if not original_instr:
+            raise ValueError("Original field has no instruction")
+
+        # Parse: MERGEFIELD field_name \* Caps \z "display_text"
+        match = re.search(r'MERGEFIELD\s+\S+\s+(.*?)\\z\s+"([^"]*)"', original_instr)
+        if not match:
+            raise ValueError(f"Cannot parse original instruction: '{original_instr}'")
+
+        switches = " " + match.group(1).strip() + " \\z"
+        display_text = match.group(2)
+
+        # Set instruction attribute
+        fld_simple.set(f"{self.w_ns}instr", f" MERGEFIELD {field_name}{switches} \"{display_text}\" ")
+
+        # Create run inside fldSimple
+        r_elem = self._create_element(f"{self.w_ns}r")
+
+        # Copy formatting from source
+        rpr_element = self._get_segment_rpr(format_source)
+        if rpr_element is not None:
+            import copy
+            r_elem.append(copy.deepcopy(rpr_element))
+
+        # Create text element
+        t_elem = self._create_element(f"{self.w_ns}t")
+        t_elem.text = f"«{field_name}»"
+        r_elem.append(t_elem)
+
+        fld_simple.append(r_elem)
+        return fld_simple
+
+    def _create_element(self, tag: str) -> object:
+        """Helper to create an XML element with proper namespace."""
+        from lxml import etree
+        return etree.Element(tag)
 
     def _insert_text_segment(self, paragraph: Paragraph, insert_index: int,
                              text: str, format_sources: list) -> None:
@@ -659,6 +772,7 @@ class DocxFullEditor:
             # Log what's in the paragraph
             print(f"[REPLACE] Paragraph content: '{full_text_normalized[:100]}{'...' if len(full_text_normalized) > 100 else ''}'")
 
+            fuzzy_match_used = False
             if search_text_normalized not in full_text_normalized:
                 # CRITICAL FIX: Try fuzzy match with placeholders removed
                 old_no_fields = self._normalize_without_fields(old_text)
@@ -670,6 +784,7 @@ class DocxFullEditor:
 
                 if old_no_fields and old_no_fields in full_no_fields:
                     search_text_normalized = old_no_fields
+                    fuzzy_match_used = True
                     print(f"[REPLACE] ✓ Match found without placeholders: '{search_text_normalized[:100]}{'...' if len(search_text_normalized) > 100 else ''}'")
                 else:
                     print(f"[REPLACE] ✗ NO MATCH - skipping paragraph {p_idx}")
@@ -682,6 +797,15 @@ class DocxFullEditor:
                 continue
 
             end_idx = start_idx + len(search_text_normalized)
+
+            # CRITICAL FIX: When using fuzzy match, extend range to include adjacent placeholders
+            if fuzzy_match_used:
+                print(f"[REPLACE] ⚠️ Fuzzy match used - extending range to include placeholders")
+                # Extend to include next field segment if exists
+                for seg in text_segments:
+                    if seg['is_field'] and seg['start_pos'] >= start_idx:
+                        end_idx = max(end_idx, seg['end_pos'])
+                        print(f"[REPLACE]   Extended end_idx to {end_idx} to include placeholder")
 
             print(f"[REPLACE] ✓ Found at position {start_idx}-{end_idx} (length: {len(search_text_normalized)})")
             # CRITICAL FIX: Find which segments contain the text to replace
@@ -719,9 +843,8 @@ class DocxFullEditor:
                     print(f"[REPLACE] Warning: Placeholder structure differs")
                     print(f"[REPLACE]   Old placeholders: {re.findall(placeholder_pattern, old_text)}")
                     print(f"[REPLACE]   New placeholders: {re.findall(placeholder_pattern, new_text)}")
-                    print(f"[REPLACE] Placeholder change detected, using minimax pattern")
-                    return self._replace_text_in_segments(target_segments, start_idx, end_idx, new_text,
-                                                          success_msg="Success (placeholder changed)")
+                    print(f"[REPLACE] Placeholder change detected, creating new merge fields")
+                    return self._replace_text_with_new_placeholders(paragraph, target_segments, new_text)
 
             # Perform replacement - simple case (no fields in target)
             if self._replace_text_in_segments(target_segments, start_idx, end_idx, new_text,
@@ -2726,31 +2849,6 @@ class DocxFullEditor:
                 gridCols[col_index].addprevious(new_grid_col)
             else:
                 tblGrid.append(new_grid_col)
-
-        return True
-
-    def format_table_cell(self, table_index: int, row_index: int, col_index: int, format_options: dict):
-        """Định dạng cell (màu nền, border...)"""
-        all_tables = self._get_all_tables_in_doc_order()
-        if table_index >= len(all_tables):
-            return False
-
-        table = all_tables[table_index]
-        if row_index >= len(table.rows) or col_index >= len(table.rows[row_index].cells):
-            return False
-
-        cell = table.rows[row_index].cells[col_index]
-        tcPr = cell._element.get_or_add_tcPr()
-
-        # Màu nền
-        if 'background_color' in format_options:
-            color = format_options['background_color'].replace('#', '')
-            shd = tcPr.find(qn('w:shd'))
-            if shd is None:
-                shd = OxmlElement('w:shd')
-                tcPr.append(shd)
-            shd.set(qn('w:fill'), color)
-            shd.set(qn('w:val'), 'clear')
 
         return True
 
