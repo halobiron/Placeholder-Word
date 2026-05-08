@@ -505,19 +505,19 @@ class DocxFullEditor:
         """
         Yield paragraphs in document order (matching _generate_html_preview logic)
 
-        Uses doc.element.body.iterchildren() to preserve exact document structure.
-        CRITICAL FIX: Yield ALL paragraphs including those in table cells
+        REFACTORED: Uses doc.iter_inner_content() from loadfix/python-docx
+        to iterate paragraphs and tables in document order.
+        CRITICAL: Yield ALL paragraphs including those in table cells
         to properly support text editing in any paragraph.
         """
 
-        for child in self.doc.element.body.iterchildren():
-            if isinstance(child, CT_P):
-                para = Paragraph(child, self.doc)
-                yield para
-            elif isinstance(child, CT_Tbl):
-                table = Table(child, self.doc)
+        for item in self.doc.iter_inner_content():
+            # iter_inner_content() returns both Paragraph and Table objects
+            if hasattr(item, 'runs'):  # It's a Paragraph
+                yield item
+            elif hasattr(item, 'rows'):  # It's a Table
                 # Process visible cells only so merged cells are not duplicated.
-                for _, _, cell, _, _ in table_utils.iter_visible_table_cells(table):
+                for _, _, cell, _, _ in table_utils.iter_visible_table_cells(item):
                     if cell.paragraphs:
                         for para in cell.paragraphs:
                             yield para
@@ -970,6 +970,11 @@ class DocxFullEditor:
         Returns:
             True if found and formatted, False if offsets invalid/missing
         """
+        # Offsets are mandatory in this flow to avoid formatting wrong duplicate text.
+        if start_offset is None or end_offset is None:
+            print(f"[ERROR] Offsets not provided - cannot format safely")
+            return False
+
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if p_idx != paragraph_index:
                 continue
@@ -978,12 +983,6 @@ class DocxFullEditor:
             full_text = "".join(run_info['text'] for run_info in all_runs)
 
             print(f"[DEBUG] apply_format_at_position: p_idx={p_idx}, len={len(full_text)}, offsets={start_offset}-{end_offset}, text='{text}'")
-
-            # CRITICAL: Offsets are REQUIRED for precise formatting
-            # No fallback to text search - it can format wrong occurrence of duplicate text
-            if start_offset is None or end_offset is None:
-                print(f"[ERROR] Offsets not provided - cannot format safely")
-                return False
 
             # Validate offsets
             if not (0 <= start_offset < end_offset <= len(full_text)):
@@ -1744,15 +1743,17 @@ class DocxFullEditor:
         Returns:
             True if found and formatted, False otherwise
         """
+        if alignment and alignment not in ALIGNMENT_STRING_TO_ENUM:
+            print(f"[ERROR] Invalid alignment value: {alignment}")
+            return False
+
         for p_idx, paragraph in enumerate(self._iterate_paragraphs_in_doc_order()):
             if p_idx != paragraph_index:
                 continue
 
             # Apply alignment
             if alignment:
-                alignment_value = ALIGNMENT_STRING_TO_ENUM.get(alignment)
-                if alignment_value is not None:
-                    paragraph.alignment = alignment_value
+                paragraph.alignment = ALIGNMENT_STRING_TO_ENUM[alignment]
 
             # Apply line spacing
             if line_spacing is not None:
@@ -1786,37 +1787,28 @@ class DocxFullEditor:
             source_run: Run to copy formatting from
             target_run: Run to apply formatting to
         """
-        try:
-            # Copy font properties
-            if source_run.font.name:
-                target_run.font.name = source_run.font.name
+        # Prefer python-docx run/font API instead of direct XML mutation.
+        target_run.bold = source_run.bold
+        target_run.italic = source_run.italic
+        target_run.underline = source_run.underline
 
-            if source_run.font.size:
-                target_run.font.size = source_run.font.size
+        target_run.font.name = source_run.font.name
+        target_run.font.size = source_run.font.size
+        target_run.font.strike = source_run.font.strike
+        target_run.font.double_strike = source_run.font.double_strike
+        target_run.font.subscript = source_run.font.subscript
+        target_run.font.superscript = source_run.font.superscript
+        target_run.font.highlight_color = source_run.font.highlight_color
 
-            target_run.font.bold = source_run.font.bold
-            target_run.font.italic = source_run.font.italic
-            target_run.font.underline = source_run.font.underline
+        if source_run.font.color is not None and source_run.font.color.rgb is not None:
+            target_run.font.color.rgb = source_run.font.color.rgb
+        else:
+            target_run.font.color.rgb = None
 
-            if source_run.font.color and source_run.font.color.rgb:
-                target_run.font.color.rgb = source_run.font.color.rgb
-
-            if source_run.font.highlight_color:
-                target_run.font.highlight_color = source_run.font.highlight_color
-
-            # Copy other font properties
-            if source_run.font.strike:
-                target_run.font.strike = source_run.font.strike
-            if source_run.font.double_strike:
-                target_run.font.double_strike = source_run.font.double_strike
-            if source_run.font.subscript:
-                target_run.font.subscript = source_run.font.subscript
-            if source_run.font.superscript:
-                target_run.font.superscript = source_run.font.superscript
-
-            print(f"[DEBUG] Copied run formatting: font={source_run.font.name}, size={source_run.font.size}, bold={source_run.font.bold}")
-        except Exception as e:
-            print(f"[DEBUG] Error copying run formatting: {e}")
+        print(
+            f"[DEBUG] Copied run formatting: font={source_run.font.name}, "
+            f"size={source_run.font.size}, bold={source_run.bold}"
+        )
 
     def _copy_paragraph_format(self, source, target):
         """Copy paragraph-level formatting from source to target."""
@@ -3151,13 +3143,14 @@ class DocxFullEditor:
         """
         Extract formatting from a single run
 
+        OPTIMIZED: Uses python-docx API directly instead of XML manipulation
+
         Args:
             run: python-docx Run object
 
         Returns:
             Dict with format info
         """
-        from docx.oxml import OxmlElement
 
         format_info = {
             'bold': False,
@@ -3172,82 +3165,35 @@ class DocxFullEditor:
             'subscript': False
         }
 
-        try:
-            # Access run properties directly via XML
+        # Use python-docx API directly. Keep payload mapping unchanged.
+        format_info['bold'] = run.bold if run.bold is not None else False
+        format_info['italic'] = run.italic if run.italic is not None else False
+
+        if run.underline is not None:
+            format_info['underline'] = str(run.underline).split('.')[-1]
+
+        if run.font.strike is not None:
+            format_info['strikethrough'] = run.font.strike
+
+        if run.font.color is not None and run.font.color.rgb is not None:
+            format_info['color'] = str(run.font.color.rgb).upper()
+
+        if run.font.highlight_color is not None:
             rpr = run._r.get_or_add_rPr()
-
-            # Bold
-            bold_elem = rpr.find(f'{self.w_ns}b')
-            if bold_elem is not None:
-                val = bold_elem.get(f'{self.w_ns}val', '1')
-                format_info['bold'] = val != '0'
-
-            # Italic
-            italic_elem = rpr.find(f'{self.w_ns}i')
-            if italic_elem is not None:
-                val = italic_elem.get(f'{self.w_ns}val', '1')
-                format_info['italic'] = val != '0'
-
-            # Underline
-            underline_elem = rpr.find(f'{self.w_ns}u')
-            if underline_elem is not None:
-                format_info['underline'] = underline_elem.get(f'{self.w_ns}val', 'single')
-
-            # Strikethrough
-            strike_elem = rpr.find(f'{self.w_ns}strike')
-            if strike_elem is not None:
-                val = strike_elem.get(f'{self.w_ns}val', '1')
-                format_info['strikethrough'] = val != '0'
-
-            # Color
-            color_elem = rpr.find(f'{self.w_ns}color')
-            if color_elem is not None:
-                color_val = color_elem.get(f'{self.w_ns}val', '000000')
-                # Handle theme colors
-                if color_val.startswith('themeColor'):
-                    format_info['color'] = '000000'
-                else:
-                    format_info['color'] = color_val
-
-            # Highlight/Shading
             shd_elem = rpr.find(f'{self.w_ns}shd')
             if shd_elem is not None:
                 fill_val = shd_elem.get(f'{self.w_ns}fill', None)
                 if fill_val and fill_val != 'auto':
                     format_info['highlight'] = fill_val
 
-            # Font size (stored in half-points)
-            sz_elem = rpr.find(f'{self.w_ns}sz')
-            if sz_elem is not None:
-                size_val = sz_elem.get(f'{self.w_ns}val', '24')
-                try:
-                    format_info['font_size'] = int(size_val) // 2  # Convert to points
-                except (ValueError, TypeError):
-                    format_info['font_size'] = 12
+        if run.font.size is not None:
+            format_info['font_size'] = int(run.font.size.pt)
 
-            # Font name
-            rfonts_elem = rpr.find(f'{self.w_ns}rFonts')
-            if rfonts_elem is not None:
-                # Try ASCII font first, then HAnsi (High ANSI), then CS (Complex Script)
-                font_name = (
-                    rfonts_elem.get(f'{self.w_ns}ascii', None) or
-                    rfonts_elem.get(f'{self.w_ns}hAnsi', None) or
-                    rfonts_elem.get(f'{self.w_ns}cs', None)
-                )
-                if font_name:
-                    format_info['font_name'] = font_name
+        if run.font.name is not None:
+            format_info['font_name'] = run.font.name
 
-            # Vertical alignment (superscript/subscript)
-            vertAlign_elem = rpr.find(f'{self.w_ns}vertAlign')
-            if vertAlign_elem is not None:
-                val = vertAlign_elem.get(f'{self.w_ns}val', '')
-                if val == 'superscript':
-                    format_info['superscript'] = True
-                elif val == 'subscript':
-                    format_info['subscript'] = True
-
-        except Exception as e:
-            print(f"Error extracting run format: {e}")
+        format_info['superscript'] = bool(run.font.superscript)
+        format_info['subscript'] = bool(run.font.subscript)
 
         return format_info
 
