@@ -68,6 +68,7 @@ class AddPlaceholderOp(BaseOperation):
     field_name: str = Field(..., description="Name for new placeholder")
     position: Literal["left", "right", "new_line"] = Field("right", description="Where to insert")
     inherit_format: bool = Field(True, description="Inherit formatting from surrounding text")
+    para_in_cell: Optional[int] = Field(None, ge=0, description="Paragraph index within table cell")
 
 
 class AddPlaceholderByOffsetOp(BaseOperation):
@@ -83,6 +84,7 @@ class AddPlaceholderByOffsetOp(BaseOperation):
     offset: int = Field(..., ge=0, description="Character offset in paragraph")
     field_name: str = Field(..., description="Name for new placeholder")
     inherit_format: bool = Field(True, description="Inherit formatting from surrounding text")
+    para_in_cell: Optional[int] = Field(None, ge=0, description="Paragraph index within table cell")
 
 
 # =============================================================================

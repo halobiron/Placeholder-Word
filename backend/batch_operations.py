@@ -8,6 +8,7 @@ This module serves as the bridge between the API endpoint and DocxFullEditor.
 import logging
 import re
 from typing import Any, Dict, List, Optional
+from docx import Document
 from docx_editor import DocxFullEditor
 from batch_update_models import Operation
 
@@ -127,8 +128,15 @@ def _validate_placeholder_op(editor: DocxFullEditor, op: Operation,
             logger.info(f"Field name mapping: {op.field_name} -> {field_match}")
 
     elif op.type in ("add_placeholder", "add_placeholder_by_offset"):
-        if op.block_index >= len(list(editor.doc.paragraphs)):
+        # Validate block_index using the same method as other operations
+        # This accounts for ALL paragraphs including table cells
+        para_index = editor.get_paragraph_index_from_block(op.block_index)
+        if para_index is None:
             raise ValueError(f"Invalid block_index: {op.block_index}")
+        if op.para_in_cell is not None:
+            table_para_index = editor.get_table_cell_paragraph_index(op.block_index, op.para_in_cell)
+            if table_para_index is None:
+                raise ValueError(f"Invalid para_in_cell: {op.para_in_cell}")
         if op.field_name in current_fields:
             raise ValueError(f"Field '{op.field_name}' đã tồn tại")
 
@@ -223,15 +231,28 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
     elif op.type == "add_placeholder":
         from template_manager import MailMergeProcessor
         processor = MailMergeProcessor()
-        if not processor.inject_placeholder_at_location(
+        success = processor.inject_placeholder_at_location(
             editor.doc_path, op.block_index, op.field_name,
-            "", [], [], op.position, None, None
-        ):
+            "", [], [], op.position, None, op.para_in_cell
+        )
+        if not success:
             raise ValueError(f"Failed to add '{op.field_name}'")
+        # Sync the in-memory editor with file changes made by MailMergeProcessor.
+        editor.doc = Document(editor.doc_path)
+        editor._build_block_index_map()
 
     elif op.type == "add_placeholder_by_offset":
+        if op.para_in_cell is not None:
+            paragraph_index = editor.get_table_cell_paragraph_index(op.block_index, op.para_in_cell)
+            if paragraph_index is None:
+                raise ValueError(f"Invalid para_in_cell: {op.para_in_cell}")
+        else:
+            paragraph_index = editor.get_paragraph_index_from_block(op.block_index)
+            if paragraph_index is None:
+                raise ValueError(f"Invalid block_index: {op.block_index}")
+
         editor.insert_placeholder_at_offset(
-            paragraph_index=op.block_index,
+            paragraph_index=paragraph_index,
             offset=op.offset,
             field_name=op.field_name,
             inherit_format=op.inherit_format

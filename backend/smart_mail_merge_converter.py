@@ -376,13 +376,9 @@ class SmartMailMergeConverter:
         Returns:
             True nếu cell trống
         """
-        # Check nếu cell đã có merge field rồi → không considered empty
-        tc = cell._element
-        if tc.find(f"{self.w_ns}fldSimple") is not None:
-            return False
-        # Check các paragraph con có merge field không
+        # Sử dụng thư viện fork để kiểm tra fields (an toàn, không modify structure)
         for para in cell.paragraphs:
-            if para._element.find(f"{self.w_ns}fldSimple") is not None:
+            if hasattr(para, 'fields') and para.fields:
                 return False
 
         text = cell.text.strip()
@@ -394,21 +390,18 @@ class SmartMailMergeConverter:
         Args:
             cell: Table cell object
             field_name: Name cho merge field
-        """
-        # Clear existing content
-        for para in cell.paragraphs:
-            for run in para.runs:
-                run.text = ""
 
+        Note: Uses fork's paragraph.clear() API for cleaner code
+        """
         # Get first paragraph or create new
         if not cell.paragraphs:
             para = cell.add_paragraph()
         else:
             para = cell.paragraphs[0]
 
-        # Clear runs
-        for run in para.runs:
-            run._element.getparent().remove(run._element)
+        # Clear existing content using fork's paragraph.clear() API
+        # This replaces manual run iteration and removal
+        para.clear()
 
         # Create merge field
         unique_label = self._get_unique_label(field_name)

@@ -88,7 +88,8 @@ export const addPlaceholderByPosition = async (templateId, blockIndex, fieldName
     block_index: blockIndex,
     field_name: fieldName,
     position: position,
-    inherit_format: true
+    inherit_format: true,
+    para_in_cell: paraInCell
   }])
 }
 
@@ -98,7 +99,8 @@ export const addPlaceholderByOffset = async (templateId, blockIndex, offset, fie
     block_index: blockIndex,
     offset: offset,
     field_name: fieldName,
-    inherit_format: inheritFormat
+    inherit_format: inheritFormat,
+    para_in_cell: paraInCell
   }])
 }
 
