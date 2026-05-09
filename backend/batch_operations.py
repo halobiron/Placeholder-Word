@@ -380,7 +380,27 @@ def _execute_add_paragraph(editor: DocxFullEditor, op: Operation) -> None:
         if para_index is not None:
             target_paragraph = get_paragraph_at_index(editor, para_index)
             if target_paragraph:
-                if op.position == "after":
+                # NEW: Support offset to split paragraph at cursor position
+                if hasattr(op, 'offset') and op.offset is not None:
+                    # Split paragraph at offset (like add_table_at_cursor does)
+                    split_info = editor._split_paragraph_at_offset(
+                        para_index, op.offset, create_after_para=True
+                    )
+
+                    # Move after_para to right after target paragraph
+                    if 'after_para' in split_info and split_info['text_after'].strip():
+                        after_para = split_info['after_para']
+                        after_p_element = after_para._element
+                        doc_element = editor.doc._element.body
+                        p_element = target_paragraph._p
+
+                        # Remove from end and insert after target
+                        doc_element.remove(after_p_element)
+                        para_index_in_doc = list(doc_element).index(p_element)
+                        doc_element.insert(para_index_in_doc + 1, after_p_element)
+
+                    success = True
+                elif op.position == "after":
                     editor.insert_paragraph_after(target_paragraph, op.text)
                     success = True
                 elif op.position == "before":

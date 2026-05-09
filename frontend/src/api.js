@@ -280,17 +280,22 @@ export const getCellFormat = async (templateId, tableIndex, rowIndex, colIndex) 
   return response.data
 }
 
-export const addParagraph = async (templateId, blockIndex, position = 'after', text = '', tableIndex = null, rowIndex = null, colIndex = null, paraInCell = null) => {
-  return await batchUpdate(templateId, [{
+export const addParagraph = async (templateId, blockIndex, position = 'after', text = '', tableIndex = null, rowIndex = null, colIndex = null, paraInCell = null, offset = null) => {
+  const operation = {
     type: 'add_paragraph',
     block_index: blockIndex,
     position: position,
-    text: text,
-    table_index: tableIndex,
-    row_index: rowIndex,
-    col_index: colIndex,
-    para_in_cell: paraInCell
-  }])
+    text: text
+  }
+
+  // Add optional parameters
+  if (tableIndex !== null) operation.table_index = tableIndex
+  if (rowIndex !== null) operation.row_index = rowIndex
+  if (colIndex !== null) operation.col_index = colIndex
+  if (paraInCell !== null) operation.para_in_cell = paraInCell
+  if (offset !== null) operation.offset = offset  // NEW: Support offset to split paragraph
+
+  return await batchUpdate(templateId, [operation])
 }
 
 export const deleteParagraph = async (templateId, blockIndex, tableIndex = null, rowIndex = null, colIndex = null, paraInCell = null) => {

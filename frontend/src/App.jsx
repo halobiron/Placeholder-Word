@@ -2397,15 +2397,17 @@ function App() {
                             const currentBlockElement = cellParagraph || editedBlock
                             const cursorPosition = getCursorPositionInParagraph(range, currentBlockElement)
 
-                            if (cursorPosition === 'middle') {
-                              setParagraphWarning('⚠️ Không thể tạo đoạn mới từ giữa văn bản!')
-                              setTimeout(() => setParagraphWarning(null), 5000)
-                              return
-                            }
-
                             let params = {
                               position: cursorPosition === 'start' ? 'before' : 'after',
                               text: ''
+                            }
+
+                            // NEW: Calculate offset for middle cursor position to split paragraph
+                            if (cursorPosition === 'middle' && editedBlock) {
+                              const offset = calculateCursorOffset(range, parseInt(editedBlock.getAttribute('data-block-index')))
+                              if (offset !== null) {
+                                params.offset = offset
+                              }
                             }
 
                             if (cellParagraph) {
@@ -2439,7 +2441,8 @@ function App() {
                               params.tableIndex,
                               params.rowIndex,
                               params.colIndex,
-                              params.paraInCell
+                              params.paraInCell,
+                              params.offset  // NEW: Pass offset parameter
                             )
 
                             setEditorHtml(result.html_preview)

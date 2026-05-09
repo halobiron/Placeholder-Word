@@ -1648,6 +1648,8 @@ JSON:"""
                 )
 
         # Build paragraph HTML
+        content = content.replace(self.PAGE_BREAK_TOKEN, "")
+
         para_html = build_paragraph_html(content)
 
         # Add visual page break indicator if this paragraph has a page break

@@ -184,6 +184,9 @@ class AddParagraphOp(BaseOperation):
     Example (after block):
         {"type": "add_paragraph", "block_index": 5, "position": "after", "text": "New content"}
 
+    Example (split at cursor - NEW):
+        {"type": "add_paragraph", "block_index": 5, "offset": 10, "text": ""}
+
     Example (in table cell):
         {"type": "add_paragraph", "table_index": 0, "row_index": 1, "col_index": 2,
          "text": "Cell content", "para_in_cell": 0}
@@ -196,6 +199,7 @@ class AddParagraphOp(BaseOperation):
     row_index: Optional[int] = Field(None, ge=0, description="Row index")
     col_index: Optional[int] = Field(None, ge=0, description="Column index")
     para_in_cell: Optional[int] = Field(None, ge=0, description="Paragraph index within cell")
+    offset: Optional[int] = Field(None, ge=0, description="Cursor offset to split paragraph at (NEW)")
 
 
 class DeleteParagraphOp(BaseOperation):
