@@ -20,8 +20,8 @@ from typing import List, Dict, Optional
 # - Mixed runs such as "...…‥⋯..." stay a single placeholder
 # - Dots separated by spaces/newlines: ". . . ." or ". . . . . . ." or "... ..." or multi-line dots (ALL treated as ONE field)
 # - Pattern uses lookahead to ensure at least 2 dots/underscores total (including those separated by whitespace)
-# - Updated: (?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._] to match space/newline-separated dots with minimum count
-PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._]|[□■]+)')
+# - Updated: (?=(?:\s*[._]\s*){2,})(?:\s*[._]\s*)+ to greedily match ALL space/newline-separated dots
+PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?=(?:\s*[._]\s*){2,})(?:\s*[._]\s*)+|[□■]+)')
 
 
 class SmartMailMergeConverter:

@@ -121,6 +121,44 @@ class MergeExecutor:
             # Add text element
             t = OxmlElement('w:t')
             replacement_str = str(replacement)
+
+            # Auto-pad spaces if adjacent to text to prevent missing spaces in merged values
+            if replacement_str:
+                parent = fld.getparent()
+                if parent is not None:
+                    try:
+                        idx = parent.index(fld)
+                        # Check previous sibling for missing space
+                        if not replacement_str[0].isspace():
+                            last_char = ""
+                            for i in range(idx - 1, -1, -1):
+                                prev_el = parent[i]
+                                prev_texts = prev_el.findall(f".//{self.W_NS}t")
+                                text_contents = [t.text for t in prev_texts if t.text]
+                                if text_contents:
+                                    last_char = text_contents[-1][-1]
+                                    break
+                            if last_char and (last_char.isalpha() or last_char in '.,:;>)]}'):
+                                replacement_str = " " + replacement_str
+
+                        # Check next sibling for missing space
+                        if not replacement_str[-1].isspace():
+                            first_char = ""
+                            for i in range(idx + 1, len(parent)):
+                                next_el = parent[i]
+                                next_texts = next_el.findall(f".//{self.W_NS}t")
+                                text_contents = [t.text for t in next_texts if t.text]
+                                if text_contents:
+                                    first_char = text_contents[0][0]
+                                    break
+                            if first_char and (first_char.isalpha() or first_char in '<([{'):
+                                replacement_str = replacement_str + " "
+                    except ValueError:
+                        pass
+
+            if replacement_str != replacement_str.strip():
+                t.set(qn('xml:space'), 'preserve')
+
             t.text = replacement_str
             new_run.append(t)
 

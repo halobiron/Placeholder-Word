@@ -225,6 +225,18 @@ VĂN BẢN CHỨA DỮ LIỆU:
 
 ---
 
+⚠️ QUAN TRỌNG NHẤT - TUYỆT ĐỐI KHÔNG BỊA THÔNG TIN:
+- CHỈ được lấy thông tin CÓ TRONG "VĂN BẢN CHỨA DỮ LIỆU"
+- KHÔNG ĐƯỢC suy luận, đoán mò, hay tạo ra thông tin KHÔNG CÓ trong context
+- Nếu context KHÔNG có thông tin cho field → PHẢI trả về "" (chuỗi rỗng)
+- Nếu context chỉ có một phần thông tin → CHỈ lấy phần đó, không bịa phần còn lại
+
+VÍ DỤ VỀ VIỆC TRỞ VỀ RỖNG:
+- Context: "Nguyễn Văn A, sinh năm 1990"
+- Fields: ho_ten, ngay_sinh, dia_chi, cmnd
+- Kết quả ĐÚNG: {{"ho_ten": "Nguyễn Văn A", "ngay_sinh": "1990", "dia_chi": "", "cmnd": ""}}
+- Kết quả SAI: {{"ho_ten": "Nguyễn Văn A", "ngay_sinh": "1990", "dia_chi": "Hà Nội", "cmnd": "123456"}} ← BỊA!
+
 YÊU CẦU:
 1. Đọc TOÀN BỘ template → hiểu MỖI field nằm ở đâu
 2. Phân tích context → điền TẤT CẢ fields cùng lúc
@@ -232,16 +244,16 @@ YÊU CẦU:
 
 QUY TẮC:
 - Giữ nguyên tên trường chính xác
-- Không tìm thấy -&gt; chuỗi rỗng ""
+- Không tìm thấy trong context → chuỗi rỗng ""
 - KHÔNG lặp lại text đã có trong template:
-  * "Kính gửi: TÒA ÁN NHÂN DÂN «field»" + "TÒA ÁN NHÂN DÂN TP.HCM" -&gt; "TP.HCM"
-  * "năm 20«field»" + "năm 2024" -&gt; "24"
-  * "Diện tích: «field» m²" + "5,0 ha m²" -&gt; "5,0" (KHÔNG lặp m²)
-  * "Tỷ lệ: «field» %" + "35.5%" -&gt; "35.5" (KHÔNG lặp %)
+  * "Kính gửi: TÒA ÁN NHÂN DÂN «field»" + "TÒA ÁN NHÂN DÂN TP.HCM" → "TP.HCM"
+  * "năm 20«field»" + "năm 2024" → "24"
+  * "Diện tích: «field» m²" + "5,0 ha m²" → "5,0" (KHÔNG lặp m²)
+  * "Tỷ lệ: «field» %" + "35.5%" → "35.5" (KHÔNG lặp %)
 
-- Field trùng tên -&gt; dùng NGỮ CẢNH section/bảng để phân biệt:
-  * stt ở bảng "Cổ đông" -&gt; stt_co_dong
-  * stt ở bảng "Nhà đầu tư" -&gt; stt_nha_dau_tu
+- Field trùng tên → dùng NGỮ CẢNH section/bảng để phân biệt:
+  * stt ở bảng "Cổ đông" → stt_co_dong
+  * stt ở bảng "Nhà đầu tư" → stt_nha_dau_tu
   * (KHÔNG dùng stt_1, stt_2 trùng tên)
 
 JSON:"""
