@@ -233,11 +233,15 @@ async def merge_template(
         template_id: ID of template from /convert endpoint
         context: Text context with data to fill (optional, for Gemini extraction)
         field_values: JSON string of field-value pairs (optional, for direct values)
-        active_fields: JSON string array of active fields to be filled
-
+        active_fields: JSON string array of active fields (IGNORED when using context - Gemini extracts ALL fields)
+        locked_fields: JSON string array of fields to keep as-is (not filled)
 
     Returns:
         JSON with result_id and download_url
+
+    Note:
+        When using context (Gemini extraction), ALL fields except locked_fields will be extracted.
+        The active_fields parameter is ignored to prevent missing fields due to incomplete frontend data.
     """
     template_path = validate_template_path(template_id)
     gemini_usage = empty_gemini_usage()
@@ -260,12 +264,10 @@ async def merge_template(
         # Use Gemini to extract from context
         gemini_client = GeminiClient(GEMINI_API_KEY)
 
-        active_f = set(parse_json_list(active_fields))
         locked_f = set(parse_json_list(locked_fields))
 
-        # Filter template fields trực tiếp (KHÔNG CẦN metadata)
-        if active_f:
-            template_fields = [f for f in template_fields if f in active_f]
+        # Chỉ filter locked_fields - Gemini sẽ extract TẤT CẢ fields khác
+        # Điều này đảm bảo KHÔNG bị thiếu field do frontend gửi thiếu active_fields
         if locked_f:
             template_fields = [f for f in template_fields if f not in locked_f]
 
