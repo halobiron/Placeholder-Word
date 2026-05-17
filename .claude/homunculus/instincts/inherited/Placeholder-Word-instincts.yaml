@@ -1,0 +1,368 @@
+# Instincts generated from https://github.com/halobiron/Placeholder-Word
+# Generated: 2026-05-17T10:29:18.677Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: Placeholder-Word-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/halobiron/Placeholder-Word
+---
+
+# Placeholder Word Commit Length
+
+## Action
+
+Keep commit messages concise (~17 characters)
+
+## Evidence
+
+- Average commit message length: 17 chars
+- Based on 12 commits
+
+---
+id: Placeholder-Word-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/halobiron/Placeholder-Word
+---
+
+# Placeholder Word Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: Placeholder-Word-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/halobiron/Placeholder-Word
+---
+
+# Placeholder Word Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: Placeholder-Word-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/halobiron/Placeholder-Word
+---
+
+# Placeholder Word Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: Placeholder-Word-arch-type-based
+trigger: "when adding new code"
+confidence: 0.8
+domain: architecture
+source: repo-analysis
+source_repo: https://github.com/halobiron/Placeholder-Word
+---
+
+# Placeholder Word Arch Type Based
+
+## Action
+
+Place code in the appropriate type folder (components/, services/, utils/, etc.)
+
+## Evidence
+
+- Type-based module organization detected
+- Folders: 
+
+---
+id: Placeholder-Word-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/halobiron/Placeholder-Word
+---
+
+# Placeholder Word Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: Placeholder-Word-workflow-multi-file-backend-hotfix
+trigger: "when doing multi file backend hotfix"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/halobiron/Placeholder-Word
+---
+
+# Placeholder Word Workflow Multi File Backend Hotfix
+
+## Action
+
+Follow the multi-file-backend-hotfix workflow:
+1. Identify related backend modules affected by the bug.
+2. Edit 2 or more of: docx_editor.py, smart_mail_merge_converter.py, template_manager.py, batch_operations.py, table_utils.py.
+3. Commit changes with a message indicating hotfix or fix.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: backend/docx_editor.py, backend/smart_mail_merge_converter.py, backend/template_manager.py
+
+---
+id: Placeholder-Word-workflow-update-placeholder-or-merge-logic
+trigger: "when doing update placeholder or merge logic"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/halobiron/Placeholder-Word
+---
+
+# Placeholder Word Workflow Update Placeholder Or Merge Logic
+
+## Action
+
+Follow the update-placeholder-or-merge-logic workflow:
+1. Edit merge_executor.py and smart_mail_merge_converter.py.
+2. Optionally update batch_operations.py or batch_update_models.py if data flow is affected.
+3. Test changes, especially for placeholder handling.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: backend/merge_executor.py, backend/smart_mail_merge_converter.py, backend/batch_operations.py
+
+---
+id: placeholder-word-instinct-file-naming
+trigger: "When creating or renaming a file in the codebase"
+confidence: 0.85
+domain: code-style
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct File Naming
+
+## Action
+
+Use snake_case for file names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.files
+- All backend Python files use snake_case
+
+---
+id: placeholder-word-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Function Naming
+
+## Action
+
+Use camelCase for function names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.functions
+
+---
+id: placeholder-word-instinct-class-naming
+trigger: "When defining a new class"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Class Naming
+
+## Action
+
+Use PascalCase for class names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.classes
+
+---
+id: placeholder-word-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Constant Naming
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.constants
+
+---
+id: placeholder-word-instinct-import-style
+trigger: "When importing modules within the package"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in codeStyle.importStyle
+
+---
+id: placeholder-word-instinct-export-style
+trigger: "When exporting functions or classes from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Export Style
+
+## Action
+
+Use named exports (explicitly list exports)
+
+## Evidence
+
+- Pattern in codeStyle.exportStyle
+
+---
+id: placeholder-word-instinct-test-location
+trigger: "When adding or updating tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Test Location
+
+## Action
+
+Place tests in a separate test folder, not mixed with source code
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation
+
+---
+id: placeholder-word-instinct-commit-format
+trigger: "When writing a git commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Commit Format
+
+## Action
+
+Use short, freeform messages (average ~17 characters), often starting with a verb (e.g., fix, split, reduce)
+
+## Evidence
+
+- Pattern in commits.examples
+- Average commit length is 17
+
+---
+id: placeholder-word-instinct-multi-backend-hotfix
+trigger: "When a bug affects multiple backend modules at once"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Multi Backend Hotfix
+
+## Action
+
+Edit 2 or more of: docx_editor.py, smart_mail_merge_converter.py, template_manager.py, batch_operations.py, table_utils.py, then commit with a message indicating hotfix or fix
+
+## Evidence
+
+- multi-file-backend-hotfix workflow
+- Commits referencing fixes across multiple backend files
+
+---
+id: placeholder-word-instinct-update-placeholder-logic
+trigger: "When updating placeholder or merge logic in document processing"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: halobiron/Placeholder-Word
+---
+
+# Placeholder Word Instinct Update Placeholder Logic
+
+## Action
+
+Edit merge_executor.py and smart_mail_merge_converter.py, optionally batch_operations.py or batch_update_models.py if data flow is affected, and test changes for placeholder handling
+
+## Evidence
+
+- update-placeholder-or-merge-logic workflow
+- Commits referencing merge_executor.py and smart_mail_merge_converter.py
+
