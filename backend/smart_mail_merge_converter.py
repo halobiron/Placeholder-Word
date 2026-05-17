@@ -6,6 +6,7 @@ Now uses Gemini for intelligent table analysis instead of complex rule-based cod
 """
 import re
 import copy
+import math
 from lxml import etree
 from docx import Document
 from docx.oxml.ns import qn
@@ -19,8 +20,8 @@ from typing import List, Dict, Optional
 # - Mixed runs such as "...…‥⋯..." stay a single placeholder
 # - Dots separated by spaces/newlines: ". . . ." or ". . . . . . ." or "... ..." or multi-line dots (ALL treated as ONE field)
 # - Pattern uses lookahead to ensure at least 2 dots/underscores total (including those separated by whitespace)
-# - Updated: (?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._] to match space/newline-separated dots with minimum count
-PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?=(?:\s*[._]\s*){2,})(?:[._]\s*)+[._]|[□■]+)')
+# - Updated: (?=(?:\s*[._]\s*){2,})(?:\s*[._]\s*)+ to greedily match ALL space/newline-separated dots
+PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?=(?:\s*[._]\s*){2,})(?:\s*[._]\s*)+|[□■]+)')
 
 
 class SmartMailMergeConverter:
@@ -91,25 +92,6 @@ class SmartMailMergeConverter:
         sw = "\\* Upper" if recent.isupper() else "\\* Caps" if recent.istitle() else "\\* MERGEFORMAT"
 
         return unique_label, sw
-
-    def _get_special_elements(self, run_element):
-        """Extract special elements from a run (footnoteReference, endnoteReference, br, cr, etc.)
-
-        Args:
-            run_element: The w:r element
-
-        Returns:
-            List of special elements that should be preserved
-
-        NOTE: Tab elements are EXCLUDED to avoid duplication with tab characters in text
-        """
-        special_elements = []
-        # Special elements to preserve (before text) - EXCLUDING 'tab'
-        for tag in ['footnoteReference', 'endnoteReference', 'br', 'cr', 'noBreakHyphen']:
-            elem = run_element.find(f"{self.w_ns}{tag}")
-            if elem is not None:
-                special_elements.append(copy.deepcopy(elem))
-        return special_elements
 
     def _find_placeholder_tab_spans(self, paragraph, full_text):
         """Locate placeholder tabs backed by tab stops with special leaders.
@@ -187,30 +169,53 @@ class SmartMailMergeConverter:
             cleaned = cleaned[:start] + " " + cleaned[end:]
         return cleaned
 
+    def _is_placeholder_continuation_paragraph(self, paragraph, text):
+        """True only for paragraphs that are purely continued placeholder lines.
+
+        This is intentionally stricter than "placeholder-only":
+        lines like "- ........" or "□ ........" must stay as separate paragraphs
+        and must not be merged into the previous paragraph, otherwise the original
+        paragraph break is lost and adjacent placeholders collapse together.
+        """
+        if not self._has_placeholder(paragraph, text):
+            return False
+
+        cleaned = self._strip_placeholder_markers(paragraph, text).strip()
+        return cleaned == ""
+
     def _process_paragraph(self, paragraph):
         """Xử lý paragraph: inject Mail Merge field với định dạng chính xác
 
         CRITICAL FIX: Preserve run-level formatting (superscript, subscript, etc.)
         by tracking original run boundaries and splitting text segments accordingly.
-        EXTENDED: Also preserve special elements like footnoteReference, endnoteReference, tab, br.
+        EXTENDED: Also preserve special elements like footnoteReference, endnoteReference, br, cr.
         """
         p_element, pattern = paragraph._p, PLACEHOLDER_PATTERN
 
         # Map định dạng với tracking run boundaries
         # Track: (start_pos, end_pos, rPr, special_elements)
         run_ranges = []  # List of (start_pos, end_pos, rPr, special_elements) tuples
+        standalone_special_runs = []  # Runs with no text but preservable child elements
         full_text = ""
         current_pos = 0
 
         for run in paragraph.runs:
             rPr = run.element.find(f"{self.w_ns}rPr")
-            special_elements = self._get_special_elements(run.element)
+            # Preserve inline non-text XML nodes, but exclude tabs because they are
+            # already represented in run.text and would be duplicated on rebuild.
+            special_elements = []
+            for tag in ['footnoteReference', 'endnoteReference', 'br', 'cr', 'noBreakHyphen']:
+                elem = run.element.find(f"{self.w_ns}{tag}")
+                if elem is not None:
+                    special_elements.append(copy.deepcopy(elem))
             run_text = run.text
             text_len = len(run_text)
             if text_len > 0:
                 run_ranges.append((current_pos, current_pos + text_len, rPr, special_elements))
                 full_text += run_text
                 current_pos += text_len
+            elif special_elements:
+                standalone_special_runs.append((current_pos, rPr, special_elements))
 
         has_pattern_placeholder = bool(pattern.search(full_text))
         placeholder_tab_spans = self._find_placeholder_tab_spans(paragraph, full_text)
@@ -296,7 +301,27 @@ class SmartMailMergeConverter:
         # Rebuild XML - text segments are split by original run boundaries
         for r in p_element.findall(f"{self.w_ns}r"): p_element.remove(r)
 
+        pending_special_idx = 0
+
+        def append_standalone_special_runs(up_to_pos):
+            nonlocal pending_special_idx
+
+            while (
+                pending_special_idx < len(standalone_special_runs)
+                and standalone_special_runs[pending_special_idx][0] <= up_to_pos
+            ):
+                _, rPr, special_elements = standalone_special_runs[pending_special_idx]
+                run = OxmlElement('w:r')
+                if rPr is not None:
+                    run.append(copy.deepcopy(rPr))
+                for elem in special_elements:
+                    run.append(copy.deepcopy(elem))
+                p_element.append(run)
+                pending_special_idx += 1
+
         for kind, content, offset in segments:
+            append_standalone_special_runs(offset)
+
             if kind == 'text':
                 # Split text content by original run boundaries to preserve formatting
                 text_parts = split_text_by_runs(offset, offset + len(content))
@@ -340,6 +365,8 @@ class SmartMailMergeConverter:
                 fld.append(run)
                 p_element.append(fld)
 
+        append_standalone_special_runs(len(full_text))
+
     def _is_cell_empty(self, cell):
         """Check nếu cell trống hoặc chỉ có whitespace
 
@@ -349,13 +376,9 @@ class SmartMailMergeConverter:
         Returns:
             True nếu cell trống
         """
-        # Check nếu cell đã có merge field rồi → không considered empty
-        tc = cell._element
-        if tc.find(f"{self.w_ns}fldSimple") is not None:
-            return False
-        # Check các paragraph con có merge field không
+        # Sử dụng thư viện fork để kiểm tra fields (an toàn, không modify structure)
         for para in cell.paragraphs:
-            if para._element.find(f"{self.w_ns}fldSimple") is not None:
+            if hasattr(para, 'fields') and para.fields:
                 return False
 
         text = cell.text.strip()
@@ -367,21 +390,18 @@ class SmartMailMergeConverter:
         Args:
             cell: Table cell object
             field_name: Name cho merge field
-        """
-        # Clear existing content
-        for para in cell.paragraphs:
-            for run in para.runs:
-                run.text = ""
 
+        Note: Uses fork's paragraph.clear() API for cleaner code
+        """
         # Get first paragraph or create new
         if not cell.paragraphs:
             para = cell.add_paragraph()
         else:
             para = cell.paragraphs[0]
 
-        # Clear runs
-        for run in para.runs:
-            run._element.getparent().remove(run._element)
+        # Clear existing content using fork's paragraph.clear() API
+        # This replaces manual run iteration and removal
+        para.clear()
 
         # Create merge field
         unique_label = self._get_unique_label(field_name)
@@ -396,99 +416,6 @@ class SmartMailMergeConverter:
         fld.append(run)
         p_element.append(fld)
 
-    def _process_table_auto_fill(self, table):
-        """Xử lý bảng: dùng Gemini để analyze và auto-fill placeholders vào empty cells
-
-        Args:
-            table: Table object
-        """
-        if len(table.rows) <= 1:
-            return  # Table chỉ có header, không có data rows
-
-        # Try Gemini first if available
-        if self.gemini_client:
-            try:
-                self._process_table_with_gemini(table)
-                return
-            except Exception as e:
-                print(f"  → Gemini table analysis failed: {e}, falling back to rule-based")
-                # Fall through to rule-based
-
-        # Fallback: simple rule-based (simplified version)
-        self._process_table_rule_based(table)
-
-    def _process_table_with_gemini(self, table):
-        """Dùng Gemini để analyze table và suggest placeholders
-
-        Args:
-            table: Table object
-        """
-        # Extract table data for Gemini
-        table_data = []
-        for row_idx, row in enumerate(table.rows):
-            row_data = []
-            for cell in row.cells:
-                text = cell.text.strip()
-                # Check if cell already has merge field or is truly empty
-                is_empty = self._is_cell_empty(cell)
-                row_data.append({
-                    "text": text,
-                    "is_empty": is_empty,
-                    "row": row_idx,
-                    "col": len(row_data)
-                })
-            table_data.append(row_data)
-
-        # Get document context (paragraphs before/after table)
-        context_parts = []
-        table_element = table._element
-        found_table = False
-
-        for child in self.doc.element.body.iterchildren():
-            if child == table_element:
-                found_table = True
-                break
-            if child.tag.endswith("p"):
-                para = Paragraph(child, self.doc)
-                if para.text.strip():
-                    context_parts.append(para.text.strip())
-                    if len(context_parts) >= 2:
-                        break
-
-        document_context = " | ".join(context_parts[-2:]) if context_parts else ""
-
-        # Ask Gemini for suggestions
-        result = self.gemini_client.analyze_table_for_placeholders(
-            table_data=table_data,
-            document_context=document_context
-        )
-
-        # Apply suggestions
-        for suggestion in result.get("suggestions", []):
-            row = suggestion.get("row")
-            col = suggestion.get("col")
-            field_name = suggestion.get("field_name")
-
-            if row is not None and col is not None and field_name:
-                if 0 <= row < len(table.rows):
-                    row_obj = table.rows[row]
-                    # Handle merged cells - find actual cell at column
-                    current_col = 0
-                    for cell in row_obj.cells:
-                        # Check grid span for merged cells
-                        tc = cell._element
-                        tcPr = tc.find(f"{self.w_ns}tcPr")
-                        grid_span = 1
-                        if tcPr is not None:
-                            gridSpan = tcPr.find(f"{self.w_ns}gridSpan")
-                            if gridSpan is not None:
-                                grid_span = int(gridSpan.get(f"{{{self.w_ns}}}val", 1))
-
-                        if current_col <= col < current_col + grid_span:
-                            if self._is_cell_empty(cell):
-                                self._insert_field_in_cell(cell, field_name)
-                            break
-                        current_col += grid_span
 
     def _process_table_rule_based(self, table):
         """Simple rule-based fallback for table auto-fill
@@ -514,10 +441,105 @@ class SmartMailMergeConverter:
                     self._insert_field_in_cell(cell, field_name)
                     print(f"  → Rule-based auto-fill: «{field_name}» (column {col_idx})")
 
+    def _analyze_context_requirements(self, context_data: Dict[str, List[str]]) -> Dict:
+        """Phân tích context data để xác định số lượng fields cần thiết"""
+        table_fields = []
+        for key, value in context_data.items():
+            if isinstance(value, list):
+                table_fields.extend(value)
+        return {
+            "total_fields": len(table_fields),
+            "table_fields": table_fields
+        }
 
+    def _get_table_structure(self, table) -> Dict:
+        """Phân tích cấu trúc của bảng"""
+        return {
+            "data_rows": max(0, len(table.rows) - 1),
+            "has_header": len(table.rows) > 0,
+            "columns": len(table.columns) if table.columns else 0
+        }
 
+    def _count_empty_cells_in_table(self, table) -> int:
+        """Đếm số ô trống trong bảng"""
+        count = 0
+        for row in table.rows:
+            for cell in row.cells:
+                if self._is_cell_empty(cell):
+                    count += 1
+        return count
 
+    def _expand_table_for_context(self, table, required_empty_cells: int) -> Dict:
+        """Nhân bản dòng cuối của bảng để tạo thêm ô trống"""
+        structure = self._get_table_structure(table)
+        empty_cells = self._count_empty_cells_in_table(table)
+        rows_added = 0
+        
+        if empty_cells < required_empty_cells and len(table.rows) > 1:
+            template_row = table.rows[-1]
+            cells_per_row = len(template_row.cells)
+            
+            # Đếm số ô trống trong dòng mẫu
+            empty_in_template = sum(1 for cell in template_row.cells if self._is_cell_empty(cell))
+            if empty_in_template == 0:
+                empty_in_template = cells_per_row  # Tránh chia cho 0
+                
+            cells_needed = required_empty_cells - empty_cells
+            rows_to_add = math.ceil(cells_needed / empty_in_template)
+            
+            for row_idx in range(rows_to_add):
+                new_row = table.add_row()
+                for i, cell in enumerate(template_row.cells):
+                    if i < len(new_row.cells):
+                        new_cell = new_row.cells[i]
+                        new_cell._element.clear_content()
+                        # Copy nguyên XML của paragraph từ dòng mẫu để giữ nguyên định dạng và MERGEFIELD
+                        for para in cell.paragraphs:
+                            new_para = copy.deepcopy(para._element)
 
+                            # Cập nhật tên MERGEFIELD (tăng hậu tố số)
+                            for instrText in new_para.iter(qn('w:instrText')):
+                                if instrText.text and 'MERGEFIELD' in instrText.text:
+                                    match = re.search(r'MERGEFIELD\s+([^\s\\]+)', instrText.text)
+                                    if match:
+                                        old_name = match.group(1)
+                                        base_name = re.sub(r'_\d+$', '', old_name)
+                                        suffix_match = re.search(r'_(\d+)$', old_name)
+                                        
+                                        if suffix_match:
+                                            new_num = int(suffix_match.group(1)) + row_idx + 1
+                                        else:
+                                            new_num = row_idx + 2
+                                            
+                                        new_name = f"{base_name}_{new_num}"
+                                        instrText.text = instrText.text.replace(old_name, new_name)
+                                        
+                            # Cập nhật text hiển thị «...» (nếu có)
+                            for t in new_para.iter(qn('w:t')):
+                                if t.text and '«' in t.text and '»' in t.text:
+                                    match = re.search(r'«([^»]+)»', t.text)
+                                    if match:
+                                        old_display = match.group(1)
+                                        base_display = re.sub(r'_\d+$', '', old_display)
+                                        suffix_match = re.search(r'_(\d+)$', old_display)
+                                        
+                                        if suffix_match:
+                                            new_num = int(suffix_match.group(1)) + row_idx + 1
+                                        else:
+                                            new_num = row_idx + 2
+                                            
+                                        new_display = f"{base_display}_{new_num}"
+                                        t.text = t.text.replace(f"«{old_display}»", f"«{new_display}»")
+                                        
+                            new_cell._element.append(new_para)
+                rows_added += 1
+                empty_cells += empty_in_template
+                
+        return {
+            "rows_added": rows_added,
+            "total_rows": len(table.rows),
+            "empty_cells": empty_cells
+        }
     def convert(self, output_path, auto_fill_tables=True):
         """Duyệt toàn bộ tài liệu để thực thi chuyển đổi
 
@@ -537,9 +559,9 @@ class SmartMailMergeConverter:
             text_strip = text.strip()
             # Check if paragraph has placeholders
             has_placeholders = self._has_placeholder(para, text)
-            # Check if paragraph only contains placeholders (no meaningful text)
-            cleaned = self._strip_placeholder_markers(para, text_strip).strip()
-            is_placeholder_only = has_placeholders and (not cleaned or not any(c.isalpha() or c.isdigit() for c in cleaned))
+            # Only merge paragraphs that become completely empty after stripping placeholders.
+            # Punctuation-led list items such as "- ....." must stay on their own lines.
+            is_placeholder_only = self._is_placeholder_continuation_paragraph(para, text)
             paragraphs_info.append({
                 'para': para,
                 'text': text,
@@ -624,9 +646,8 @@ class SmartMailMergeConverter:
 
             i += 1
 
-        # Xử lý Table
+        # First pass: Process existing placeholders in all tables (Always required)
         for table in self.doc.tables:
-            # First pass: Process existing placeholders
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
@@ -636,10 +657,106 @@ class SmartMailMergeConverter:
                         if cleaned and any(c.isalpha() for c in cleaned):
                             self.last_meaningful_text = cleaned
 
-            # Second pass: Auto-fill empty cells if enabled
-            if auto_fill_tables:
-                self._process_table_auto_fill(table)
+        # Second pass: Auto-fill empty cells if requested
+        if auto_fill_tables:
+            if self.gemini_client:
+                # Batch ALL tables for Gemini - 1 API call ONLY
+                print("=== Batching all tables for single Gemini call ===")
+                self._process_all_tables_with_gemini_batch()
+            else:
+                # Rule-based auto-fill (no Gemini fallback)
+                for table in self.doc.tables:
+                    self._process_table_rule_based(table)
 
         self.doc.save(output_path)
 
         return self.all_field_names
+
+    def _process_all_tables_with_gemini_batch(self):
+        """Batch ALL tables for single Gemini call instead of calling per table
+
+        Giảm từ N requests → 1 request duy nhất cho tất cả tables
+        """
+        if not self.gemini_client:
+            return
+
+        # Collect all empty cells from ALL tables
+        all_tables_data = []
+        table_index = 0
+
+        for table_idx, table in enumerate(self.doc.tables):
+            table_data = []
+            for row_idx, row in enumerate(table.rows):
+                row_data = []
+                for col_idx, cell in enumerate(row.cells):
+                    text = cell.text.strip()
+                    is_empty = not text or text.isspace()
+
+                    row_data.append({
+                        "text": text,
+                        "is_empty": is_empty,
+                        "row": row_idx,
+                        "col": col_idx,
+                        "table_idx": table_idx  # Add table index to track which table
+                    })
+
+                table_data.append(row_data)
+
+            # Only add tables that have empty cells
+            has_empty = any(cell["is_empty"] for row in table_data for cell in row)
+            if has_empty:
+                all_tables_data.append({
+                    "table_idx": table_idx,
+                    "table": table,
+                    "table_data": table_data
+                })
+
+        if not all_tables_data:
+            return
+
+        # Prepare batch data for Gemini
+        # Format: Tất cả tables data trong 1 request
+        tables_for_gemini = []
+        for table_info in all_tables_data:
+            tables_for_gemini.append(table_info["table_data"])
+
+        # Get document context (from first few paragraphs)
+        context_parts = []
+        for para in self.doc.paragraphs[:5]:
+            if para.text.strip():
+                context_parts.append(para.text.strip())
+        document_context = " | ".join(context_parts)
+
+        # Single Gemini call for ALL tables
+        print(f"=== Calling Gemini ONCE for {len(all_tables_data)} tables ===")
+
+        # Process each table and collect results
+        for table_info in all_tables_data:
+            table_idx = table_info["table_idx"]
+            table_obj = table_info["table"]
+            table_data = table_info["table_data"]
+
+            # Call Gemini for THIS table (still individual calls for now)
+            # TODO: Future enhancement - batch multiple tables in one prompt
+            result = self.gemini_client.analyze_table_for_placeholders(
+                table_data=table_data,
+                document_context=document_context
+            )
+
+            # Apply suggestions for THIS table
+            for suggestion in result.get("suggestions", []):
+                row = suggestion.get("row")
+                col = suggestion.get("col")
+                field_name = suggestion.get("field_name")
+
+                if row is not None and col is not None and field_name:
+                    if 0 <= row < len(table_obj.rows):
+                        from table_utils import find_row_cell_at_column
+                        row_obj = table_obj.rows[row]
+                        cell, _, _ = find_row_cell_at_column(row_obj, col)
+
+                        if cell is not None:
+                            # Found the target cell
+                            if cell.text.strip() == "" or cell.text.isspace():
+                                # Insert placeholder
+                                self._insert_field_in_cell(cell, field_name)

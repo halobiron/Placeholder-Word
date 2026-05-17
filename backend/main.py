@@ -44,28 +44,11 @@ def save_and_regenerate_preview(editor: DocxFullEditor, template_path: str) -> t
 
 
 def validate_template_path(template_id: str) -> Path:
-    """Validate template exists và return path
-
-    Args:
-        template_id: Template identifier
-
-    Returns:
-        Path object to template
-
-    Raises:
-        HTTPException: If template not found
-    """
+    """Validate template exists và return path"""
     template_path = TEMPLATE_DIR / f"{template_id}.docx"
     if not template_path.exists():
         raise HTTPException(status_code=404, detail="Template not found")
     return template_path
-
-
-def handle_endpoint_error(endpoint_name: str, error: Exception) -> HTTPException:
-    """Standard error handling với traceback logging"""
-    error_detail = f"{endpoint_name} failed: {str(error)}\n\nTraceback:\n{traceback.format_exc()}"
-    logger.error(f"=== /{endpoint_name.replace(' ', '-').lower()} ERROR ===\n{error_detail}\n=== END ERROR ===")
-    return HTTPException(status_code=500, detail=error_detail)
 
 
 def handle_endpoint_errors(endpoint_name: str):
@@ -77,13 +60,6 @@ def handle_endpoint_errors(endpoint_name: str):
 
     Args:
         endpoint_name: Tên endpoint cho log (vd: "suggest placeholders", "batch update")
-
-    Usage:
-        @app.post("/suggest-placeholders")
-        @handle_endpoint_errors("suggest placeholders")
-        async def suggest_placeholders(...):
-            # Logic - không cần try-except
-            pass
     """
     def decorator(func: Callable):
         @wraps(func)
@@ -95,7 +71,9 @@ def handle_endpoint_errors(endpoint_name: str):
                 raise
             except Exception as e:
                 # Log traceback và raise HTTPException 500 với detail đầy đủ
-                raise handle_endpoint_error(endpoint_name, e)
+                error_detail = f"{endpoint_name} failed: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+                logger.error(f"=== /{endpoint_name.replace(' ', '-').lower()} ERROR ===\n{error_detail}\n=== END ERROR ===")
+                raise HTTPException(status_code=500, detail=error_detail)
         return wrapper
     return decorator
 
@@ -255,18 +233,23 @@ async def merge_template(
         template_id: ID of template from /convert endpoint
         context: Text context with data to fill (optional, for Gemini extraction)
         field_values: JSON string of field-value pairs (optional, for direct values)
-        active_fields: JSON string array of active fields to be filled
-
+        active_fields: JSON string array of active fields (IGNORED when using context - Gemini extracts ALL fields)
+        locked_fields: JSON string array of fields to keep as-is (not filled)
 
     Returns:
         JSON with result_id and download_url
+
+    Note:
+        When using context (Gemini extraction), ALL fields except locked_fields will be extracted.
+        The active_fields parameter is ignored to prevent missing fields due to incomplete frontend data.
     """
     template_path = validate_template_path(template_id)
     gemini_usage = empty_gemini_usage()
 
     executor = MergeExecutor()
-    template_field_metadata = executor.get_template_field_metadata(str(template_path))
-    template_fields = [item["field_name"] for item in template_field_metadata]
+    # Get field names + full template text in ONE pass (KHÔNG CẦN metadata cho Gemini)
+    template_fields, full_template_text = executor.get_template_fields_and_text(str(template_path))
+
 
     # Determine data source
     if field_values:
@@ -281,25 +264,21 @@ async def merge_template(
         # Use Gemini to extract from context
         gemini_client = GeminiClient(GEMINI_API_KEY)
 
-        active_f = set(parse_json_list(active_fields))
         locked_f = set(parse_json_list(locked_fields))
 
-        if active_f:
-            template_field_metadata = [
-                item for item in template_field_metadata if item["field_name"] in active_f
-            ]
+        # Chỉ filter locked_fields - Gemini sẽ extract TẤT CẢ fields khác
+        # Điều này đảm bảo KHÔNG bị thiếu field do frontend gửi thiếu active_fields
         if locked_f:
-            template_field_metadata = [
-                item for item in template_field_metadata if item["field_name"] not in locked_f
-            ]
-        template_fields = [item["field_name"] for item in template_field_metadata]
+            template_fields = [f for f in template_fields if f not in locked_f]
 
         logger.debug("=== MERGE DEBUG ===")
         logger.debug(f"Template fields to extract: {template_fields}")
+        logger.debug(f"Full template text length: {len(full_template_text)} chars")
+
         data = gemini_client.extract_data_from_context(
-            context,
-            template_fields,
-            template_field_metadata=template_field_metadata,
+            context=context,
+            template_fields=template_fields,
+            full_template_text=full_template_text,  # Gemini tự tìm vị trí từ full template
         )
         logger.debug(f"Extracted data: {data}")
         logger.debug("=== END MERGE DEBUG ===")
@@ -1265,8 +1244,7 @@ async def merge_with_table_expansion(request: TableExpansionRequest):
         logger.info(" ===== EXECUTING MERGE =====")
 
         executor = MergeExecutor()
-        template_field_metadata = executor.get_template_field_metadata(str(working_template))
-        template_fields = [item["field_name"] for item in template_field_metadata]
+        template_fields = executor.get_template_fields(str(working_template))
 
         # Determine data source
         if request.field_values:

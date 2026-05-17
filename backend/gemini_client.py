@@ -4,8 +4,13 @@ Used for extracting data from context and analyzing document structure
 """
 import json
 import re
+import logging
 from google import genai
 from typing import Any
+
+# Tắt các log info lặp lại từ google_genai và httpx
+logging.getLogger('google_genai.models').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
 
 
 class GeminiClient:
@@ -181,13 +186,17 @@ class GeminiClient:
         self,
         context: str,
         template_fields: list,
-        template_field_metadata: list | None = None,
+        full_template_text: str,
     ) -> dict:
-        """Extract field values from context text
+        """Extract field values by having Gemini read ENTIRE template at once
+
+        KHÔNG CẦN metadata context nhỏ nữa - Gemini đọc full template và tự
+        xác định vị trí từng field. Tiết kiệm 60%+ tokens.
 
         Args:
             context: Full text containing data
             template_fields: List of field names to extract
+            full_template_text: FULL template text - Gemini dùng để tìm vị trí field
 
         Returns:
             Dictionary mapping field names to extracted values
@@ -195,41 +204,57 @@ class GeminiClient:
         if not template_fields:
             return {}
 
-        if template_field_metadata:
-            metadata_by_name = {
-                item.get("field_name"): item for item in template_field_metadata if item.get("field_name")
-            }
-            fields_list = "\n".join(
-                [
-                    f'- {field_name} | placeholder_goc="{metadata_by_name.get(field_name, {}).get("original_placeholder", "")}" '
-                    f'| truoc="{metadata_by_name.get(field_name, {}).get("context_before", "")}" '
-                    f'| sau="{metadata_by_name.get(field_name, {}).get("context_after", "")}"'
-                    for field_name in template_fields
-                ]
-            )
-        else:
-            fields_list = "\n".join([f"- {field_name}" for field_name in template_fields])
-        prompt = f"""Bạn là chuyên gia trích xuất dữ liệu từ văn bản.
+        # SIMPLE list of field names - Gemini tự tìm vị trí từ full template
+        fields_text = "\n".join([f"- «{field}»" for field in template_fields])
 
-Danh sách trường cần trích xuất:
-{fields_list}
+        # Build prompt - NGẮN GỌN vì Gemini tự tìm vị trí từ full template
+        prompt = f"""Bạn là chuyên gia điền mẫu văn bản tiếng Việt.
 
-Nhiệm vụ: Đọc đoạn văn bản sau và trích xuất giá trị cho từng trường. Nếu không tìm thấy, để trống.
+TEMPLATE ĐẦY ĐỦ (Gemini tự tìm vị trí từng field trong đây):
+{full_template_text}
 
-Văn bản:
+---
+
+DANH SÁCH FIELD CẦN ĐIỀN:
+{fields_text}
+
+---
+
+VĂN BẢN CHỨA DỮ LIỆU:
 {context}
 
-Yêu cầu:
-- Chỉ trả về JSON, không có text khác
-- Format: {{"field1": "value1", "field2": "value2", ...}}
+---
+
+⚠️ QUAN TRỌNG NHẤT - TUYỆT ĐỐI KHÔNG BỊA THÔNG TIN:
+- CHỈ được lấy thông tin CÓ TRONG "VĂN BẢN CHỨA DỮ LIỆU"
+- KHÔNG ĐƯỢC suy luận, đoán mò, hay tạo ra thông tin KHÔNG CÓ trong context
+- Nếu context KHÔNG có thông tin cho field → PHẢI trả về "" (chuỗi rỗng)
+- Nếu context chỉ có một phần thông tin → CHỈ lấy phần đó, không bịa phần còn lại
+
+VÍ DỤ VỀ VIỆC TRỞ VỀ RỖNG:
+- Context: "Nguyễn Văn A, sinh năm 1990"
+- Fields: ho_ten, ngay_sinh, dia_chi, cmnd
+- Kết quả ĐÚNG: {{"ho_ten": "Nguyễn Văn A", "ngay_sinh": "1990", "dia_chi": "", "cmnd": ""}}
+- Kết quả SAI: {{"ho_ten": "Nguyễn Văn A", "ngay_sinh": "1990", "dia_chi": "Hà Nội", "cmnd": "123456"}} ← BỊA!
+
+YÊU CẦU:
+1. Đọc TOÀN BỘ template → hiểu MỖI field nằm ở đâu
+2. Phân tích context → điền TẤT CẢ fields cùng lúc
+3. Trả về JSON: {{"field1": "value1", "field2": "value2", ...}}
+
+QUY TẮC:
 - Giữ nguyên tên trường chính xác
-- Nếu không tìm thấy giá trị, để chuỗi rỗng ""
-- Nếu nhiều trường thuộc các phần lặp lại của cùng một mẫu đơn, hãy sử dụng ngữ cảnh, cách xưng hô để phân biệt và trả về giá trị chính xác cho từng trường.
-- QUAN TRỌNG: Không lặp lại tiền tố đã có sẵn trong template. Ví dụ:
-  - Template "Kính gửi: TÒA ÁN NHÂN DÂN «field»" và context có "TÒA ÁN NHÂN DÂN TP.HCM" → chỉ trả về "TP.HCM"
-  - Template "năm 20«field»" và context có "năm 2024" → chỉ trả về "24" (không lặp lại "20")
-  - Template "Ban Giám đốc Công ty: «field»" → chỉ trả về tên công ty, không lặp lại "Ban Giám đốc Công ty"
-  - Template "Họ và tên: «field»" → chỉ trả về tên người, không lặp lại "Họ và tên:"
+- Không tìm thấy trong context → chuỗi rỗng ""
+- KHÔNG lặp lại text đã có trong template:
+  * "Kính gửi: TÒA ÁN NHÂN DÂN «field»" + "TÒA ÁN NHÂN DÂN TP.HCM" → "TP.HCM"
+  * "năm 20«field»" + "năm 2024" → "24"
+  * "Diện tích: «field» m²" + "5,0 ha m²" → "5,0" (KHÔNG lặp m²)
+  * "Tỷ lệ: «field» %" + "35.5%" → "35.5" (KHÔNG lặp %)
+
+- Field trùng tên → dùng NGỮ CẢNH section/bảng để phân biệt:
+  * stt ở bảng "Cổ đông" → stt_co_dong
+  * stt ở bảng "Nhà đầu tư" → stt_nha_dau_tu
+  * (KHÔNG dùng stt_1, stt_2 trùng tên)
 
 JSON:"""
 
@@ -486,15 +511,16 @@ Chỉ trả về JSON, không có text khác."""
         if not field_infos:
             return forced_renames
 
-        # Batch process để tránh token limit
-        batch_size = 15
+        # ĐỔI STRATEGY: Gemini 3.1-flash-lite hỗ trợ 1M tokens -> Đọc ALL 1 LẦN
+        # KHÔNG chia batches nữa - đọc toàn bộ context cho chính xác
         all_renames = dict(forced_renames)
 
-        for i in range(0, len(field_infos), batch_size):
-            batch = field_infos[i:i+batch_size]
-            batch_text = "\n".join(batch)
+        # Single API call for ALL fields - Gemini đọc toàn bộ context 1 lần
+        batch_text = "\n".join(field_infos)
+        estimated_tokens = len(batch_text) // 3
+        print(f"=== Single API call: {len(field_infos)} fields, ~{estimated_tokens} tokens ===")
 
-            prompt = f"""Đổi tên fields tiếng Việt không dấu, viết đầy đủ (snake_case):
+        prompt = f"""Đổi tên fields tiếng Việt không dấu, viết đầy đủ (snake_case):
 
 {batch_text}
 
@@ -532,24 +558,22 @@ QUAN TRỌNG - PHÂN TÍCH CONTEXT TRƯỚC/SAU ĐỂ PHÂN BIỆT LOẠI vs GI�
 
 JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
 
-            try:
-                response = self.client.models.generate_content(model=self.model_name, contents=prompt)
-                self._record_usage(response)
-                result = self.parse_gemini_json_response(response.text)
+        try:
+            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            self._record_usage(response)
+            result = self.parse_gemini_json_response(response.text)
 
-                for item in result.get("renames", []):
-                    old = item.get("current_name", "")
-                    new = item.get("suggested_name", "")
-                    if old and new and old != new:
-                        all_renames[old] = new
-                        print(f"{old} → {new}")
+            for item in result.get("renames", []):
+                old = item.get("current_name", "")
+                new = item.get("suggested_name", "")
+                if old and new and old != new:
+                    all_renames[old] = new
+                    print(f"{old} → {new}")
 
-            except Exception as e:
-                print(f"Gemini batch error: {e}")
-                continue
+        except Exception as e:
+            print(f"Gemini error: {e}")
 
         print(f"=== Total renames: {len(all_renames)} ===")
-        all_renames.update(forced_renames)
         return all_renames
 
 

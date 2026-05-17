@@ -213,6 +213,23 @@ function App() {
       includePlaceholderDeletes = true
     } = options
     const operations = []
+    const getTextFromCellParagraphInHtml = (html, cellBlockIndex, paraInCell) => {
+      if (!html) return ''
+      const temp = document.createElement('div')
+      temp.innerHTML = html
+      const paragraph = temp.querySelector(
+        `[data-cell-block-index="${cellBlockIndex}"][data-para-in-cell="${paraInCell}"]`
+      )
+      if (!paragraph) return ''
+
+      let text = paragraph.textContent
+      const originalHtml = paragraph.innerHTML
+      if ((originalHtml.includes('&nbsp;') || originalHtml.includes('\u00a0')) && text.trim() === '' && text.length > 0) {
+        text = text.replace(/ /g, '\u00a0')
+      }
+
+      return text
+    }
 
     // =======================================================================
     // 1. DETECT PLACEHOLDER CHANGES
@@ -249,6 +266,38 @@ function App() {
       const newBlock = newBlocksArray.find(b => parseInt(b.getAttribute('data-block-index')) === i)
 
       if (!oldBlock && !newBlock) continue
+
+      const blockType = newBlock?.getAttribute('data-type') || oldBlock?.getAttribute('data-type')
+      if (blockType === 'table_cell') {
+        const oldParagraphs = oldBlock ? Array.from(oldBlock.querySelectorAll('.cell-paragraph')) : []
+        const newParagraphs = newBlock ? Array.from(newBlock.querySelectorAll('.cell-paragraph')) : []
+        const maxParaIndex = Math.max(
+          -1,
+          ...oldParagraphs.map(p => parseInt(p.getAttribute('data-para-in-cell'))),
+          ...newParagraphs.map(p => parseInt(p.getAttribute('data-para-in-cell')))
+        )
+
+        for (let paraInCell = 0; paraInCell <= maxParaIndex; paraInCell++) {
+          const oldText = getTextFromCellParagraphInHtml(oldHtml, i, paraInCell)
+          const newText = getTextFromCellParagraphInHtml(newHtml, i, paraInCell)
+
+          if (oldText.trim() === newText.trim() && oldText.replace(/\s/g, ' ') === newText.replace(/\s/g, ' ')) {
+            continue
+          }
+
+          if (oldText !== newText) {
+            operations.push({
+              type: 'update_text',
+              block_index: i,
+              old_text: oldText,
+              new_text: newText,
+              para_in_cell: paraInCell
+            })
+          }
+        }
+
+        continue
+      }
 
       const oldText = oldBlock ? getOriginalTextFromBlock(oldHtml, i) : ''
       const newText = newBlock ? getOriginalTextFromBlock(newHtml, i) : ''
@@ -2348,15 +2397,17 @@ function App() {
                             const currentBlockElement = cellParagraph || editedBlock
                             const cursorPosition = getCursorPositionInParagraph(range, currentBlockElement)
 
-                            if (cursorPosition === 'middle') {
-                              setParagraphWarning('⚠️ Không thể tạo đoạn mới từ giữa văn bản!')
-                              setTimeout(() => setParagraphWarning(null), 5000)
-                              return
-                            }
-
                             let params = {
                               position: cursorPosition === 'start' ? 'before' : 'after',
                               text: ''
+                            }
+
+                            // NEW: Calculate offset for middle cursor position to split paragraph
+                            if (cursorPosition === 'middle' && editedBlock) {
+                              const offset = calculateCursorOffset(range, parseInt(editedBlock.getAttribute('data-block-index')))
+                              if (offset !== null) {
+                                params.offset = offset
+                              }
                             }
 
                             if (cellParagraph) {
@@ -2390,7 +2441,8 @@ function App() {
                               params.tableIndex,
                               params.rowIndex,
                               params.colIndex,
-                              params.paraInCell
+                              params.paraInCell,
+                              params.offset  // NEW: Pass offset parameter
                             )
 
                             setEditorHtml(result.html_preview)

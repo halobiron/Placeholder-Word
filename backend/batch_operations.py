@@ -8,6 +8,7 @@ This module serves as the bridge between the API endpoint and DocxFullEditor.
 import logging
 import re
 from typing import Any, Dict, List, Optional
+from docx import Document
 from docx_editor import DocxFullEditor
 from batch_update_models import Operation
 
@@ -27,6 +28,30 @@ def map_camel_to_snake(format_data: Dict[str, Any]) -> Dict[str, Any]:
         'alignment': 'alignment'
     }
     return {format_mapping.get(k, k): v for k, v in format_data.items()}
+
+
+def find_field_with_fuzzy_match(field_name: str, current_fields: List[str]) -> str | None:
+    """
+    Find field name with exact match or fallback to base name (without _N suffix).
+
+    Used for handling mergefield names that may have numeric suffixes like _2, _3.
+    """
+    if field_name in current_fields:
+        return field_name
+    base_name = re.sub(r'_\d+$', '', field_name)
+    return base_name if base_name in current_fields else None
+
+
+def resolve_cell_paragraph_index(editor: DocxFullEditor, block_index: int,
+                                  para_in_cell: Optional[int] = None) -> Optional[int]:
+    """
+    Resolve paragraph index for table cell or block operations.
+
+    Returns None if resolution fails.
+    """
+    if para_in_cell is not None:
+        return editor.get_table_cell_paragraph_index(block_index, para_in_cell)
+    return editor.get_paragraph_index_from_block(block_index)
 
 
 def get_current_fields(editor: DocxFullEditor) -> List[str]:
@@ -68,10 +93,11 @@ def validate_table_coordinates(editor: DocxFullEditor, table_index: int,
 
 def get_paragraph_at_index(editor: DocxFullEditor, para_index: int):
     """Get paragraph object at given index"""
-    for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order()):
-        if idx == para_index:
-            return para
-    return None
+    return next(
+        (para for idx, para in enumerate(editor._iterate_paragraphs_in_doc_order())
+         if idx == para_index),
+        None
+    )
 
 
 # =============================================================================
@@ -101,25 +127,15 @@ def validate_operation(editor: DocxFullEditor, op: Operation) -> None:
 def _validate_placeholder_op(editor: DocxFullEditor, op: Operation,
                              current_fields: List[str]) -> None:
     """Validate placeholder operations with fuzzy matching"""
-    # Helper: try exact match first, then try without numeric suffix
-    def find_field(name: str) -> str | None:
-        if name in current_fields:
-            return name
-        # Try removing _2, _3, etc. suffixes
-        base_name = re.sub(r'_\d+$', '', name)
-        if base_name in current_fields:
-            return base_name
-        return None
-
     if op.type == "rename_placeholder":
-        old_match = find_field(op.old_name)
+        old_match = find_field_with_fuzzy_match(op.old_name, current_fields)
         if not old_match:
             raise ValueError(f"Field '{op.old_name}' không tồn tại")
         if op.new_name in current_fields and op.new_name != op.old_name:
             raise ValueError(f"Field '{op.new_name}' đã tồn tại")
 
     elif op.type == "delete_placeholder":
-        field_match = find_field(op.field_name)
+        field_match = find_field_with_fuzzy_match(op.field_name, current_fields)
         if not field_match:
             raise ValueError(f"Field '{op.field_name}' không tồn tại")
         # Log mapping for debugging (actual fix happens in execute)
@@ -127,8 +143,11 @@ def _validate_placeholder_op(editor: DocxFullEditor, op: Operation,
             logger.info(f"Field name mapping: {op.field_name} -> {field_match}")
 
     elif op.type in ("add_placeholder", "add_placeholder_by_offset"):
-        if op.block_index >= len(list(editor.doc.paragraphs)):
-            raise ValueError(f"Invalid block_index: {op.block_index}")
+        # Validate block_index using the same method as other operations
+        # This accounts for ALL paragraphs including table cells
+        para_index = resolve_cell_paragraph_index(editor, op.block_index, op.para_in_cell)
+        if para_index is None:
+            raise ValueError(f"Invalid block_index: {op.block_index} or para_in_cell: {op.para_in_cell}")
         if op.field_name in current_fields:
             raise ValueError(f"Field '{op.field_name}' đã tồn tại")
 
@@ -201,20 +220,13 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
     """Execute placeholder operations with fuzzy matching"""
     current_fields = get_current_fields(editor)
 
-    # Helper for fuzzy matching
-    def find_actual_name(requested_name: str) -> str:
-        if requested_name in current_fields:
-            return requested_name
-        base_name = re.sub(r'_\d+$', '', requested_name)
-        return base_name if base_name in current_fields else requested_name
-
     if op.type == "rename_placeholder":
-        old_actual = find_actual_name(op.old_name)
+        old_actual = find_field_with_fuzzy_match(op.old_name, current_fields) or op.old_name
         if not editor.rename_placeholder(old_actual, op.new_name, op.occurrence_index):
             raise ValueError(f"Failed to rename '{old_actual}'")
 
     elif op.type == "delete_placeholder":
-        actual_name = find_actual_name(op.field_name)
+        actual_name = find_field_with_fuzzy_match(op.field_name, current_fields) or op.field_name
         if actual_name != op.field_name:
             logger.info(f"Deleting actual field: {actual_name} (requested: {op.field_name})")
         if not editor.delete_placeholder(actual_name):
@@ -223,15 +235,23 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
     elif op.type == "add_placeholder":
         from template_manager import MailMergeProcessor
         processor = MailMergeProcessor()
-        if not processor.inject_placeholder_at_location(
+        success = processor.inject_placeholder_at_location(
             editor.doc_path, op.block_index, op.field_name,
-            "", [], [], op.position, None, None
-        ):
+            "", [], [], op.position, None, op.para_in_cell
+        )
+        if not success:
             raise ValueError(f"Failed to add '{op.field_name}'")
+        # Sync the in-memory editor with file changes made by MailMergeProcessor.
+        editor.doc = Document(editor.doc_path)
+        editor._build_block_index_map()
 
     elif op.type == "add_placeholder_by_offset":
+        paragraph_index = resolve_cell_paragraph_index(editor, op.block_index, op.para_in_cell)
+        if paragraph_index is None:
+            raise ValueError(f"Invalid block_index: {op.block_index} or para_in_cell: {op.para_in_cell}")
+
         editor.insert_placeholder_at_offset(
-            paragraph_index=op.block_index,
+            paragraph_index=paragraph_index,
             offset=op.offset,
             field_name=op.field_name,
             inherit_format=op.inherit_format
@@ -241,13 +261,13 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
 def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
     """Execute text operations"""
     para_index = validate_block_index(editor, op.block_index)
+    block_map = getattr(editor, "_block_to_para_index_map", None) or {}
+    block_data = block_map.get(op.block_index)
     if op.para_in_cell is not None:
-        para_index = editor.get_table_cell_paragraph_index(op.block_index, op.para_in_cell)
+        para_index = resolve_cell_paragraph_index(editor, op.block_index, op.para_in_cell)
         if para_index is None:
             raise ValueError(f"Invalid para_in_cell")
     else:
-        block_map = getattr(editor, "_block_to_para_index_map", None) or {}
-        block_data = block_map.get(op.block_index)
         if block_data and block_data.get("type") == "table_cell":
             # CRITICAL FIX: Use the stored cell object directly if available
             # This works correctly with merged cells
@@ -270,7 +290,44 @@ def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
             op.block_index, para_index, op.para_in_cell,
             len(op.old_text or ""), len(op.new_text or "")
         )
-        if not editor.replace_text_at_position(op.old_text, op.new_text, para_index):
+        replaced = editor.replace_text_at_position(op.old_text, op.new_text, para_index)
+        if not replaced:
+            paragraph = get_paragraph_at_index(editor, para_index)
+            current_text = ""
+            if paragraph is not None:
+                current_text, _ = editor._extract_paragraph_full_text(paragraph)
+
+            logger.warning(
+                "update_text primary match failed; block_index=%s para_index=%s para_in_cell=%s old=%r current=%r",
+                op.block_index, para_index, op.para_in_cell, op.old_text, current_text
+            )
+
+            cell = block_data.get("cell") if block_data else None
+            non_empty_cell_paragraphs = 0
+            if cell is not None:
+                for cell_paragraph in cell.paragraphs:
+                    cell_text, _ = editor._extract_paragraph_full_text(cell_paragraph)
+                    if cell_text.strip():
+                        non_empty_cell_paragraphs += 1
+
+            single_meaningful_paragraph_cell = bool(
+                block_data
+                and block_data.get("type") == "table_cell"
+                and cell is not None
+                and non_empty_cell_paragraphs <= 1
+            )
+            allow_fallback = paragraph is not None and (
+                op.para_in_cell is not None
+                or not (block_data and block_data.get("type") == "table_cell")
+                or single_meaningful_paragraph_cell
+            )
+            if allow_fallback and editor.replace_paragraph_text_at_index(para_index, op.new_text):
+                logger.info(
+                    "update_text fallback paragraph rewrite succeeded: block_index=%s para_index=%s para_in_cell=%s",
+                    op.block_index, para_index, op.para_in_cell
+                )
+                return
+
             raise ValueError(f"Failed to update text")
     elif op.type == "delete_text_range":
         logger.info(
@@ -287,7 +344,7 @@ def _execute_format_op(editor: DocxFullEditor, op: Operation) -> None:
     """Execute formatting operations"""
     para_index = validate_block_index(editor, op.block_index)
     if op.para_in_cell is not None:
-        para_index = editor.get_table_cell_paragraph_index(op.block_index, op.para_in_cell)
+        para_index = resolve_cell_paragraph_index(editor, op.block_index, op.para_in_cell)
         if para_index is None:
             raise ValueError(f"Invalid para_in_cell")
 
@@ -322,7 +379,27 @@ def _execute_add_paragraph(editor: DocxFullEditor, op: Operation) -> None:
         if para_index is not None:
             target_paragraph = get_paragraph_at_index(editor, para_index)
             if target_paragraph:
-                if op.position == "after":
+                # NEW: Support offset to split paragraph at cursor position
+                if hasattr(op, 'offset') and op.offset is not None:
+                    # Split paragraph at offset (like add_table_at_cursor does)
+                    split_info = editor._split_paragraph_at_offset(
+                        para_index, op.offset, create_after_para=True
+                    )
+
+                    # Move after_para to right after target paragraph
+                    if 'after_para' in split_info and split_info['text_after'].strip():
+                        after_para = split_info['after_para']
+                        after_p_element = after_para._element
+                        doc_element = editor.doc._element.body
+                        p_element = target_paragraph._p
+
+                        # Remove from end and insert after target
+                        doc_element.remove(after_p_element)
+                        para_index_in_doc = list(doc_element).index(p_element)
+                        doc_element.insert(para_index_in_doc + 1, after_p_element)
+
+                    success = True
+                elif op.position == "after":
                     editor.insert_paragraph_after(target_paragraph, op.text)
                     success = True
                 elif op.position == "before":
@@ -402,7 +479,7 @@ def _execute_delete_multiple(editor: DocxFullEditor, op: Operation) -> None:
                     "source": block_data,
                 })
             else:
-                para_index = editor.get_paragraph_index_from_block(block_data["block_index"])
+                para_index = resolve_cell_paragraph_index(editor, block_data["block_index"])
                 if para_index is None:
                     continue
 

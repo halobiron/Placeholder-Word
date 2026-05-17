@@ -134,7 +134,19 @@ function EditPopup({ selectedText, onFormatApplied, onClose }) {
                   onClick={() => setFormat({ ...format, [style.id]: !format[style.id] })}
                   className={`w-10 h-10 flex items-center justify-center rounded-xl border transition-all ${format[style.id] ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-100' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
                 >
-                  <span className={`text-sm font-bold ${style.id === 'italic' ? 'italic' : style.id === 'underline' ? 'underline' : ''}`}>{style.label}</span>
+                  <span
+                    className={`text-sm font-bold ${
+                      style.id === 'italic'
+                        ? 'italic'
+                        : style.id === 'underline'
+                          ? 'underline'
+                          : style.id === 'strikethrough'
+                            ? 'line-through'
+                            : ''
+                    }`}
+                  >
+                    {style.label}
+                  </span>
                 </button>
               ))}
               <div className="w-px h-10 bg-slate-100 mx-1"></div>
