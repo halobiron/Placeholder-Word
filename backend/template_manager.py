@@ -1542,27 +1542,27 @@ JSON:"""
                 if line_val:
                     if line_rule == "auto":
                         # Line spacing in twips (1/20 pt)
-                        line_spacing_pt = int(line_val) / 240  # Convert to line value (1.0 = single, 2.0 = double)
+                        line_spacing_pt = float(line_val) / 240  # Convert to line value (1.0 = single, 2.0 = double)
                         para_styles.append(f"line-height: {line_spacing_pt}")
                     elif line_rule == "atLeast":
                         # Minimum line spacing in twips
-                        min_spacing_pt = int(line_val) / 20
+                        min_spacing_pt = float(line_val) / 20
                         para_styles.append(f"min-height: {min_spacing_pt}pt")
                     else:
                         # Exact line spacing in twips
-                        exact_spacing_pt = int(line_val) / 20
+                        exact_spacing_pt = float(line_val) / 20
                         para_styles.append(f"line-height: {exact_spacing_pt}pt")
 
                 # Space before (in twips)
                 before = spacing.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}before")
                 if before:
-                    space_before_pt = int(before) / 20
+                    space_before_pt = float(before) / 20
                     para_styles.append(f"margin-top: {space_before_pt}pt")
 
                 # Space after (in twips)
                 after = spacing.get(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}after")
                 if after:
-                    space_after_pt = int(after) / 20
+                    space_after_pt = float(after) / 20
                     para_styles.append(f"margin-bottom: {space_after_pt}pt")
 
             para_styles.extend(self._extract_paragraph_indentation_styles(pPr))
