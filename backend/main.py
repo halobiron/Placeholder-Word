@@ -247,8 +247,12 @@ async def merge_template(
     gemini_usage = empty_gemini_usage()
 
     executor = MergeExecutor()
-    # Get field names + full template text in ONE pass (KHÔNG CẦN metadata cho Gemini)
-    template_fields, full_template_text = executor.get_template_fields_and_text(str(template_path))
+    # Get field names + template context in ONE pass. Documents over the page
+    # threshold use compact heading-aware context instead of full text.
+    template_fields, full_template_text, document_page_count = executor.get_template_fields_and_text(
+        str(template_path),
+        user_context=context or "",
+    )
 
 
     # Determine data source
@@ -273,12 +277,14 @@ async def merge_template(
 
         logger.debug("=== MERGE DEBUG ===")
         logger.debug(f"Template fields to extract: {template_fields}")
-        logger.debug(f"Full template text length: {len(full_template_text)} chars")
+        logger.debug(f"Template context length: {len(full_template_text)} chars")
+        logger.debug(f"Document page count: {document_page_count or 'unknown'}")
 
         data = gemini_client.extract_data_from_context(
             context=context,
             template_fields=template_fields,
-            full_template_text=full_template_text,  # Gemini tự tìm vị trí từ full template
+            full_template_text=full_template_text,
+            document_page_count=document_page_count,
         )
         logger.debug(f"Extracted data: {data}")
         logger.debug("=== END MERGE DEBUG ===")

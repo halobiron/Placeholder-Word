@@ -15,6 +15,7 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 
 class GeminiClient:
     """Simple client for Gemini API - text extraction and analysis"""
+    FULL_CONTEXT_PAGE_THRESHOLD = 5
 
     def __init__(self, api_key: str):
         """Initialize Gemini client
@@ -182,11 +183,80 @@ class GeminiClient:
 
         return forced
 
+    def _get_document_page_count(self, structured_content: list) -> int | None:
+        for block in structured_content or []:
+            page_count = block.get("document_page_count")
+            if page_count:
+                try:
+                    return int(page_count)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _build_section_outline(self, structured_content: list) -> str:
+        headings = []
+        seen = set()
+        for block in structured_content or []:
+            heading = (block.get("nearest_heading") or block.get("section_heading") or "").strip()
+            if heading and heading not in seen:
+                seen.add(heading)
+                headings.append(heading)
+        return "\n".join(f"- {heading}" for heading in headings[:80])
+
+    def _build_full_document_context(self, structured_content: list) -> str:
+        lines = []
+        for i, block in enumerate(structured_content or []):
+            text = (block.get("text") or "").replace("\n", " ").strip()
+            if text:
+                lines.append(f"[{i}] {text}")
+        return "\n".join(lines)
+
+    def _build_field_context_infos(
+        self,
+        structured_content: list,
+        current_fields: list,
+        forced_renames: dict,
+    ) -> list[str]:
+        field_infos = []
+
+        for i, block in enumerate(structured_content or []):
+            text = block.get("text", "")
+            if not text:
+                continue
+
+            block_fields = [
+                field for field in current_fields
+                if field not in forced_renames and f"«{field}»" in text
+            ]
+            if not block_fields:
+                continue
+
+            block_type = block.get("type", "paragraph")
+            section = block.get("nearest_heading") or block.get("section_heading") or "preamble"
+            before = " | ".join(item[:35] for item in block.get("before_context", [])[-1:])
+            after = " | ".join(item[:35] for item in block.get("after_context", [])[:1])
+            text_snippet = text.replace("\n", " ")[:180]
+
+            fields_text = ", ".join(f"«{field}»" for field in block_fields)
+            info = (
+                f"Fields:[{fields_text}] | block={i} | {block_type} | "
+                f"Section:[{section}] | Text:[{text_snippet}]"
+            )
+            if block_type == "table_cell":
+                info += f" | Row:{block.get('table_row')} Col:{block.get('table_col')}"
+            else:
+                info += f" | Truoc:[{before}] Sau:[{after}]"
+
+            field_infos.append(info)
+
+        return field_infos
+
     def extract_data_from_context(
         self,
         context: str,
         template_fields: list,
         full_template_text: str,
+        document_page_count: int | None = None,
     ) -> dict:
         """Extract field values by having Gemini read ENTIRE template at once
 
@@ -204,13 +274,23 @@ class GeminiClient:
         if not template_fields:
             return {}
 
-        # SIMPLE list of field names - Gemini tự tìm vị trí từ full template
+        use_full_context = not document_page_count or document_page_count <= self.FULL_CONTEXT_PAGE_THRESHOLD
+        template_context_label = (
+            "TEMPLATE ĐẦY ĐỦ"
+            if use_full_context
+            else "TEMPLATE CONTEXT RÚT GỌN THEO FIELD/SECTION"
+        )
+
+        # SIMPLE list of field names - Gemini tự tìm vị trí từ template context
         fields_text = "\n".join([f"- «{field}»" for field in template_fields])
 
-        # Build prompt - NGẮN GỌN vì Gemini tự tìm vị trí từ full template
+        # Build prompt - use full template only for small documents.
         prompt = f"""Bạn là chuyên gia điền mẫu văn bản tiếng Việt.
 
-TEMPLATE ĐẦY ĐỦ (Gemini tự tìm vị trí từng field trong đây):
+Strategy: {"full_document" if use_full_context else "compact_heading_context"}.
+Số trang lưu trong DOCX: {document_page_count or "unknown"}.
+
+{template_context_label} (Gemini tự tìm vị trí từng field trong đây):
 {full_template_text}
 
 ---
@@ -238,7 +318,7 @@ VÍ DỤ VỀ VIỆC TRỞ VỀ RỖNG:
 - Kết quả SAI: {{"ho_ten": "Nguyễn Văn A", "ngay_sinh": "1990", "dia_chi": "Hà Nội", "cmnd": "123456"}} ← BỊA!
 
 YÊU CẦU:
-1. Đọc TOÀN BỘ template → hiểu MỖI field nằm ở đâu
+1. Đọc template context được cung cấp → hiểu MỖI field nằm ở đâu
 2. Phân tích context → điền TẤT CẢ fields cùng lúc
 3. Trả về JSON: {{"field1": "value1", "field2": "value2", ...}}
 
@@ -255,6 +335,8 @@ QUY TẮC:
   * stt ở bảng "Cổ đông" → stt_co_dong
   * stt ở bảng "Nhà đầu tư" → stt_nha_dau_tu
   * (KHÔNG dùng stt_1, stt_2 trùng tên)
+
+- Với tài liệu dài, ưu tiên Section gần nhất trong template context. Nếu văn bản dữ liệu nhắc cụ thể một điều/mục, hãy đọc kỹ section tương ứng trước khi điền.
 
 JSON:"""
 
@@ -298,10 +380,13 @@ JSON:"""
             # Add surrounding context for disambiguation
             before = block.get("before_context", [])
             after = block.get("after_context", [])
+            heading = block.get("nearest_heading") or block.get("section_heading") or ""
 
             context_str = ""
+            if heading:
+                context_str = f" (Section: {heading})"
             if before:
-                context_str = f" (Trước: {' | '.join(before)})"
+                context_str += f" (Trước: {' | '.join(before)})"
             if after:
                 context_str += f" (Sau: {' | '.join(after)})"
 
@@ -472,56 +557,50 @@ Chỉ trả về JSON, không có text khác."""
             current_fields,
         )
 
-        # Format fields với context cho Gemini
-        field_infos = []
-        for i, block in enumerate(structured_content):
-            text = block.get("text", "")
-            if not text:
-                continue
-
-            # Tìm section gần nhất (I, II, III, Mục, Phần...)
-            section = "unknown"
-            for j in range(max(0, i-5), i):
-                prev_text = structured_content[j].get("text", "")
-                if re.match(r'^(I+|Mục|Phần|Chương)\s', prev_text):
-                    section = self._slugify(prev_text) or "section"
-                    break
-
-            # Xử lý từng field trong block
-            for field in current_fields:
-                if field in forced_renames:
-                    continue
-                if f"«{field}»" not in text:
-                    continue
-
-                # Build context string ngắn gọn
-                block_type = block.get("type", "paragraph")
-                before = ' | '.join(block.get("before_context", [])[-2:])
-                after = ' | '.join(block.get("after_context", [])[:2])
-                text_snippet = text.replace("\n", " ")[:220]
-
-                info = f"«{field}» | {block_type} | Section:{section}"
-                if block_type == "table_cell":
-                    info += f" | Row:{block.get('table_row')} Col:{block.get('table_col')} | Text:[{text_snippet}]"
-                else:
-                    info += f" | Text:[{text_snippet}] | Trước:[{before}] Sau:[{after}]"
-
-                field_infos.append(info)
+        field_infos = self._build_field_context_infos(
+            structured_content,
+            current_fields,
+            forced_renames,
+        )
 
         if not field_infos:
             return forced_renames
 
-        # ĐỔI STRATEGY: Gemini 3.1-flash-lite hỗ trợ 1M tokens -> Đọc ALL 1 LẦN
-        # KHÔNG chia batches nữa - đọc toàn bộ context cho chính xác
         all_renames = dict(forced_renames)
 
-        # Single API call for ALL fields - Gemini đọc toàn bộ context 1 lần
+        page_count = self._get_document_page_count(structured_content)
+        use_full_context = not page_count or page_count <= self.FULL_CONTEXT_PAGE_THRESHOLD
+        section_outline = self._build_section_outline(structured_content)
+        full_document_context = self._build_full_document_context(structured_content) if use_full_context else ""
+
         batch_text = "\n".join(field_infos)
         estimated_tokens = len(batch_text) // 3
-        print(f"=== Single API call: {len(field_infos)} fields, ~{estimated_tokens} tokens ===")
+        strategy = "full_document" if use_full_context else "compact_heading_context"
+        print(
+            f"=== Field rename strategy: {strategy}, pages={page_count or 'unknown'}, "
+            f"{len(field_infos)} context blocks, ~{estimated_tokens} compact tokens ==="
+        )
+
+        document_context_block = ""
+        if use_full_context:
+            document_context_block = f"""
+TÀI LIỆU ĐẦY ĐỦ (vì tài liệu <= {self.FULL_CONTEXT_PAGE_THRESHOLD} trang):
+{full_document_context}
+
+---"""
+        elif section_outline:
+            document_context_block = f"""
+DÀN Ý SECTION CỦA TÀI LIỆU (tài liệu dài, không đọc full để tránh tốn token):
+{section_outline}
+
+---"""
 
         prompt = f"""Đổi tên fields tiếng Việt không dấu, viết đầy đủ (snake_case):
 
+Dùng strategy: {strategy}. Số trang lưu trong DOCX: {page_count or "unknown"}.
+{document_context_block}
+
+FIELD CONTEXT CẦN ĐỔI TÊN:
 {batch_text}
 
 QUY TẮC CƠ BẢN:
@@ -530,6 +609,11 @@ QUY TẮC CƠ BẢN:
 3. Giữ nguyên prefix: ck_, ngay_, thang_, nam_
 4. Max 20 ký tự, ưu tiên rõ nghĩa hơn ngắn
 5. Dùng section/table context thay vì _1, _2, _3
+
+QUY TẮC CONTEXT THEO ĐỘ DÀI TÀI LIỆU:
+- Nếu có TÀI LIỆU ĐẦY ĐỦ: dùng toàn văn để hiểu bối cảnh tổng thể.
+- Nếu chỉ có FIELD CONTEXT: ưu tiên Section gần nhất + Text block + Truoc/Sau; KHÔNG suy diễn từ section khác.
+- Với tài liệu dài, Section gần nhất là tín hiệu phân biệt chính. Ví dụ field trong "ĐIỀU 4: QUYỀN VÀ NGHĨA VỤ CỦA B" phải mang nghĩa của Bên B, không nhầm sang Bên A ở Điều 3.
 
 QUAN TRỌNG - PHÂN TÍCH CONTEXT TRƯỚC/SAU ĐỂ PHÂN BIỆT LOẠI vs GIÁ TRỊ:
 - **BẮT BUỘC**: Khi đổi tên, PHẢI ĐỌC KỸ context text TRƯỚC và SAU placeholder

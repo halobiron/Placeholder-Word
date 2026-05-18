@@ -3,6 +3,8 @@ Mail Merge Processor - Uses SmartMailMergeConverter for Vietnamese forms
 """
 import uuid
 import re
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict
 from docx import Document
@@ -94,6 +96,54 @@ class MailMergeProcessor:
         return table_text, table_has_content
 
 
+    @staticmethod
+    def _is_section_heading(text: str, style_name: str = "") -> bool:
+        """Detect logical headings even when Word style is Normal."""
+        normalized = (text or "").strip()
+        if not normalized:
+            return False
+
+        if style_name and "heading" in style_name.lower():
+            return True
+
+        return bool(re.match(
+            r"^(điều|dieu|chương|chuong|mục|muc|phần|phan)\s+[0-9IVXLCDM]+"
+            r"|^[IVXLCDM]+\.\s+\S",
+            normalized,
+            flags=re.IGNORECASE,
+        ))
+
+    @staticmethod
+    def _extract_docx_page_count(docx_path: str) -> int | None:
+        """Read Word's saved page count from docProps/app.xml when available."""
+        try:
+            with zipfile.ZipFile(docx_path) as archive:
+                app_xml = archive.read("docProps/app.xml")
+            root = ET.fromstring(app_xml)
+            for child in root:
+                if child.tag.endswith("Pages") and child.text:
+                    return int(child.text)
+        except Exception:
+            return None
+        return None
+
+    def _add_section_context(self, blocks: list, page_count: int | None = None) -> None:
+        """Attach nearest heading and section boundaries to each block in-place."""
+        current_heading = ""
+        current_heading_index = None
+
+        for i, block in enumerate(blocks):
+            text = block.get("text", "")
+            style_name = block.get("style", "")
+
+            if self._is_section_heading(text, style_name):
+                current_heading = text.strip()
+                current_heading_index = i
+
+            block["nearest_heading"] = current_heading
+            block["section_heading"] = current_heading
+            block["section_start_index"] = current_heading_index
+            block["document_page_count"] = page_count
 
     def _add_neighbor_context(self, blocks: list, window: int = 2) -> None:
         """Attach before/after context snippets to each block in-place."""
@@ -472,7 +522,9 @@ class MailMergeProcessor:
                         })
 
 
-            # Add surrounding context for each block to help disambiguate similar content
+            # Add section and surrounding context for each block to help disambiguate similar content
+            page_count = self._extract_docx_page_count(docx_path)
+            self._add_section_context(content_blocks, page_count)
             self._add_neighbor_context(content_blocks)
 
             return content_blocks
@@ -581,10 +633,13 @@ class MailMergeProcessor:
                     return base_name
 
                 # Simplified prompt - focus on result
+                heading = target_block.get("nearest_heading") or target_block.get("section_heading") or ""
+
                 prompt = f"""Tối ưu tên trường tiếng Việt (snake_case, không dấu):
 
 Base: {base_name}
 Context: {target_block.get('text', '')[:50]}
+Section: {heading}
 
 Trả về JSON: {{"suggested_name": "<tên>", "reason": "<lý do>"}}
 
