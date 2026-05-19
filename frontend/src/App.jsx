@@ -1355,7 +1355,12 @@ function App() {
       addGeminiUsage(result.gemini_usage)
       setChatMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: result.assistant_message || 'Đã cập nhật thông tin.' }
+        {
+          role: 'assistant',
+          content: result.assistant_message || 'Đã cập nhật thông tin.',
+          updatedFields: result.updated_fields || [],
+          correctedFields: result.corrected_fields || []
+        }
       ])
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Không thể xử lý thông tin vừa nhập')
@@ -1393,16 +1398,18 @@ function App() {
       const suffix = currentMissingFields.length > 6 ? ` và ${currentMissingFields.length - 6} field khác` : ''
       setMissingFields(currentMissingFields)
       setError(`⚠️ Còn thiếu thông tin: ${missingPreview}${suffix}`)
-      return
     }
 
     setMerging(true)
-    setError(null)
+    if (currentMissingFields.length === 0) {
+      setError(null)
+    }
 
     try {
       const currentDraftId = await ensureDraft()
       const result = await mergeDraft(currentDraftId, fieldValues, lockedFields)
       setResultId(result.result_id)
+      setMissingFields(result.missing_fields || [])
       addGeminiUsage(result.gemini_usage)
 
       // Fetch preview
@@ -2833,7 +2840,7 @@ function App() {
                     </div>
                     <h3 className="font-bold text-lg">Gemini Intelligence</h3>
                   </div>
-                  <p className="text-indigo-200 text-xs mb-4 leading-relaxed">Người dùng có thể cung cấp thông tin thành nhiều đợt. Hệ thống chỉ gửi phần còn thiếu cho Gemini và cập nhật dần danh sách bên dưới.</p>
+                  <p className="text-indigo-200 text-xs mb-4 leading-relaxed">Người dùng có thể cung cấp hoặc sửa thông tin thành nhiều đợt. Hệ thống chỉ gửi tin nhắn mới cho Gemini và cập nhật dần danh sách bên dưới.</p>
                   <div className="mb-4 max-h-48 overflow-y-auto space-y-2 pr-1">
                     {chatMessages.length === 0 ? (
                       <div className="rounded-xl border border-white/10 bg-white/10 p-3 text-xs text-indigo-100">
@@ -2849,6 +2856,24 @@ function App() {
                           }`}
                         >
                           {message.content}
+                          {message.correctedFields?.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {message.correctedFields.map((field) => (
+                                <span key={field} className="rounded bg-amber-200/20 px-1.5 py-0.5 font-mono text-[10px] text-amber-100">
+                                  sửa «{field}»
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {message.updatedFields?.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {message.updatedFields.map((field) => (
+                                <span key={field} className="rounded bg-emerald-200/20 px-1.5 py-0.5 font-mono text-[10px] text-emerald-100">
+                                  điền «{field}»
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       ))
                     )}
@@ -2862,7 +2887,7 @@ function App() {
                         handleSendDraftMessage()
                       }
                     }}
-                    placeholder="Ví dụ: Tôi là Nguyễn Văn A, CMND 123456789. Các thông tin khác tôi gửi sau..."
+                    placeholder="Ví dụ: Tôi là Nguyễn Văn A, CMND 123456789. Nếu sai có thể nhắn: Sửa tên thành Phạm Ngọc Ninh..."
                     className="w-full h-28 bg-white/10 border border-white/20 rounded-xl p-4 text-sm focus:bg-white/20 outline-none transition-all placeholder:text-indigo-300"
                   />
                   <div className="mt-3 flex items-center justify-between">

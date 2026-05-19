@@ -107,14 +107,27 @@ def build_missing_fields(values: dict, fields: list[str], locked_fields: set[str
     ]
 
 
-def build_fill_status_message(missing_fields: list[str], updated_fields: list[str]) -> str:
+def build_fill_status_message(
+    missing_fields: list[str],
+    updated_fields: list[str],
+    corrected_fields: list[str] | None = None,
+) -> str:
+    corrected_fields = corrected_fields or []
+    changed_fields = corrected_fields or updated_fields
+    changed_preview = ", ".join(f"«{field}»" for field in changed_fields[:5])
+    changed_suffix = "" if len(changed_fields) <= 5 else f" và {len(changed_fields) - 5} field khác"
+
     if missing_fields:
         missing_preview = ", ".join(f"«{field}»" for field in missing_fields[:8])
         suffix = "" if len(missing_fields) <= 8 else f" và {len(missing_fields) - 8} field khác"
+        if corrected_fields:
+            return f"Đã sửa {changed_preview}{changed_suffix}. Anh/chị vui lòng cung cấp thêm: {missing_preview}{suffix}."
         if updated_fields:
             return f"Đã ghi nhận thông tin mới. Anh/chị vui lòng cung cấp thêm: {missing_preview}{suffix}."
         return f"Chưa tìm thấy thông tin phù hợp. Anh/chị vui lòng cung cấp: {missing_preview}{suffix}."
 
+    if corrected_fields:
+        return f"Đã sửa {changed_preview}{changed_suffix}. Thông tin hiện đã đủ để tạo tài liệu."
     if updated_fields:
         return "Đã đủ thông tin để tạo tài liệu. Anh/chị có thể kiểm tra lại các giá trị và thực hiện merge."
     return "Các thông tin bắt buộc hiện đã đủ. Anh/chị có thể thực hiện merge."
@@ -376,7 +389,7 @@ async def continue_fill_draft(
     field_values: str = Form(None),
     locked_fields: str = Form(None)
 ):
-    """Extract only missing fields from the newest user message and update draft state."""
+    """Extract field additions or corrections from the newest user message."""
     draft = DRAFT_SESSIONS.get(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
@@ -389,10 +402,11 @@ async def continue_fill_draft(
         values.update(json.loads(field_values))
 
     locked_f = set(parse_json_list(locked_fields))
-    fields_to_extract = build_missing_fields(values, fields, locked_f)
+    fields_to_extract = [field for field in fields if field not in locked_f]
     gemini_usage = empty_gemini_usage()
     extracted = {}
     updated_fields = []
+    corrected_fields = []
 
     if message.strip() and fields_to_extract:
         executor = MergeExecutor()
@@ -413,11 +427,15 @@ async def continue_fill_draft(
         for field in fields_to_extract:
             value = str(extracted.get(field, "")).strip()
             if value:
+                old_value = str(values.get(field, "")).strip()
                 values[field] = value
-                updated_fields.append(field)
+                if old_value and old_value != value:
+                    corrected_fields.append(field)
+                elif not old_value:
+                    updated_fields.append(field)
 
     missing_fields = build_missing_fields(values, fields, locked_f)
-    assistant_message = build_fill_status_message(missing_fields, updated_fields)
+    assistant_message = build_fill_status_message(missing_fields, updated_fields, corrected_fields)
 
     draft["values"] = values
     draft["messages"].append({"role": "user", "content": message})
@@ -428,6 +446,7 @@ async def continue_fill_draft(
         "values": values,
         "extracted": extracted,
         "updated_fields": updated_fields,
+        "corrected_fields": corrected_fields,
         "missing_fields": missing_fields,
         "assistant_message": assistant_message,
         "gemini_usage": gemini_usage,
@@ -455,15 +474,6 @@ async def merge_fill_draft(
 
     locked_f = set(parse_json_list(locked_fields))
     missing_fields = build_missing_fields(values, fields, locked_f)
-    if missing_fields:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "Missing required fields",
-                "missing_fields": missing_fields,
-                "assistant_message": build_fill_status_message(missing_fields, []),
-            },
-        )
 
     executor = MergeExecutor()
     result_path, result_id = executor.execute_merge(
@@ -478,7 +488,8 @@ async def merge_fill_draft(
         "result_id": result_id,
         "download_url": f"/download/{result_id}",
         "fields_filled": sum(1 for value in values.values() if str(value).strip()),
-        "missing_fields": [],
+        "missing_fields": missing_fields,
+        "warning_message": build_fill_status_message(missing_fields, []) if missing_fields else "",
         "gemini_usage": empty_gemini_usage(),
     })
 
