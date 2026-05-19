@@ -98,12 +98,35 @@ def empty_gemini_usage() -> dict:
     }
 
 
+def build_missing_fields(values: dict, fields: list[str], locked_fields: set[str] | None = None) -> list[str]:
+    """Return unlocked fields that still do not have a concrete value."""
+    locked_fields = locked_fields or set()
+    return [
+        field for field in fields
+        if field not in locked_fields and not str(values.get(field, "")).strip()
+    ]
+
+
+def build_fill_status_message(missing_fields: list[str], updated_fields: list[str]) -> str:
+    if missing_fields:
+        missing_preview = ", ".join(f"«{field}»" for field in missing_fields[:8])
+        suffix = "" if len(missing_fields) <= 8 else f" và {len(missing_fields) - 8} field khác"
+        if updated_fields:
+            return f"Đã ghi nhận thông tin mới. Anh/chị vui lòng cung cấp thêm: {missing_preview}{suffix}."
+        return f"Chưa tìm thấy thông tin phù hợp. Anh/chị vui lòng cung cấp: {missing_preview}{suffix}."
+
+    if updated_fields:
+        return "Đã đủ thông tin để tạo tài liệu. Anh/chị có thể kiểm tra lại các giá trị và thực hiện merge."
+    return "Các thông tin bắt buộc hiện đã đủ. Anh/chị có thể thực hiện merge."
+
+
 # Setup paths
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 TEMPLATE_DIR = UPLOAD_DIR / "templates"
 RESULT_DIR = UPLOAD_DIR / "results"
 IMAGE_DIR = UPLOAD_DIR / "images"  # Directory for uploaded images
+DRAFT_SESSIONS: dict[str, dict] = {}
 
 # Ensure directories exist
 def ensure_directories():
@@ -308,6 +331,155 @@ async def merge_template(
         "download_url": f"/download/{result_id}",
         "fields_filled": sum(1 for value in data.values() if str(value).strip()),
         "gemini_usage": gemini_usage if context else empty_gemini_usage()
+    })
+
+
+@app.post("/drafts/start")
+@handle_endpoint_errors("start fill draft")
+async def start_fill_draft(
+    template_id: str = Form(...),
+    locked_fields: str = Form(None)
+):
+    """Create a fill draft so users can provide data over multiple messages."""
+    template_path = validate_template_path(template_id)
+    executor = MergeExecutor()
+    fields = executor.get_template_fields(str(template_path))
+    locked_f = set(parse_json_list(locked_fields))
+    values = {field: "" for field in fields}
+    missing_fields = build_missing_fields(values, fields, locked_f)
+
+    draft_id = str(uuid.uuid4())
+    DRAFT_SESSIONS[draft_id] = {
+        "draft_id": draft_id,
+        "template_id": template_id,
+        "fields": fields,
+        "values": values,
+        "messages": [],
+    }
+
+    return JSONResponse(content={
+        "draft_id": draft_id,
+        "template_id": template_id,
+        "fields": fields,
+        "values": values,
+        "missing_fields": missing_fields,
+        "assistant_message": build_fill_status_message(missing_fields, []),
+        "gemini_usage": empty_gemini_usage(),
+    })
+
+
+@app.post("/drafts/{draft_id}/message")
+@handle_endpoint_errors("continue fill draft")
+async def continue_fill_draft(
+    draft_id: str,
+    message: str = Form(...),
+    field_values: str = Form(None),
+    locked_fields: str = Form(None)
+):
+    """Extract only missing fields from the newest user message and update draft state."""
+    draft = DRAFT_SESSIONS.get(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    template_path = validate_template_path(draft["template_id"])
+    fields = draft["fields"]
+    values = dict(draft.get("values") or {})
+
+    if field_values:
+        values.update(json.loads(field_values))
+
+    locked_f = set(parse_json_list(locked_fields))
+    fields_to_extract = build_missing_fields(values, fields, locked_f)
+    gemini_usage = empty_gemini_usage()
+    extracted = {}
+    updated_fields = []
+
+    if message.strip() and fields_to_extract:
+        executor = MergeExecutor()
+        _, full_template_text, document_page_count = executor.get_template_fields_and_text(
+            str(template_path),
+            user_context=message,
+        )
+
+        gemini_client = GeminiClient(GEMINI_API_KEY)
+        extracted = gemini_client.extract_data_from_context(
+            context=message,
+            template_fields=fields_to_extract,
+            full_template_text=full_template_text,
+            document_page_count=document_page_count,
+        )
+        gemini_usage = gemini_client.get_usage_summary()
+
+        for field in fields_to_extract:
+            value = str(extracted.get(field, "")).strip()
+            if value:
+                values[field] = value
+                updated_fields.append(field)
+
+    missing_fields = build_missing_fields(values, fields, locked_f)
+    assistant_message = build_fill_status_message(missing_fields, updated_fields)
+
+    draft["values"] = values
+    draft["messages"].append({"role": "user", "content": message})
+    draft["messages"].append({"role": "assistant", "content": assistant_message})
+
+    return JSONResponse(content={
+        "draft_id": draft_id,
+        "values": values,
+        "extracted": extracted,
+        "updated_fields": updated_fields,
+        "missing_fields": missing_fields,
+        "assistant_message": assistant_message,
+        "gemini_usage": gemini_usage,
+    })
+
+
+@app.post("/drafts/{draft_id}/merge")
+@handle_endpoint_errors("merge fill draft")
+async def merge_fill_draft(
+    draft_id: str,
+    field_values: str = Form(None),
+    locked_fields: str = Form(None)
+):
+    """Merge a completed draft with accumulated structured values."""
+    draft = DRAFT_SESSIONS.get(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    template_path = validate_template_path(draft["template_id"])
+    fields = draft["fields"]
+    values = dict(draft.get("values") or {})
+
+    if field_values:
+        values.update(json.loads(field_values))
+
+    locked_f = set(parse_json_list(locked_fields))
+    missing_fields = build_missing_fields(values, fields, locked_f)
+    if missing_fields:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Missing required fields",
+                "missing_fields": missing_fields,
+                "assistant_message": build_fill_status_message(missing_fields, []),
+            },
+        )
+
+    executor = MergeExecutor()
+    result_path, result_id = executor.execute_merge(
+        str(template_path),
+        values,
+        locked_fields=locked_f,
+    )
+
+    draft["values"] = values
+
+    return JSONResponse(content={
+        "result_id": result_id,
+        "download_url": f"/download/{result_id}",
+        "fields_filled": sum(1 for value in values.values() if str(value).strip()),
+        "missing_fields": [],
+        "gemini_usage": empty_gemini_usage(),
     })
 
 
