@@ -421,6 +421,7 @@ async def continue_fill_draft(
             template_fields=fields_to_extract,
             full_template_text=full_template_text,
             document_page_count=document_page_count,
+            current_values=values,
         )
         gemini_usage = gemini_client.get_usage_summary()
 
