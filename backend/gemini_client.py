@@ -257,6 +257,7 @@ class GeminiClient:
         template_fields: list,
         full_template_text: str,
         document_page_count: int | None = None,
+        current_values: dict | None = None,
     ) -> dict:
         """Extract field values by having Gemini read ENTIRE template at once
 
@@ -283,6 +284,26 @@ class GeminiClient:
 
         # SIMPLE list of field names - Gemini tự tìm vị trí từ template context
         fields_text = "\n".join([f"- «{field}»" for field in template_fields])
+        current_values_block = ""
+        if current_values is not None:
+            current_values_for_fields = {
+                field: str(current_values.get(field, "") or "")
+                for field in template_fields
+            }
+            current_values_json = json.dumps(current_values_for_fields, ensure_ascii=False, indent=2)
+            current_values_block = f"""
+---
+
+GIÁ TRỊ ĐANG CÓ TRƯỚC TIN NHẮN NÀY:
+{current_values_json}
+
+GHI CHÚ KHI ĐÂY LÀ TIN NHẮN ĐÍNH CHÍNH/BỔ SUNG:
+- Vẫn phải đọc toàn bộ template context và xét TẤT CẢ fields liên quan đến tin nhắn mới.
+- Nếu tin nhắn mới cho thấy một người/vai trò thay đổi, hãy cập nhật cả các field định danh liên quan trong đúng bối cảnh, không chỉ field mô tả nguyện vọng/nội dung.
+- Ví dụ: tin mới "bà Nguyễn Thị B có nguyện vọng trực tiếp nuôi con" có thể cần cập nhật cả nguyen_vong_nuoi_con và ho_ten_nguoi_bi_kien nếu template context cho thấy bà B là người bị kiện.
+- Nếu field đã có giá trị và tin nhắn chỉ sửa một phần của giá trị đó, trả về giá trị cuối cùng đầy đủ sau khi sửa, giữ các chi tiết cũ không bị nhắc tới.
+- Ví dụ: đang có con_chung_thong_tin = "Nguyễn Văn C, sinh ngày 22/2/2026"; tin mới "tên con chung chính xác là Lê Văn T" thì trả về "Lê Văn T, sinh ngày 22/2/2026", không được làm mất ngày sinh.
+"""
 
         # Build prompt - use full template only for small documents.
         prompt = f"""Bạn là chuyên gia điền mẫu văn bản tiếng Việt.
@@ -298,6 +319,8 @@ Số trang lưu trong DOCX: {document_page_count or "unknown"}.
 DANH SÁCH FIELD CẦN ĐIỀN:
 {fields_text}
 
+{current_values_block}
+
 ---
 
 VĂN BẢN CHỨA DỮ LIỆU:
@@ -306,9 +329,9 @@ VĂN BẢN CHỨA DỮ LIỆU:
 ---
 
 ⚠️ QUAN TRỌNG NHẤT - TUYỆT ĐỐI KHÔNG BỊA THÔNG TIN:
-- CHỈ được lấy thông tin CÓ TRONG "VĂN BẢN CHỨA DỮ LIỆU"
+- CHỈ được lấy thông tin CÓ TRONG "VĂN BẢN CHỨA DỮ LIỆU"; nếu có mục "GIÁ TRỊ ĐANG CÓ" thì được giữ lại chi tiết cũ từ đó khi tin nhắn mới chỉ sửa một phần
 - KHÔNG ĐƯỢC suy luận, đoán mò, hay tạo ra thông tin KHÔNG CÓ trong context
-- Nếu context KHÔNG có thông tin cho field → PHẢI trả về "" (chuỗi rỗng)
+- Nếu context KHÔNG có thông tin mới cho field → PHẢI trả về "" (chuỗi rỗng), trừ trường hợp cần trả về giá trị đầy đủ để giữ chi tiết cũ khi sửa một phần
 - Nếu context chỉ có một phần thông tin → CHỈ lấy phần đó, không bịa phần còn lại
 
 VÍ DỤ VỀ VIỆC TRỞ VỀ RỖNG:
