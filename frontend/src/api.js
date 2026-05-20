@@ -73,6 +73,70 @@ export const mergeTemplate = async (
   return response.data
 }
 
+export const startDraft = async (templateId, lockedFields = null) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+
+  if (lockedFields) {
+    formData.append('locked_fields', JSON.stringify(lockedFields))
+  }
+
+  const response = await axios.post(`${API_BASE}/drafts/start`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const sendDraftMessage = async (
+  draftId,
+  message,
+  fieldValues = null,
+  lockedFields = null
+) => {
+  const formData = new FormData()
+  formData.append('message', message)
+
+  if (fieldValues) {
+    formData.append('field_values', JSON.stringify(fieldValues))
+  }
+
+  if (lockedFields) {
+    formData.append('locked_fields', JSON.stringify(lockedFields))
+  }
+
+  const response = await axios.post(`${API_BASE}/drafts/${draftId}/message`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
+export const mergeDraft = async (
+  draftId,
+  fieldValues = null,
+  lockedFields = null
+) => {
+  const formData = new FormData()
+
+  if (fieldValues) {
+    formData.append('field_values', JSON.stringify(fieldValues))
+  }
+
+  if (lockedFields) {
+    formData.append('locked_fields', JSON.stringify(lockedFields))
+  }
+
+  const response = await axios.post(`${API_BASE}/drafts/${draftId}/merge`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
 export const downloadFile = (fileId) => {
   window.location.href = `${API_BASE}/download/${fileId}`
 }

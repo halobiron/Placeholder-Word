@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, addTableAtCursor, addImageAtCursor, addHyperlink, semanticEditTemplate, batchUpdate, downloadFile } from './api'
+import { startDraft, sendDraftMessage, mergeDraft, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, addTableAtCursor, addImageAtCursor, addHyperlink, semanticEditTemplate, batchUpdate, downloadFile } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result
@@ -12,6 +12,10 @@ function App() {
   const [selectedField, setSelectedField] = useState(null) // Field selected for keyboard shortcuts
   const [fieldValues, setFieldValues] = useState({}) // Direct value editing
   const [context, setContext] = useState('')
+  const [draftId, setDraftId] = useState(null)
+  const [chatMessages, setChatMessages] = useState([])
+  const [missingFields, setMissingFields] = useState([])
+  const [draftExtracting, setDraftExtracting] = useState(false)
   const [resultId, setResultId] = useState(null)
   const [previewHtml, setPreviewHtml] = useState(null) // Preview of merged result
   const [geminiUsage, setGeminiUsage] = useState({
@@ -102,6 +106,10 @@ function App() {
     [fields, lockedFields]
   )
 
+  const getMissingFields = (values = fieldValues) => (
+    unlockedFields.filter((field) => !String(values[field] || '').trim())
+  )
+
   const getNotificationTone = (message) => {
     if (!message) return 'default'
     if (message.startsWith('⚠️')) return 'warning'
@@ -171,6 +179,10 @@ function App() {
       setSelectedField(null)
     }
   }, [fields, selectedField])
+
+  useEffect(() => {
+    setMissingFields(getMissingFields())
+  }, [fields, fieldValues, lockedFields])
 
   useEffect(() => {
     const editor = document.getElementById('document-editor')
@@ -1285,14 +1297,84 @@ function App() {
   }
 
   // Handle upload complete
-  const handleUploadComplete = (data) => {
+  const handleUploadComplete = async (data) => {
     setTemplateId(data.templateId)
     setEditorHtml(data.previewHtml)
     setFields(data.fields)
     setLockedFields([])
     setSelectedField(null)
+    setFieldValues({})
+    setDraftId(null)
+    setMissingFields(data.fields || [])
+    setChatMessages([])
     setGeminiUsage(normalizeGeminiUsage(data.geminiUsage))
     setStep('preview')
+
+    try {
+      const draft = await startDraft(data.templateId, [])
+      setDraftId(draft.draft_id)
+      setFieldValues(draft.values || {})
+      setMissingFields(draft.missing_fields || data.fields || [])
+      setChatMessages([
+        {
+          role: 'assistant',
+          content: draft.assistant_message || 'Anh/chị có thể cung cấp thông tin thành nhiều lần, hệ thống sẽ báo lại phần còn thiếu.'
+        }
+      ])
+    } catch (err) {
+      setChatMessages([
+        {
+          role: 'assistant',
+          content: 'Anh/chị có thể nhập thông tin thành nhiều lần. Nếu phiên nháp chưa khởi tạo được, hệ thống sẽ thử lại khi gửi tin nhắn.'
+        }
+      ])
+    }
+  }
+
+  const ensureDraft = async () => {
+    if (draftId) return draftId
+    if (!templateId) throw new Error('Chưa có template để tạo phiên điền dữ liệu')
+
+    const draft = await startDraft(templateId, lockedFields)
+    setDraftId(draft.draft_id)
+    setMissingFields(draft.missing_fields || getMissingFields())
+    return draft.draft_id
+  }
+
+  const handleSendDraftMessage = async () => {
+    const message = context.trim()
+    if (!message || draftExtracting) return
+
+    setDraftExtracting(true)
+    setError(null)
+    setContext('')
+    setChatMessages((prev) => [...prev, { role: 'user', content: message }])
+
+    try {
+      const currentDraftId = await ensureDraft()
+      const result = await sendDraftMessage(currentDraftId, message, fieldValues, lockedFields)
+      const nextValues = result.values || fieldValues
+      setFieldValues(nextValues)
+      setMissingFields(result.missing_fields || getMissingFields(nextValues))
+      addGeminiUsage(result.gemini_usage)
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: result.assistant_message || 'Đã cập nhật thông tin.',
+          updatedFields: result.updated_fields || [],
+          correctedFields: result.corrected_fields || []
+        }
+      ])
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Không thể xử lý thông tin vừa nhập')
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Chưa xử lý được thông tin vừa nhập. Anh/chị kiểm tra lại kết nối hoặc thử gửi lại.' }
+      ])
+    } finally {
+      setDraftExtracting(false)
+    }
   }
 
   const toggleFieldLock = (fieldName) => {
@@ -1313,26 +1395,25 @@ function App() {
 
   // Handle merge
   const handleMerge = async () => {
-    const hasDirectValues = Object.values(fieldValues).some(v => v?.trim())
-    const hasContext = context.trim()
-    const useDirectValues = hasDirectValues || !hasContext
+    const currentMissingFields = getMissingFields()
+
+    if (currentMissingFields.length > 0) {
+      const missingPreview = currentMissingFields.slice(0, 6).map((field) => `«${field}»`).join(', ')
+      const suffix = currentMissingFields.length > 6 ? ` và ${currentMissingFields.length - 6} field khác` : ''
+      setMissingFields(currentMissingFields)
+      setError(`⚠️ Còn thiếu thông tin: ${missingPreview}${suffix}`)
+    }
 
     setMerging(true)
-    setError(null)
+    if (currentMissingFields.length === 0) {
+      setError(null)
+    }
 
     try {
-      // Use direct values if available, otherwise use context. With no input,
-      // send empty direct values so merge can still preserve the template text.
-      const data = useDirectValues ? fieldValues : context
-      const activeFields = useDirectValues ? null : unlockedFields
-      const result = await mergeTemplate(
-        templateId,
-        data,
-        useDirectValues,
-        activeFields,
-        lockedFields
-      )
+      const currentDraftId = await ensureDraft()
+      const result = await mergeDraft(currentDraftId, fieldValues, lockedFields)
       setResultId(result.result_id)
+      setMissingFields(result.missing_fields || [])
       addGeminiUsage(result.gemini_usage)
 
       // Fetch preview
@@ -1349,7 +1430,13 @@ function App() {
         }, 2000)
       }
     } catch (err) {
-      setError(err.response?.data?.detail || 'Merge thất bại')
+      const detail = err.response?.data?.detail
+      if (detail?.missing_fields) {
+        setMissingFields(detail.missing_fields)
+        setError(`⚠️ ${detail.assistant_message || 'Còn thiếu thông tin để merge'}`)
+      } else {
+        setError(typeof detail === 'string' ? detail : 'Merge thất bại')
+      }
     } finally {
       setMerging(false)
     }
@@ -1689,6 +1776,10 @@ function App() {
     setSemanticEditing(false)
     setSemanticPlan(null)
     setSelectedSemanticEdits([])
+    setDraftId(null)
+    setChatMessages([])
+    setMissingFields([])
+    setDraftExtracting(false)
     setResultId(null)
     setPreviewHtml(null)
     setError(null)
@@ -2318,13 +2409,13 @@ function App() {
                 </button>
                 <button
                   onClick={handleMerge}
-                  disabled={merging}
+                  disabled={merging || draftExtracting}
                   className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-md shadow-indigo-100 font-semibold text-sm flex items-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:bg-slate-300 disabled:shadow-none disabled:scale-100"
                 >
                   {merging ? (
                     <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Đang xử lý...</>
                   ) : (
-                    <>Thực hiện Merge <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg></>
+                    <>Tạo tài liệu <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg></>
                   )}
                 </button>
               </div>
@@ -2871,19 +2962,90 @@ function App() {
                     </div>
                     <h3 className="font-bold text-lg">Gemini Intelligence</h3>
                   </div>
-                  <p className="text-indigo-200 text-xs mb-4 leading-relaxed">Nhập thông tin thô hoặc mô tả ngữ cảnh, Gemini sẽ tự động trích xuất và điền vào template cho bạn.</p>
+                  <p className="text-indigo-200 text-xs mb-4 leading-relaxed">Người dùng có thể cung cấp hoặc sửa thông tin thành nhiều đợt. Hệ thống chỉ gửi tin nhắn mới cho Gemini và cập nhật dần danh sách bên dưới.</p>
+                  <div className="mb-4 max-h-48 overflow-y-auto space-y-2 pr-1">
+                    {chatMessages.length === 0 ? (
+                      <div className="rounded-xl border border-white/10 bg-white/10 p-3 text-xs text-indigo-100">
+                        Nhập thông tin người dùng đang có, hệ thống sẽ báo lại chính xác phần còn thiếu.
+                      </div>
+                    ) : (
+                      chatMessages.map((message, index) => (
+                        <div
+                          key={`${message.role}-${index}`}
+                          className={`rounded-xl px-3 py-2 text-xs leading-relaxed ${message.role === 'user'
+                            ? 'ml-8 bg-white text-slate-800'
+                            : 'mr-8 bg-white/10 border border-white/10 text-indigo-50'
+                          }`}
+                        >
+                          {message.content}
+                          {message.correctedFields?.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {message.correctedFields.map((field) => (
+                                <span key={field} className="rounded bg-amber-200/20 px-1.5 py-0.5 font-mono text-[10px] text-amber-100">
+                                  sửa «{field}»
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {message.updatedFields?.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {message.updatedFields.map((field) => (
+                                <span key={field} className="rounded bg-emerald-200/20 px-1.5 py-0.5 font-mono text-[10px] text-emerald-100">
+                                  điền «{field}»
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
                   <textarea
                     value={context}
                     onChange={(e) => setContext(e.target.value)}
-                    placeholder="Ví dụ: Tôi là Nguyễn Văn A, CMND 123456789, sống ở Hà Nội..."
-                    className="w-full h-32 bg-white/10 border border-white/20 rounded-xl p-4 text-sm focus:bg-white/20 outline-none transition-all placeholder:text-indigo-300"
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault()
+                        handleSendDraftMessage()
+                      }
+                    }}
+                    placeholder="Ví dụ: Tôi là Nguyễn Văn A, CMND 123456789. Nếu sai có thể nhắn: Sửa tên thành Phạm Ngọc Ninh..."
+                    className="w-full h-28 bg-white/10 border border-white/20 rounded-xl p-4 text-sm focus:bg-white/20 outline-none transition-all placeholder:text-indigo-300"
                   />
                   <div className="mt-3 flex items-center justify-between">
-                    <span className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest">Trích xuất tự động</span>
-                    {context.trim() && (
-                      <button onClick={() => setContext('')} className="text-[10px] hover:underline">Xóa sạch</button>
-                    )}
+                    <span className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest">
+                      {missingFields.length > 0 ? `Còn thiếu ${missingFields.length} field` : 'Đã đủ thông tin'}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {context.trim() && (
+                        <button onClick={() => setContext('')} className="text-[10px] hover:underline">Xóa</button>
+                      )}
+                      <button
+                        onClick={handleSendDraftMessage}
+                        disabled={draftExtracting || !context.trim()}
+                        className="px-3 py-1.5 bg-white text-indigo-700 rounded-lg text-xs font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {draftExtracting ? 'Đang đọc...' : 'Gửi thông tin'}
+                      </button>
+                    </div>
                   </div>
+                  {missingFields.length > 0 && (
+                    <div className="mt-3 rounded-xl bg-white/10 border border-white/10 p-3">
+                      <p className="text-[10px] uppercase tracking-widest text-indigo-200 font-bold mb-2">Thông tin còn thiếu</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {missingFields.slice(0, 12).map((field) => (
+                          <span key={field} className="px-2 py-1 rounded-md bg-white/15 text-[11px] font-mono text-white break-all">
+                            «{field}»
+                          </span>
+                        ))}
+                        {missingFields.length > 12 && (
+                          <span className="px-2 py-1 rounded-md bg-white/15 text-[11px] text-white">
+                            +{missingFields.length - 12}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
