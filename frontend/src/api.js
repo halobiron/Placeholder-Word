@@ -410,6 +410,23 @@ export const addHyperlink = async (templateId, blockIndex, startOffset, endOffse
   }])
 }
 
+export const semanticEditTemplate = async (templateId, instruction, validateOnly = false, plannedEdits = null) => {
+  const formData = new FormData()
+  formData.append('template_id', templateId)
+  formData.append('instruction', instruction || '')
+  formData.append('validate_only', validateOnly ? 'true' : 'false')
+  if (plannedEdits) {
+    formData.append('planned_edits', JSON.stringify(plannedEdits))
+  }
+
+  const response = await axios.post(`${API_BASE}/semantic-edit`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
+}
+
 /**
  * Batch Update API - Execute multiple operations in a single atomic transaction
 

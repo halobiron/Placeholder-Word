@@ -380,6 +380,117 @@ JSON:"""
             # Fallback: empty values
             return {field: "" for field in template_fields}
 
+    def plan_document_text_edits(self, user_request: str, structured_content: list) -> dict:
+        """Ask Gemini to locate and propose text-only edits for a DOCX template.
+
+        The returned edits are intentionally limited to existing text replacement.
+        Formatting is preserved later by DocxFullEditor when it replaces text
+        inside the original DOCX runs.
+        """
+        editable_blocks = []
+        for index, block in enumerate(structured_content or []):
+            block_type = block.get("type")
+            if block_type not in ("paragraph", "table_cell"):
+                continue
+
+            text = (block.get("text") or "").strip()
+            if not text or text == "[EMPTY LINE]":
+                continue
+
+            section = block.get("nearest_heading") or block.get("section_heading") or ""
+            before = " | ".join((block.get("before_context") or [])[-2:])
+            after = " | ".join((block.get("after_context") or [])[:2])
+
+            line = (
+                f"[{index}] type={block_type}"
+                f" section={section!r}"
+                f" text={text!r}"
+            )
+            if block_type == "table_cell":
+                line += f" row={block.get('table_row')} col={block.get('table_col')}"
+            else:
+                line += f" before={before!r} after={after!r}"
+            editable_blocks.append(line)
+
+        if not editable_blocks:
+            return {"edits": [], "warnings": ["Không tìm thấy block văn bản có thể sửa."]}
+
+        document_context = "\n".join(editable_blocks[:250])
+
+        prompt = f"""Bạn là bộ lập kế hoạch sửa nội dung DOCX tiếng Việt.
+
+Nhiệm vụ: đọc yêu cầu người dùng, tìm đúng vị trí trong danh sách block, và trả về các thao tác THAY THẾ VĂN BẢN hiện có.
+
+YÊU CẦU NGƯỜI DÙNG:
+{user_request}
+
+DANH SÁCH BLOCK CÓ THỂ SỬA:
+{document_context}
+
+QUY TẮC BẮT BUỘC:
+- Chỉ sửa những nội dung người dùng yêu cầu rõ hoặc có thể suy ra chắc chắn từ yêu cầu.
+- Không tự viết lại toàn bộ tài liệu.
+- Không thêm/xóa bảng, ảnh, paragraph, placeholder hoặc định dạng.
+- old_text phải là đoạn văn bản đang có trong đúng block, copy càng chính xác càng tốt.
+- new_text là nội dung thay thế cho old_text.
+- Nếu không chắc vị trí cần sửa, không tạo edit; thêm lý do vào warnings.
+- Với nhiều vị trí giống nhau, chỉ sửa vị trí khớp ngữ cảnh yêu cầu.
+- Trả về JSON thuần, không markdown.
+
+SCHEMA:
+{{
+  "edits": [
+    {{
+      "block_index": 0,
+      "old_text": "văn bản hiện tại",
+      "new_text": "văn bản mới",
+      "reason": "lý do chọn vị trí này"
+    }}
+  ],
+  "warnings": ["..."]
+}}
+
+JSON:"""
+
+        try:
+            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            self._record_usage(response)
+            result = self.parse_gemini_json_response(response.text)
+
+            valid_block_indexes = {
+                i for i, block in enumerate(structured_content or [])
+                if block.get("type") in ("paragraph", "table_cell")
+            }
+            validated = []
+            for edit in result.get("edits", []):
+                try:
+                    block_index = int(edit.get("block_index"))
+                except (TypeError, ValueError):
+                    continue
+
+                old_text = str(edit.get("old_text") or "").strip()
+                new_text = str(edit.get("new_text") or "")
+                if block_index not in valid_block_indexes or not old_text:
+                    continue
+
+                validated.append({
+                    "block_index": block_index,
+                    "old_text": old_text,
+                    "new_text": new_text,
+                    "reason": str(edit.get("reason") or ""),
+                })
+
+            return {
+                "edits": validated,
+                "warnings": [
+                    str(item) for item in result.get("warnings", [])
+                    if item is not None
+                ],
+            }
+        except Exception as e:
+            print(f"Gemini document edit planning error: {e}")
+            return {"edits": [], "warnings": [str(e)]}
+
     def analyze_document_for_placeholders(
         self,
         structured_content: list,

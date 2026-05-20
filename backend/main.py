@@ -98,6 +98,122 @@ def empty_gemini_usage() -> dict:
     }
 
 
+def apply_batch_update_operations(
+    template_id: str,
+    template_path: Path,
+    operations: list[dict],
+    validate_only: bool = False,
+    stop_on_error: bool = True,
+) -> dict:
+    """Apply DOCX edit operations atomically and return the standard response."""
+    batch_request = BatchUpdateRequest(
+        template_id=template_id,
+        operations=operations,
+        validate_only=validate_only,
+        stop_on_error=stop_on_error,
+    )
+
+    results = {
+        "template_id": batch_request.template_id,
+        "total_operations": len(batch_request.operations),
+        "successful": 0,
+        "failed": 0,
+        "operation_results": [],
+        "validation_errors": [],
+        "execution_errors": []
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        working_template_path = Path(tmpdir) / template_path.name
+        shutil.copy2(template_path, working_template_path)
+        editor = DocxFullEditor(str(working_template_path))
+
+        for i, op in enumerate(batch_request.operations):
+            try:
+                validate_operation(editor, op)
+            except ValueError as e:
+                error_msg = f"Op {i} ({op.type}): {str(e)}"
+                results["validation_errors"].append(error_msg)
+                results["operation_results"].append({
+                    "index": i,
+                    "type": op.type,
+                    "status": "validation_failed",
+                    "error": str(e)
+                })
+                if batch_request.stop_on_error:
+                    break
+                continue
+
+            try:
+                execute_operation(editor, op)
+            except Exception as e:
+                error_msg = f"Op {i} ({op.type}): {str(e)}"
+                if batch_request.validate_only:
+                    results["validation_errors"].append(error_msg)
+                    results["operation_results"].append({
+                        "index": i,
+                        "type": op.type,
+                        "status": "validation_failed",
+                        "error": str(e)
+                    })
+                else:
+                    results["failed"] += 1
+                    results["execution_errors"].append(error_msg)
+                    results["operation_results"].append({
+                        "index": i,
+                        "type": op.type,
+                        "status": "failed",
+                        "error": str(e)
+                    })
+                if batch_request.stop_on_error:
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "error": "Batch update failed",
+                            "failed_operation": error_msg,
+                            "message": f"Operation {i} failed during execution."
+                        }
+                    )
+                continue
+
+            results["successful"] += 1
+            results["operation_results"].append({
+                "index": i,
+                "type": op.type,
+                "status": "validated" if batch_request.validate_only else "executed"
+            })
+
+        if results["validation_errors"]:
+            return {
+                **results,
+                "success": False,
+                "fields": [],
+                "field_count": 0,
+                "html_preview": "",
+                "message": "Validation failed - no changes made",
+            }
+
+        if batch_request.validate_only:
+            return {
+                **results,
+                "success": True,
+                "fields": [],
+                "field_count": 0,
+                "html_preview": "",
+                "message": "Validation passed - no changes made (validate_only mode)",
+            }
+
+        fields, html_preview = save_and_regenerate_preview(editor, str(working_template_path))
+        shutil.copy2(working_template_path, template_path)
+
+    return {
+        **results,
+        "success": results["failed"] == 0,
+        "fields": fields,
+        "field_count": len(fields),
+        "html_preview": html_preview,
+        "message": f"Batch update completed: {results['successful']} succeeded, {results['failed']} failed"
+    }
 def build_missing_fields(values: dict, fields: list[str], locked_fields: set[str] | None = None) -> list[str]:
     """Return unlocked fields that still do not have a concrete value."""
     locked_fields = locked_fields or set()
@@ -326,10 +442,7 @@ async def merge_template(
         logger.debug("=== END MERGE DEBUG ===")
         gemini_usage = gemini_client.get_usage_summary()
     else:
-        raise HTTPException(
-            status_code=400,
-            detail="Either 'context' or 'field_values' must be provided"
-        )
+        data = {}
 
     # Execute merge
     locked_f = set(parse_json_list(locked_fields))
@@ -690,6 +803,102 @@ async def apply_ai_suggestions(
     results["html_preview"] = html_preview
 
     return results
+
+
+@app.post("/semantic-edit")
+@handle_endpoint_errors("semantic document edit")
+async def semantic_document_edit(
+    template_id: str = Form(...),
+    instruction: str = Form(""),
+    validate_only: bool = Form(False),
+    planned_edits: str = Form(None)
+):
+    """Edit existing document text from a natural-language instruction.
+
+    Gemini identifies the target text and returns text replacement operations.
+    The backend applies those operations directly to DOCX runs so existing
+    formatting is preserved.
+    """
+    template_path = validate_template_path(template_id)
+    clean_instruction = (instruction or "").strip()
+    if not clean_instruction and not planned_edits:
+        raise HTTPException(status_code=400, detail="instruction is required")
+
+    processor = MailMergeProcessor()
+    structured_content = processor.extract_structured_content(str(template_path))
+    if not structured_content:
+        raise HTTPException(status_code=500, detail="Failed to extract content from template")
+
+    gemini_usage = empty_gemini_usage()
+    warnings = []
+
+    if planned_edits:
+        parsed_edits = json.loads(planned_edits)
+        if not isinstance(parsed_edits, list):
+            raise HTTPException(status_code=400, detail="planned_edits must be a JSON array")
+        edits = [
+            {
+                "block_index": int(edit.get("block_index")),
+                "old_text": str(edit.get("old_text") or "").strip(),
+                "new_text": str(edit.get("new_text") or ""),
+                "reason": str(edit.get("reason") or ""),
+            }
+            for edit in parsed_edits
+            if edit.get("block_index") is not None and str(edit.get("old_text") or "").strip()
+        ]
+    else:
+        gemini_client = GeminiClient(GEMINI_API_KEY)
+        plan = gemini_client.plan_document_text_edits(clean_instruction, structured_content)
+        edits = plan.get("edits", [])
+        warnings = plan.get("warnings", [])
+        gemini_usage = gemini_client.get_usage_summary()
+
+    if not edits:
+        fields = MergeExecutor().get_template_fields(str(template_path))
+        return {
+            "template_id": template_id,
+            "success": False,
+            "message": "Gemini không tìm được vị trí sửa đủ chắc chắn.",
+            "planned_edits": [],
+            "warnings": warnings,
+            "gemini_usage": gemini_usage,
+            "fields": fields,
+            "field_count": len(fields),
+            "html_preview": MailMergeProcessor()._generate_html_preview(str(template_path)),
+        }
+
+    operations = [
+        {
+            "type": "update_text",
+            "block_index": edit["block_index"],
+            "old_text": edit["old_text"],
+            "new_text": edit["new_text"],
+            "description": edit.get("reason", ""),
+        }
+        for edit in edits
+    ]
+
+    batch_result = apply_batch_update_operations(
+        template_id=template_id,
+        template_path=template_path,
+        operations=operations,
+        validate_only=validate_only,
+        stop_on_error=True,
+    )
+
+    return {
+        **batch_result,
+        "planned_edits": edits,
+        "warnings": warnings,
+        "gemini_usage": gemini_usage,
+        "message": (
+            batch_result.get("message")
+            if not batch_result.get("success")
+            else "Semantic edit validated"
+            if validate_only
+            else f"Đã áp dụng {batch_result.get('successful', 0)} chỉnh sửa"
+        ),
+    }
 
 
 @app.post("/suggest-field-name")
