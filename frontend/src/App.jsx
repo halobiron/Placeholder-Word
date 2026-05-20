@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, addTableAtCursor, addImageAtCursor, addHyperlink, batchUpdate, downloadFile } from './api'
+import { mergeTemplate, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, addTableAtCursor, addImageAtCursor, addHyperlink, semanticEditTemplate, batchUpdate, downloadFile } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result
@@ -20,6 +20,10 @@ function App() {
     total_tokens: 0
   })
   const [merging, setMerging] = useState(false)
+  const [semanticEditing, setSemanticEditing] = useState(false)
+  const [semanticInstruction, setSemanticInstruction] = useState('')
+  const [semanticPlan, setSemanticPlan] = useState(null)
+  const [selectedSemanticEdits, setSelectedSemanticEdits] = useState([])
   const [error, setError] = useState(null)
   const [suggestions, setSuggestions] = useState([]) // AI suggestions for missing placeholders
   const [analyzing, setAnalyzing] = useState(false) // AI analysis in progress
@@ -1309,26 +1313,22 @@ function App() {
 
   // Handle merge
   const handleMerge = async () => {
-    // Check if we have direct values OR context
     const hasDirectValues = Object.values(fieldValues).some(v => v?.trim())
     const hasContext = context.trim()
-
-    if (!hasDirectValues && !hasContext) {
-      setError('Vui lòng điền giá trị cho placeholders hoặc nhập đoạn văn bản')
-      return
-    }
+    const useDirectValues = hasDirectValues || !hasContext
 
     setMerging(true)
     setError(null)
 
     try {
-      // Use direct values if available, otherwise use context
-      const data = hasDirectValues ? fieldValues : context
-      const activeFields = hasDirectValues ? null : unlockedFields
+      // Use direct values if available, otherwise use context. With no input,
+      // send empty direct values so merge can still preserve the template text.
+      const data = useDirectValues ? fieldValues : context
+      const activeFields = useDirectValues ? null : unlockedFields
       const result = await mergeTemplate(
         templateId,
         data,
-        hasDirectValues,
+        useDirectValues,
         activeFields,
         lockedFields
       )
@@ -1375,6 +1375,120 @@ function App() {
     } finally {
       setAnalyzing(false)
     }
+  }
+
+  const handleSemanticPreview = async () => {
+    if (!templateId) return
+    if (!semanticInstruction.trim()) {
+      setError('Vui lòng nhập yêu cầu sửa nội dung')
+      return
+    }
+
+    setSemanticEditing(true)
+    setError(null)
+
+    try {
+      const result = await semanticEditTemplate(templateId, semanticInstruction, true)
+      addGeminiUsage(result.gemini_usage)
+
+      if (!result.success) {
+        const warningText = (result.warnings || []).filter(Boolean).join(' ')
+        setError(warningText || result.message || 'Gemini chưa tìm được vị trí sửa đủ chắc chắn')
+        setSemanticPlan(null)
+        setSelectedSemanticEdits([])
+        return
+      }
+
+      const plannedEdits = result.planned_edits || []
+      setSemanticPlan({
+        edits: plannedEdits,
+        warnings: result.warnings || []
+      })
+      setSelectedSemanticEdits(plannedEdits.map((_, index) => index))
+      setError(`Gemini đề xuất ${plannedEdits.length} chỉnh sửa. Hãy kiểm tra trước khi áp dụng.`)
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      if (typeof detail === 'object') {
+        setError(detail.failed_operation || detail.message || 'Lập kế hoạch sửa thất bại')
+      } else {
+        setError(detail || 'Lập kế hoạch sửa thất bại')
+      }
+    } finally {
+      setSemanticEditing(false)
+    }
+  }
+
+  const handleApplySemanticPlan = async () => {
+    if (!templateId || !semanticPlan) return
+
+    const editsToApply = semanticPlan.edits.filter((_, index) => selectedSemanticEdits.includes(index))
+    if (editsToApply.length === 0) {
+      setError('Vui lòng chọn ít nhất một chỉnh sửa để áp dụng')
+      return
+    }
+
+    setSemanticEditing(true)
+    setError(null)
+
+    try {
+      const result = await semanticEditTemplate(templateId, semanticInstruction, false, editsToApply)
+
+      if (!result.success) {
+        const warningText = (result.warnings || []).filter(Boolean).join(' ')
+        setError(warningText || result.message || 'Áp dụng chỉnh sửa thất bại')
+        return
+      }
+
+      setEditorHtml(result.html_preview)
+      setFields(result.fields || [])
+      setSemanticInstruction('')
+      setSemanticPlan(null)
+      setSelectedSemanticEdits([])
+      setError(`Đã áp dụng ${result.successful || 0} chỉnh sửa đã xác nhận`)
+      setTimeout(() => setError(null), 3000)
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      if (typeof detail === 'object') {
+        setError(detail.failed_operation || detail.message || 'Sửa nội dung thất bại')
+      } else {
+        setError(detail || 'Sửa nội dung thất bại')
+      }
+    } finally {
+      setSemanticEditing(false)
+    }
+  }
+
+  const toggleSemanticEditSelection = (index) => {
+    setSelectedSemanticEdits((prev) =>
+      prev.includes(index)
+        ? prev.filter((item) => item !== index)
+        : [...prev, index]
+    )
+  }
+
+  const selectAllSemanticEdits = () => {
+    if (!semanticPlan) return
+    setSelectedSemanticEdits(semanticPlan.edits.map((_, index) => index))
+  }
+
+  const clearSemanticEditSelection = () => {
+    setSelectedSemanticEdits([])
+  }
+
+  const focusSemanticBlock = (blockIndex) => {
+    const editor = document.getElementById('document-editor')
+    if (!editor) return
+
+    editor.querySelectorAll('.semantic-edit-highlight').forEach((el) => {
+      el.classList.remove('semantic-edit-highlight')
+    })
+
+    const target = editor.querySelector(`[data-block-index="${blockIndex}"], [data-cell-block-index="${blockIndex}"]`)
+    if (!target) return
+
+    target.classList.add('semantic-edit-highlight')
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setTimeout(() => target.classList.remove('semantic-edit-highlight'), 3500)
   }
 
   // Apply AI suggestions
@@ -1571,6 +1685,10 @@ function App() {
     setFields([])
     setFieldValues({})
     setContext('')
+    setSemanticInstruction('')
+    setSemanticEditing(false)
+    setSemanticPlan(null)
+    setSelectedSemanticEdits([])
     setResultId(null)
     setPreviewHtml(null)
     setError(null)
@@ -2200,7 +2318,7 @@ function App() {
                 </button>
                 <button
                   onClick={handleMerge}
-                  disabled={merging || (!Object.values(fieldValues).some(v => v?.trim()) && !context.trim())}
+                  disabled={merging}
                   className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-md shadow-indigo-100 font-semibold text-sm flex items-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:bg-slate-300 disabled:shadow-none disabled:scale-100"
                 >
                   {merging ? (
@@ -2769,6 +2887,144 @@ function App() {
                 </div>
               </div>
 
+              <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-5">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-8 h-8 bg-emerald-50 text-emerald-600 rounded-lg flex items-center justify-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-800 text-sm">Sửa nội dung bằng Gemini</h3>
+                    <p className="text-xs text-slate-500">Mô tả thay đổi cần sửa, hệ thống sẽ tìm đúng đoạn và giữ nguyên định dạng Word.</p>
+                  </div>
+                </div>
+                <textarea
+                  value={semanticInstruction}
+                  onChange={(e) => {
+                    setSemanticInstruction(e.target.value)
+                    setSemanticPlan(null)
+                    setSelectedSemanticEdits([])
+                  }}
+                  placeholder="Ví dụ: đổi tên công ty bên A thành Công ty TNHH Minh Long, cập nhật thời hạn hợp đồng thành 24 tháng..."
+                  className="w-full h-24 border border-slate-200 rounded-xl p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 resize-none"
+                />
+                {semanticPlan && (
+                  <div className="mt-4 border border-slate-200 rounded-xl overflow-hidden bg-slate-50">
+                    <div className="px-4 py-3 bg-white border-b border-slate-200">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-bold text-slate-800">Kiểm tra trước khi áp dụng</div>
+                          <div className="text-xs text-slate-500 mt-0.5">
+                            {semanticPlan.edits.length} đề xuất, {selectedSemanticEdits.length} mục đang được chọn
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={selectAllSemanticEdits}
+                            className="px-3 py-1.5 text-[11px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors"
+                          >
+                            Chọn tất cả
+                          </button>
+                          <button
+                            type="button"
+                            onClick={clearSemanticEditSelection}
+                            className="px-3 py-1.5 text-[11px] font-bold text-slate-500 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                          >
+                            Bỏ chọn
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="max-h-[420px] overflow-y-auto p-3 space-y-3">
+                      {semanticPlan.edits.map((edit, index) => (
+                        <div
+                          key={`${edit.block_index}-${index}`}
+                          className={`bg-white border rounded-xl transition-colors ${selectedSemanticEdits.includes(index) ? 'border-emerald-200 ring-1 ring-emerald-100' : 'border-slate-200 opacity-75'}`}
+                        >
+                          <div className="p-3 border-b border-slate-100 flex items-start gap-3">
+                            <button
+                              type="button"
+                              onClick={() => toggleSemanticEditSelection(index)}
+                              className={`mt-0.5 w-5 h-5 rounded border flex items-center justify-center transition-colors ${selectedSemanticEdits.includes(index) ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-slate-300 text-transparent'}`}
+                              aria-label="Chọn chỉnh sửa"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                            </button>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-1 rounded-md">Block #{edit.block_index}</span>
+                                {edit.reason && <span className="text-[11px] text-slate-500 truncate max-w-full">{edit.reason}</span>}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => focusSemanticBlock(edit.block_index)}
+                              className="px-2.5 py-1.5 text-[11px] font-bold text-slate-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors"
+                            >
+                              Xem trong tài liệu
+                            </button>
+                          </div>
+
+                          <div className="p-3 space-y-3">
+                            <div className="bg-red-50 border border-red-100 rounded-lg overflow-hidden">
+                              <div className="px-3 py-1.5 bg-red-100/70 text-[10px] font-bold text-red-700 uppercase">Nội dung hiện tại</div>
+                              <div className="p-3 text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">{edit.old_text}</div>
+                            </div>
+                            <div className="flex justify-center -my-1">
+                              <div className="w-7 h-7 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-400 shadow-sm">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></svg>
+                              </div>
+                            </div>
+                            <div className="bg-emerald-50 border border-emerald-100 rounded-lg overflow-hidden">
+                              <div className="px-3 py-1.5 bg-emerald-100/80 text-[10px] font-bold text-emerald-700 uppercase">Nội dung sau khi sửa</div>
+                              <div className="p-3 text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">{edit.new_text}</div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {semanticPlan.warnings?.length > 0 && (
+                      <div className="px-4 py-3 bg-amber-50 border-t border-amber-100 text-xs text-amber-800 space-y-1">
+                        {semanticPlan.warnings.map((warning, index) => (
+                          <div key={index}>{warning}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="mt-3 flex items-center justify-end gap-2">
+                  {(semanticInstruction.trim() || semanticPlan) && (
+                    <button
+                      onClick={() => {
+                        setSemanticInstruction('')
+                        setSemanticPlan(null)
+                        setSelectedSemanticEdits([])
+                      }}
+                      className="px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg transition-colors"
+                    >
+                      Xóa
+                    </button>
+                  )}
+                  <button
+                    onClick={handleSemanticPreview}
+                    disabled={semanticEditing || !semanticInstruction.trim()}
+                    className="px-4 py-2 bg-white border border-emerald-200 text-emerald-700 rounded-lg text-xs font-bold hover:bg-emerald-50 disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 transition-colors flex items-center gap-2"
+                  >
+                    {semanticEditing && <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>}
+                    Xem đề xuất
+                  </button>
+                  {semanticPlan && (
+                    <button
+                      onClick={handleApplySemanticPlan}
+                      disabled={semanticEditing || selectedSemanticEdits.length === 0}
+                      className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-xs font-bold hover:bg-emerald-700 disabled:bg-slate-300 transition-colors"
+                    >
+                      Áp dụng đã chọn
+                    </button>
+                  )}
+                </div>
+              </div>
+
               {/* FIELD LIST & MANUAL VALUES */}
               <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
                 <div className="p-4 border-b border-slate-100 flex items-center justify-between">
@@ -2950,6 +3206,13 @@ function App() {
           border: none;
           padding: 12px;
           vertical-align: top;
+        }
+
+        .semantic-edit-highlight {
+          outline: 3px solid #10b981 !important;
+          outline-offset: 3px;
+          background-color: rgba(16, 185, 129, 0.10) !important;
+          transition: background-color 0.2s ease, outline-color 0.2s ease;
         }
 
         /* Customize scrollbars */
