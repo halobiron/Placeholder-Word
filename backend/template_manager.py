@@ -25,7 +25,14 @@ class MailMergeProcessor:
     """Convert .docx to Mail Merge template using SmartMailMergeConverter"""
     PAGE_BREAK_TOKEN = "__DOCX_PAGE_BREAK__"
 
-    def __init__(self, gemini_api_key: str = None, timeout: int = 30):
+    def __init__(
+        self,
+        gemini_api_key: str = None,
+        timeout: int = 30,
+        ai_provider: str = "gemini",
+        ai_model: str | None = None,
+        ollama_base_url: str = "http://localhost:11434",
+    ):
         """Initialize processor
 
         Args:
@@ -34,7 +41,19 @@ class MailMergeProcessor:
         """
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         self._gemini_api_key = gemini_api_key
-        self.gemini_client = GeminiClient(gemini_api_key) if gemini_api_key else None
+        self.ai_provider = ai_provider
+        self.ai_model = ai_model
+        self.ollama_base_url = ollama_base_url
+        self.gemini_client = (
+            GeminiClient(
+                gemini_api_key,
+                provider=ai_provider,
+                model_name=ai_model,
+                ollama_base_url=ollama_base_url,
+            )
+            if gemini_api_key or ai_provider == "ollama"
+            else None
+        )
 
     @staticmethod
     def _empty_usage() -> dict:
@@ -51,6 +70,17 @@ class MailMergeProcessor:
             for key in merged:
                 merged[key] += int(source.get(key, 0) or 0)
         return merged
+
+    def _smart_converter_method(self) -> str:
+        if not self.gemini_client:
+            return "smart_converter"
+        return f"smart_converter_with_{self.ai_provider}"
+
+    def _smart_naming_note(self) -> str:
+        if not self.gemini_client:
+            return ""
+        provider_label = "Ollama" if self.ai_provider == "ollama" else "Gemini"
+        return f" + {provider_label} smart naming"
 
     def _extract_xml_text(self, element) -> str:
         """Extract and normalize all text nodes from a Word XML element including tabs and breaks."""
@@ -326,7 +356,13 @@ class MailMergeProcessor:
             if hasattr(self, '_gemini_api_key'):
                 gemini_key = self._gemini_api_key
 
-            converter = SmartMailMergeConverter(docx_path, gemini_api_key=gemini_key)
+            converter = SmartMailMergeConverter(
+                docx_path,
+                gemini_api_key=gemini_key,
+                ai_provider=self.ai_provider,
+                ai_model=self.ai_model,
+                ollama_base_url=self.ollama_base_url,
+            )
             fields = converter.convert(str(output_path), auto_fill_tables=auto_fill_tables)
 
             converter_usage = converter.gemini_client.get_usage_summary() if converter.gemini_client else self._empty_usage()
@@ -373,8 +409,12 @@ class MailMergeProcessor:
                 "fields": fields,
                 "field_count": len(fields),
                 "html_preview": html_preview,
-                "method": "smart_converter_with_gemini" if self.gemini_client else "smart_converter",
-                "note": "Full XML surgical injection with Vietnamese support" + (" + Gemini smart naming" if self.gemini_client else ""),
+                "method": self._smart_converter_method(),
+                "note": "Full XML surgical injection with Vietnamese support" + self._smart_naming_note(),
+                "ai_provider": self.ai_provider,
+                "ai_model": self.ai_model,
+                "ai_usage": gemini_usage,
+                "ai_usage_steps": usage_steps,
                 "gemini_usage": gemini_usage,
                 "gemini_usage_steps": usage_steps,
             }

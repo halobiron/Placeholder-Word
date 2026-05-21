@@ -106,6 +106,10 @@ Ngày ... tháng ... năm 20 ...
 
 ```bash
 GEMINI_API_KEY=your_gemini_api_key_here
+AI_PROVIDER=gemini
+GEMINI_MODEL=your_gemini_model_name
+OLLAMA_MODEL=your_ollama_model_name
+OLLAMA_BASE_URL=http://localhost:11434
 MAX_FILE_SIZE=10485760
 ```
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import FileUpload from './components/FileUpload'
 import EditPopup from './components/EditPopup'
-import { startDraft, sendDraftMessage, mergeDraft, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, addTableAtCursor, addImageAtCursor, addHyperlink, semanticEditTemplate, batchUpdate, downloadFile } from './api'
+import { startDraft, sendDraftMessage, mergeDraft, getPreview, suggestPlaceholders, applySuggestions, addPlaceholderByPosition, addPlaceholderByOffset, suggestFieldName, editSelection, updateTextInTemplate, getSelectionFormat, addTableRow, deleteTableRow, addTableColumn, deleteTableColumn, formatTableCell, getCellFormat, addParagraph, deleteParagraph, addTableAtCursor, addImageAtCursor, addHyperlink, semanticEditTemplate, batchUpdate, downloadFile, getSystemInfo } from './api'
 
 function App() {
   const [step, setStep] = useState('upload') // upload, preview, preview_result
@@ -23,6 +23,8 @@ function App() {
     completion_tokens: 0,
     total_tokens: 0
   })
+  const [activeAiProvider, setActiveAiProvider] = useState('')
+  const [activeAiModel, setActiveAiModel] = useState('')
   const [merging, setMerging] = useState(false)
   const [semanticEditing, setSemanticEditing] = useState(false)
   const [semanticInstruction, setSemanticInstruction] = useState('')
@@ -85,6 +87,22 @@ function App() {
     selectedText: ''
   })
   const [showPlaceholderDropdown, setShowPlaceholderDropdown] = useState(false)
+
+  useEffect(() => {
+    let mounted = true
+    const loadSystemInfo = async () => {
+      try {
+        const info = await getSystemInfo()
+        if (!mounted) return
+        setActiveAiProvider(String(info?.ai_provider || ''))
+        setActiveAiModel(String(info?.ai_model || ''))
+      } catch (_err) {
+        // keep UI usable even when health endpoint is temporarily unavailable
+      }
+    }
+    loadSystemInfo()
+    return () => { mounted = false }
+  }, [])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -1308,6 +1326,8 @@ function App() {
     setMissingFields(data.fields || [])
     setChatMessages([])
     setGeminiUsage(normalizeGeminiUsage(data.geminiUsage))
+    setActiveAiProvider(data.aiProvider || '')
+    setActiveAiModel(data.aiModel || '')
     setStep('preview')
 
     try {
@@ -1356,7 +1376,7 @@ function App() {
       const nextValues = result.values || fieldValues
       setFieldValues(nextValues)
       setMissingFields(result.missing_fields || getMissingFields(nextValues))
-      addGeminiUsage(result.gemini_usage)
+      addGeminiUsage(result.ai_usage || result.gemini_usage)
       setChatMessages((prev) => [
         ...prev,
         {
@@ -1414,7 +1434,7 @@ function App() {
       const result = await mergeDraft(currentDraftId, fieldValues, lockedFields)
       setResultId(result.result_id)
       setMissingFields(result.missing_fields || [])
-      addGeminiUsage(result.gemini_usage)
+      addGeminiUsage(result.ai_usage || result.gemini_usage)
 
       // Fetch preview
       try {
@@ -1456,9 +1476,9 @@ function App() {
     try {
       const result = await suggestPlaceholders(templateId)
       setSuggestions(result.suggestions || [])
-      addGeminiUsage(result.gemini_usage)
+      addGeminiUsage(result.ai_usage || result.gemini_usage)
     } catch (err) {
-      setError(err.response?.data?.detail || 'AI phân tích thất bại. Kiểm tra GEMINI_API_KEY.')
+      setError(err.response?.data?.detail || 'AI phân tích thất bại. Kiểm tra cấu hình provider/model.')
     } finally {
       setAnalyzing(false)
     }
@@ -1475,12 +1495,12 @@ function App() {
     setError(null)
 
     try {
-      const result = await semanticEditTemplate(templateId, semanticInstruction, true)
-      addGeminiUsage(result.gemini_usage)
+      const result = await semanticEditTemplate(templateId, semanticInstruction, true, null)
+      addGeminiUsage(result.ai_usage || result.gemini_usage)
 
       if (!result.success) {
         const warningText = (result.warnings || []).filter(Boolean).join(' ')
-        setError(warningText || result.message || 'Gemini chưa tìm được vị trí sửa đủ chắc chắn')
+        setError(warningText || result.message || 'AI chưa tìm được vị trí sửa đủ chắc chắn')
         setSemanticPlan(null)
         setSelectedSemanticEdits([])
         return
@@ -1492,7 +1512,7 @@ function App() {
         warnings: result.warnings || []
       })
       setSelectedSemanticEdits(plannedEdits.map((_, index) => index))
-      setError(`Gemini đề xuất ${plannedEdits.length} chỉnh sửa. Hãy kiểm tra trước khi áp dụng.`)
+      setError(`AI đề xuất ${plannedEdits.length} chỉnh sửa. Hãy kiểm tra trước khi áp dụng.`)
     } catch (err) {
       const detail = err.response?.data?.detail
       if (typeof detail === 'object') {
@@ -1602,7 +1622,7 @@ function App() {
       // Update editor with result from applySuggestions (no extra API call needed)
       setEditorHtml(result.html_preview)
       setFields(result.updated_fields)
-      addGeminiUsage(result.gemini_usage)
+      addGeminiUsage(result.ai_usage || result.gemini_usage)
 
       // Clear suggestions and edits after successful apply
       setSuggestions([])
@@ -1795,6 +1815,8 @@ function App() {
       completion_tokens: 0,
       total_tokens: 0
     })
+    setActiveAiProvider('')
+    setActiveAiModel('')
   }
 
   // Handle text selection for editing
@@ -2395,6 +2417,16 @@ function App() {
               <h1 className="text-lg font-bold tracking-tight text-slate-800">Mail Merge AI</h1>
               <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">Intelligent Document Automation</p>
             </div>
+            {(activeAiProvider || activeAiModel) && (
+              <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                  {activeAiProvider || 'ai'}
+                </span>
+                <span className="text-xs font-mono text-slate-700">
+                  {activeAiModel || '-'}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-4">
@@ -2952,7 +2984,7 @@ function App() {
                 </div>
               )}
 
-              {/* GEMINI AI EXTRACTION */}
+              {/* AI EXTRACTION */}
               <div className="bg-indigo-900 rounded-2xl shadow-xl p-6 text-white relative overflow-hidden group">
                 <div className="absolute top-0 right-0 -mr-8 -mt-8 w-32 h-32 bg-white/10 rounded-full blur-3xl group-hover:bg-white/20 transition-all duration-500"></div>
                 <div className="relative z-10">
@@ -2960,9 +2992,9 @@ function App() {
                     <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center backdrop-blur-md">
                       <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /><path d="M5 3v4" /><path d="M19 17v4" /><path d="M3 5h4" /><path d="M17 19h4" /></svg>
                     </div>
-                    <h3 className="font-bold text-lg">Gemini Intelligence</h3>
+                    <h3 className="font-bold text-lg">AI Intelligence</h3>
                   </div>
-                  <p className="text-indigo-200 text-xs mb-4 leading-relaxed">Người dùng có thể cung cấp hoặc sửa thông tin thành nhiều đợt. Hệ thống chỉ gửi tin nhắn mới cho Gemini và cập nhật dần danh sách bên dưới.</p>
+                  <p className="text-indigo-200 text-xs mb-4 leading-relaxed">Người dùng có thể cung cấp hoặc sửa thông tin thành nhiều đợt. Hệ thống chỉ gửi tin nhắn mới cho AI đã chọn và cập nhật dần danh sách bên dưới.</p>
                   <div className="mb-4 max-h-48 overflow-y-auto space-y-2 pr-1">
                     {chatMessages.length === 0 ? (
                       <div className="rounded-xl border border-white/10 bg-white/10 p-3 text-xs text-indigo-100">
@@ -3055,7 +3087,7 @@ function App() {
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
                   </div>
                   <div>
-                    <h3 className="font-bold text-slate-800 text-sm">Sửa nội dung bằng Gemini</h3>
+                    <h3 className="font-bold text-slate-800 text-sm">Sửa nội dung bằng AI</h3>
                     <p className="text-xs text-slate-500">Mô tả thay đổi cần sửa, hệ thống sẽ tìm đúng đoạn và giữ nguyên định dạng Word.</p>
                   </div>
                 </div>
@@ -3207,7 +3239,7 @@ function App() {
                         <div className="flex items-center justify-between mb-1.5 px-1">
                           <label className="text-xs font-bold text-slate-500 font-mono break-all flex-1 pr-2" title={field}>«{field}»</label>
                           <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button onClick={() => toggleFieldLock(field)} className={`p-1 rounded hover:bg-slate-100 ${lockedFields.includes(field) ? 'text-amber-600' : 'text-slate-400'}`} title={lockedFields.includes(field) ? "Mở khóa cho Gemini" : "Khóa với Gemini"}>
+                            <button onClick={() => toggleFieldLock(field)} className={`p-1 rounded hover:bg-slate-100 ${lockedFields.includes(field) ? 'text-amber-600' : 'text-slate-400'}`} title={lockedFields.includes(field) ? "Mở khóa cho AI" : "Khóa với AI"}>
                               {lockedFields.includes(field) ? '🔒' : '🔓'}
                             </button>
                             <button onClick={() => deleteField(field)} className="p-1 rounded hover:bg-red-50 text-red-400" title="Xóa">
@@ -3261,19 +3293,19 @@ function App() {
 
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
-                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Gemini total</p>
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">AI total</p>
                 <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.total_tokens.toLocaleString()}</p>
-                <p className="text-xs text-slate-500 mt-1">Tổng token Gemini qua toàn bộ bước</p>
+                <p className="text-xs text-slate-500 mt-1">Tổng token AI qua toàn bộ bước</p>
               </div>
               <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
                 <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Prompt tokens</p>
                 <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.prompt_tokens.toLocaleString()}</p>
-                <p className="text-xs text-slate-500 mt-1">Token đầu vào cho Gemini</p>
+                <p className="text-xs text-slate-500 mt-1">Token đầu vào cho AI</p>
               </div>
               <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
                 <p className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">Completion tokens</p>
                 <p className="mt-2 text-3xl font-black text-slate-900">{geminiUsage.completion_tokens.toLocaleString()}</p>
-                <p className="text-xs text-slate-500 mt-1">Token đầu ra từ Gemini</p>
+                <p className="text-xs text-slate-500 mt-1">Token đầu ra từ AI</p>
               </div>
             </div>
 

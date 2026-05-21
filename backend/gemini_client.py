@@ -5,6 +5,8 @@ Used for extracting data from context and analyzing document structure
 import json
 import re
 import logging
+import urllib.error
+import urllib.request
 from google import genai
 from typing import Any
 
@@ -17,17 +19,36 @@ class GeminiClient:
     """Simple client for Gemini API - text extraction and analysis"""
     FULL_CONTEXT_PAGE_THRESHOLD = 5
 
-    def __init__(self, api_key: str):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        provider: str = "gemini",
+        model_name: str | None = None,
+        ollama_base_url: str = "http://localhost:11434",
+    ):
         """Initialize Gemini client
 
         Args:
             api_key: Gemini API key
         """
-        if not bool(api_key and api_key != "your_gemini_api_key_here"):
-            raise ValueError("GEMINI_API_KEY not configured. Please set it in .env file")
+        self.provider = (provider or "gemini").strip().lower()
+        self.ollama_base_url = (ollama_base_url or "http://localhost:11434").rstrip("/")
+        self.client = None
+        self.model = self
 
-        self.client = genai.Client(api_key=api_key)
-        self.model_name = 'gemini-3.1-flash-lite-preview'
+        if not (model_name and str(model_name).strip()):
+            raise ValueError("AI model is not configured. Set GEMINI_MODEL or OLLAMA_MODEL in .env")
+
+        if self.provider == "ollama":
+            self.model_name = str(model_name).strip()
+        elif self.provider == "gemini":
+            if not bool(api_key and api_key != "your_gemini_api_key_here"):
+                raise ValueError("GEMINI_API_KEY not configured. Please set it in .env file")
+            self.client = genai.Client(api_key=api_key)
+            self.model_name = str(model_name).strip()
+        else:
+            raise ValueError(f"Unsupported AI provider: {provider}")
+
         self._usage_total = self._empty_usage()
         self.last_usage = self._empty_usage()
 
@@ -71,6 +92,49 @@ class GeminiClient:
             self._usage_total[key] += usage.get(key, 0)
 
         return usage
+
+    def generate_content(self, prompt: str, **_kwargs) -> Any:
+        """Generate content using the selected provider.
+
+        Kept compatible with the old google-genai `model.generate_content(prompt)`
+        call shape used in template_manager.
+        """
+        if self.provider == "ollama":
+            return self._generate_ollama(prompt)
+
+        return self.client.models.generate_content(model=self.model_name, contents=prompt)
+
+    def _generate_ollama(self, prompt: str) -> Any:
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+        }
+        request = urllib.request.Request(
+            f"{self.ollama_base_url}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Ollama request failed at {self.ollama_base_url}: {exc}") from exc
+
+        class OllamaResponse:
+            pass
+
+        result = OllamaResponse()
+        result.text = body.get("response", "")
+        result.usage_metadata = {
+            "prompt_token_count": int(body.get("prompt_eval_count") or 0),
+            "candidates_token_count": int(body.get("eval_count") or 0),
+            "total_token_count": int(body.get("prompt_eval_count") or 0) + int(body.get("eval_count") or 0),
+        }
+        return result
 
     def get_usage_summary(self) -> dict:
         """Return cumulative Gemini usage for this client instance."""
@@ -143,6 +207,24 @@ class GeminiClient:
             return json.loads(result.strip())
         except json.JSONDecodeError:
             return {}
+
+    @staticmethod
+    def _normalize_field_name(value: str) -> str:
+        """Return the bare MERGEFIELD name from AI/output placeholder text."""
+        if not value:
+            return ""
+
+        value = str(value).strip()
+        placeholder_match = re.fullmatch(r'[«<]\s*([^»>]+?)\s*[»>]', value)
+        if placeholder_match:
+            value = placeholder_match.group(1)
+
+        value = value.strip().strip('"\'`')
+        mergefield_match = re.search(r'MERGEFIELD\s+([^\s\\]+)', value, flags=re.IGNORECASE)
+        if mergefield_match:
+            value = mergefield_match.group(1)
+
+        return value.strip().strip('«»<>"\'`')
 
     def _detect_location_date_line_renames(
         self,
@@ -364,7 +446,7 @@ QUY TẮC:
 JSON:"""
 
         try:
-            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            response = self.generate_content(prompt)
             self._record_usage(response)
             data = self.parse_gemini_json_response(response.text)
 
@@ -453,7 +535,7 @@ SCHEMA:
 JSON:"""
 
         try:
-            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            response = self.generate_content(prompt)
             self._record_usage(response)
             result = self.parse_gemini_json_response(response.text)
 
@@ -633,7 +715,7 @@ Trả về JSON với format sau:
 Chỉ trả về JSON, không có text khác."""
 
         try:
-            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            response = self.generate_content(prompt)
             self._record_usage(response)
             analysis = self.parse_gemini_json_response(response.text)
 
@@ -777,14 +859,17 @@ QUAN TRỌNG - PHÂN TÍCH CONTEXT TRƯỚC/SAU ĐỂ PHÂN BIỆT LOẠI vs GI�
 JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
 
         try:
-            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            response = self.generate_content(prompt)
             self._record_usage(response)
             result = self.parse_gemini_json_response(response.text)
+            current_field_set = set(current_fields)
 
             for item in result.get("renames", []):
-                old = item.get("current_name", "")
-                new = item.get("suggested_name", "")
+                old = self._normalize_field_name(item.get("current_name", ""))
+                new = self._normalize_field_name(item.get("suggested_name", ""))
                 if old and new and old != new:
+                    if old not in current_field_set:
+                        continue
                     all_renames[old] = new
                     print(f"{old} → {new}")
 
@@ -908,7 +993,7 @@ NHỚ: Không bao giờ thêm số thứ tự vào tên. Hệ thống sẽ tự 
 Chỉ trả về JSON, không có text khác."""
 
         try:
-            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            response = self.generate_content(prompt)
             self._record_usage(response)
             result = self.parse_gemini_json_response(response.text)
 

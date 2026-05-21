@@ -36,7 +36,9 @@ function FileUpload({ onComplete }) {
         fields: result.fields,
         previewHtml: result.html_preview || '',
         previewFields: result.fields,
-        geminiUsage: result.gemini_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+        geminiUsage: result.ai_usage || result.gemini_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        aiProvider: result.ai_provider || '',
+        aiModel: result.ai_model || ''
       })
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Upload thất bại. Vui lòng thử lại.')
@@ -75,7 +77,7 @@ function FileUpload({ onComplete }) {
             </div>
             <div className="space-y-2">
               <p className="text-xl font-bold text-slate-800">Đang xử lý tài liệu...</p>
-              <p className="text-sm text-slate-500">Gemini đang trích xuất cấu trúc và placeholder</p>
+              <p className="text-sm text-slate-500">AI đang trích xuất cấu trúc và placeholder</p>
             </div>
           </div>
         ) : (

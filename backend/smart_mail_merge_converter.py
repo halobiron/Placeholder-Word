@@ -27,7 +27,14 @@ PLACEHOLDER_PATTERN = re.compile(r'([._…‥⋯]*[…‥⋯][._…‥⋯]*|(?=(
 class SmartMailMergeConverter:
     """Convert Vietnamese .docx forms to Mail Merge templates with intelligent field naming"""
 
-    def __init__(self, doc_path, gemini_api_key: Optional[str] = None):
+    def __init__(
+        self,
+        doc_path,
+        gemini_api_key: Optional[str] = None,
+        ai_provider: str = "gemini",
+        ai_model: Optional[str] = None,
+        ollama_base_url: str = "http://localhost:11434",
+    ):
         """Initialize converter with document
 
         Args:
@@ -36,6 +43,9 @@ class SmartMailMergeConverter:
         """
         self.doc = Document(doc_path)
         self.gemini_api_key = gemini_api_key
+        self.ai_provider = ai_provider
+        self.ai_model = ai_model
+        self.ollama_base_url = ollama_base_url
         self._gemini_client = None
         self.used_labels = {}   # base_label -> count of times used
         self.all_field_names = []  # ordered list of all generated field names (incl. _2, _3)
@@ -47,10 +57,15 @@ class SmartMailMergeConverter:
     @property
     def gemini_client(self):
         """Lazy-load Gemini client only when needed"""
-        if self._gemini_client is None and self.gemini_api_key:
+        if self._gemini_client is None and (self.gemini_api_key or self.ai_provider == "ollama"):
             from gemini_client import GeminiClient
             try:
-                self._gemini_client = GeminiClient(self.gemini_api_key)
+                self._gemini_client = GeminiClient(
+                    self.gemini_api_key,
+                    provider=self.ai_provider,
+                    model_name=self.ai_model,
+                    ollama_base_url=self.ollama_base_url,
+                )
             except ValueError:
                 # API key not configured, fall back to rule-based
                 pass

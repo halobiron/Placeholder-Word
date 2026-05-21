@@ -2,6 +2,11 @@ import axios from 'axios'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
+export const getSystemInfo = async () => {
+  const response = await axios.get(`${API_BASE}/`)
+  return response.data
+}
+
 export const convertDocx = async (file) => {
   const formData = new FormData()
   formData.append('file', file)
@@ -175,7 +180,6 @@ export const suggestFieldName = async (templateId, blockIndex, paraInCell = null
   if (paraInCell !== null) {
     formData.append('para_in_cell', paraInCell)
   }
-
   const response = await axios.post(`${API_BASE}/suggest-field-name`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
@@ -418,7 +422,6 @@ export const semanticEditTemplate = async (templateId, instruction, validateOnly
   if (plannedEdits) {
     formData.append('planned_edits', JSON.stringify(plannedEdits))
   }
-
   const response = await axios.post(`${API_BASE}/semantic-edit`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',

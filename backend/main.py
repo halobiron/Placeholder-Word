@@ -98,6 +98,33 @@ def empty_gemini_usage() -> dict:
     }
 
 
+def resolve_ai_model(provider: str) -> str:
+    model = DEFAULT_OLLAMA_MODEL if provider == "ollama" else DEFAULT_GEMINI_MODEL
+    clean_model = (model or "").strip()
+    if not clean_model:
+        env_name = "OLLAMA_MODEL" if provider == "ollama" else "GEMINI_MODEL"
+        raise ValueError(f"{env_name} is required when AI_PROVIDER={provider}")
+    return clean_model
+
+
+def create_ai_client() -> GeminiClient:
+    return GeminiClient(
+        GEMINI_API_KEY,
+        provider=DEFAULT_AI_PROVIDER,
+        model_name=resolve_ai_model(DEFAULT_AI_PROVIDER),
+        ollama_base_url=OLLAMA_BASE_URL,
+    )
+
+
+def processor_for_ai() -> MailMergeProcessor:
+    return MailMergeProcessor(
+        gemini_api_key=GEMINI_API_KEY,
+        ai_provider=DEFAULT_AI_PROVIDER,
+        ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
+        ollama_base_url=OLLAMA_BASE_URL,
+    )
+
+
 def apply_batch_update_operations(
     template_id: str,
     template_path: Path,
@@ -275,7 +302,14 @@ load_dotenv()
 # Configuration
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DEFAULT_AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").strip().lower()
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL")
+DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+if DEFAULT_AI_PROVIDER not in {"gemini", "ollama"}:
+    raise ValueError(f"Unsupported AI_PROVIDER: {DEFAULT_AI_PROVIDER}")
 
 # Initialize FastAPI
 app = FastAPI(
@@ -300,6 +334,8 @@ async def root():
     return {
         "status": "OK",
         "message": "Mail Merge Placeholder System API is running",
+        "ai_provider": DEFAULT_AI_PROVIDER,
+        "ai_model": resolve_ai_model(DEFAULT_AI_PROVIDER),
         "endpoints": {
             "root": "GET / (Health Check)",
             "convert": "POST /convert",
@@ -313,7 +349,7 @@ async def root():
 @handle_endpoint_errors("convert to template")
 async def convert_to_template(
     file: UploadFile = File(...),
-    auto_fill_tables: bool = Form(True)
+    auto_fill_tables: bool = Form(True),
 ):
     """Upload .docx and convert to Mail Merge template
 
@@ -345,7 +381,7 @@ async def convert_to_template(
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+        processor = processor_for_ai()
         template_id = str(uuid.uuid4())
         output_path = TEMPLATE_DIR / f"{template_id}.docx"
         result = processor.convert_to_mail_merge(str(temp_path), str(output_path), auto_fill_tables=auto_fill_tables)
@@ -358,6 +394,10 @@ async def convert_to_template(
             "html_preview": result["html_preview"],
             "download_url": f"/download/{result['template_id']}",
             "method": result.get("method", "smart_converter"),
+            "ai_provider": result.get("ai_provider", DEFAULT_AI_PROVIDER),
+            "ai_model": result.get("ai_model", resolve_ai_model(DEFAULT_AI_PROVIDER)),
+            "ai_usage": result.get("ai_usage", result.get("gemini_usage", empty_gemini_usage())),
+            "ai_usage_steps": result.get("ai_usage_steps", result.get("gemini_usage_steps", [])),
             "gemini_usage": result.get("gemini_usage", empty_gemini_usage()),
             "gemini_usage_steps": result.get("gemini_usage_steps", [])
         }
@@ -377,7 +417,7 @@ async def merge_template(
     context: str = Form(None),
     field_values: str = Form(None),
     active_fields: str = Form(None),
-    locked_fields: str = Form(None)
+    locked_fields: str = Form(None),
 ):
     """Fill Mail Merge template with data
 
@@ -418,7 +458,7 @@ async def merge_template(
 
     elif context:
         # Use Gemini to extract from context
-        gemini_client = GeminiClient(GEMINI_API_KEY)
+        gemini_client = create_ai_client()
 
         locked_f = set(parse_json_list(locked_fields))
 
@@ -464,7 +504,7 @@ async def merge_template(
 @handle_endpoint_errors("start fill draft")
 async def start_fill_draft(
     template_id: str = Form(...),
-    locked_fields: str = Form(None)
+    locked_fields: str = Form(None),
 ):
     """Create a fill draft so users can provide data over multiple messages."""
     template_path = validate_template_path(template_id)
@@ -500,7 +540,7 @@ async def continue_fill_draft(
     draft_id: str,
     message: str = Form(...),
     field_values: str = Form(None),
-    locked_fields: str = Form(None)
+    locked_fields: str = Form(None),
 ):
     """Extract field additions or corrections from the newest user message."""
     draft = DRAFT_SESSIONS.get(draft_id)
@@ -528,7 +568,7 @@ async def continue_fill_draft(
             user_context=message,
         )
 
-        gemini_client = GeminiClient(GEMINI_API_KEY)
+        gemini_client = create_ai_client()
         extracted = gemini_client.extract_data_from_context(
             context=message,
             template_fields=fields_to_extract,
@@ -683,7 +723,9 @@ async def preview_file(file_id: str):
 
 @app.post("/suggest-placeholders")
 @handle_endpoint_errors("suggest placeholders")
-async def suggest_placeholders(template_id: str = Form(...)):
+async def suggest_placeholders(
+    template_id: str = Form(...),
+):
     """Analyze template with AI to detect missing placeholders
 
     Args:
@@ -709,7 +751,7 @@ async def suggest_placeholders(template_id: str = Form(...)):
         )
 
     # Analyze with Gemini
-    gemini_client = GeminiClient(GEMINI_API_KEY)
+    gemini_client = create_ai_client()
     analysis = gemini_client.analyze_document_for_placeholders(
         structured_content,
         existing_fields
@@ -729,7 +771,7 @@ async def suggest_placeholders(template_id: str = Form(...)):
 @handle_endpoint_errors("apply AI suggestions")
 async def apply_ai_suggestions(
     template_id: str = Form(...),
-    suggestions: str = Form(...)  # JSON string of suggestions to apply
+    suggestions: str = Form(...),  # JSON string of suggestions to apply
 ):
     """Apply AI-generated placeholder suggestions to template
 
@@ -751,7 +793,7 @@ async def apply_ai_suggestions(
         )
 
     # Apply each suggestion
-    processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+    processor = processor_for_ai()
     results = {
         "template_id": template_id,
         "total_suggestions": len(suggestions_list),
@@ -811,7 +853,7 @@ async def semantic_document_edit(
     template_id: str = Form(...),
     instruction: str = Form(""),
     validate_only: bool = Form(False),
-    planned_edits: str = Form(None)
+    planned_edits: str = Form(None),
 ):
     """Edit existing document text from a natural-language instruction.
 
@@ -847,7 +889,7 @@ async def semantic_document_edit(
             if edit.get("block_index") is not None and str(edit.get("old_text") or "").strip()
         ]
     else:
-        gemini_client = GeminiClient(GEMINI_API_KEY)
+        gemini_client = create_ai_client()
         plan = gemini_client.plan_document_text_edits(clean_instruction, structured_content)
         edits = plan.get("edits", [])
         warnings = plan.get("warnings", [])
@@ -906,7 +948,7 @@ async def semantic_document_edit(
 async def suggest_field_name(
     template_id: str = Form(...),
     block_index: int = Form(...),
-    para_in_cell: int = Form(None)
+    para_in_cell: int = Form(None),
 ):
     """Suggest a field name based on the selected block's text
 
@@ -921,7 +963,7 @@ async def suggest_field_name(
     template_path = validate_template_path(template_id)
 
     # Initialize processor
-    processor = MailMergeProcessor(gemini_api_key=GEMINI_API_KEY)
+    processor = processor_for_ai()
 
     # Extract structured content
     structured_content = processor.extract_structured_content(str(template_path))
@@ -1491,7 +1533,13 @@ async def preview_table_expansion(request: TableExpansionPreviewRequest):
     template_path = validate_template_path(request.template_id)
 
     # Initialize converter
-    converter = SmartMailMergeConverter(str(template_path), gemini_api_key=GEMINI_API_KEY)
+    converter = SmartMailMergeConverter(
+        str(template_path),
+        gemini_api_key=GEMINI_API_KEY,
+        ai_provider=DEFAULT_AI_PROVIDER,
+        ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
+        ollama_base_url=OLLAMA_BASE_URL,
+    )
 
     # Analyze context requirements
     requirements = converter._analyze_context_requirements(request.context_data)
@@ -1576,7 +1624,13 @@ async def merge_with_table_expansion(request: TableExpansionRequest):
     template_path = validate_template_path(request.template_id)
 
     # Analyze context requirements
-    converter = SmartMailMergeConverter(str(template_path), gemini_api_key=GEMINI_API_KEY)
+    converter = SmartMailMergeConverter(
+        str(template_path),
+        gemini_api_key=GEMINI_API_KEY,
+        ai_provider=DEFAULT_AI_PROVIDER,
+        ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
+        ollama_base_url=OLLAMA_BASE_URL,
+    )
     requirements = converter._analyze_context_requirements(request.context_data)
 
     if request.preview_only:
@@ -1610,7 +1664,13 @@ async def merge_with_table_expansion(request: TableExpansionRequest):
         shutil.copy2(template_path, working_template)
 
         # Re-initialize converter with working copy
-        converter = SmartMailMergeConverter(str(working_template), gemini_api_key=GEMINI_API_KEY)
+        converter = SmartMailMergeConverter(
+            str(working_template),
+            gemini_api_key=GEMINI_API_KEY,
+            ai_provider=DEFAULT_AI_PROVIDER,
+            ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
+            ollama_base_url=OLLAMA_BASE_URL,
+        )
 
         # Expand tables if needed
         tables_expanded = 0
