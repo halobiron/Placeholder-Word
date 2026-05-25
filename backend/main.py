@@ -171,27 +171,27 @@ def apply_batch_update_operations(
                     break
                 continue
 
+            if batch_request.validate_only:
+                results["successful"] += 1
+                results["operation_results"].append({
+                    "index": i,
+                    "type": op.type,
+                    "status": "validated"
+                })
+                continue
+
             try:
                 execute_operation(editor, op)
             except Exception as e:
                 error_msg = f"Op {i} ({op.type}): {str(e)}"
-                if batch_request.validate_only:
-                    results["validation_errors"].append(error_msg)
-                    results["operation_results"].append({
-                        "index": i,
-                        "type": op.type,
-                        "status": "validation_failed",
-                        "error": str(e)
-                    })
-                else:
-                    results["failed"] += 1
-                    results["execution_errors"].append(error_msg)
-                    results["operation_results"].append({
-                        "index": i,
-                        "type": op.type,
-                        "status": "failed",
-                        "error": str(e)
-                    })
+                results["failed"] += 1
+                results["execution_errors"].append(error_msg)
+                results["operation_results"].append({
+                    "index": i,
+                    "type": op.type,
+                    "status": "failed",
+                    "error": str(e)
+                })
                 if batch_request.stop_on_error:
                     raise HTTPException(
                         status_code=500,
@@ -1413,31 +1413,30 @@ async def batch_update(request: Request):
                     break
                 continue
 
+            if batch_request.validate_only:
+                results["successful"] += 1
+                results["operation_results"].append({
+                    "index": i,
+                    "type": op.type,
+                    "status": "validated"
+                })
+                logger.debug(f" Op {i} ({op.type}): ✓ VALIDATED")
+                continue
+
             try:
                 execute_operation(editor, op)
             except Exception as e:
                 error_msg = f"Op {i} ({op.type}): {str(e)}"
-                if batch_request.validate_only:
-                    results["validation_errors"].append(error_msg)
-                    results["operation_results"].append({
-                        "index": i,
-                        "type": op.type,
-                        "status": "validation_failed",
-                        "error": str(e)
-                    })
-                else:
-                    results["failed"] += 1
-                    results["execution_errors"].append(error_msg)
-                    results["operation_results"].append({
-                        "index": i,
-                        "type": op.type,
-                        "status": "failed",
-                        "error": str(e)
-                    })
+                results["failed"] += 1
+                results["execution_errors"].append(error_msg)
+                results["operation_results"].append({
+                    "index": i,
+                    "type": op.type,
+                    "status": "failed",
+                    "error": str(e)
+                })
                 logger.debug(f" Op {i} ({op.type}): ✗ EXECUTION FAILED - {str(e)}")
                 if batch_request.stop_on_error:
-                    if batch_request.validate_only:
-                        break
                     raise HTTPException(
                         status_code=500,
                         detail={

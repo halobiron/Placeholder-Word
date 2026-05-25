@@ -260,6 +260,21 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
 
 def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
     """Execute text operations"""
+    def _is_similar_enough_for_fallback(old_text: str, current_text: str) -> bool:
+        old_norm = (editor._normalize_text(old_text or "") or "").strip().lower()
+        cur_norm = (editor._normalize_text(current_text or "") or "").strip().lower()
+        if not old_norm or not cur_norm:
+            return True
+        if old_norm in cur_norm or cur_norm in old_norm:
+            return True
+
+        old_tokens = {t for t in old_norm.split() if t}
+        cur_tokens = {t for t in cur_norm.split() if t}
+        if len(old_tokens) < 3 or len(cur_tokens) < 3:
+            return False
+        overlap = len(old_tokens & cur_tokens) / max(1, len(old_tokens))
+        return overlap >= 0.5
+
     para_index = validate_block_index(editor, op.block_index)
     block_map = getattr(editor, "_block_to_para_index_map", None) or {}
     block_data = block_map.get(op.block_index)
@@ -302,6 +317,19 @@ def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
                 op.block_index, para_index, op.para_in_cell, op.old_text, current_text
             )
 
+            # Try nearby paragraphs first in case block-to-paragraph mapping drifted.
+            if op.old_text:
+                for delta in (-3, -2, -1, 1, 2, 3):
+                    candidate = para_index + delta
+                    if candidate < 0:
+                        continue
+                    if editor.replace_text_at_position(op.old_text, op.new_text, candidate):
+                        logger.info(
+                            "update_text recovered via nearby paragraph: block_index=%s para_index=%s candidate_para_index=%s",
+                            op.block_index, para_index, candidate
+                        )
+                        return
+
             cell = block_data.get("cell") if block_data else None
             non_empty_cell_paragraphs = 0
             if cell is not None:
@@ -321,7 +349,7 @@ def _execute_text_op(editor: DocxFullEditor, op: Operation) -> None:
                 or not (block_data and block_data.get("type") == "table_cell")
                 or single_meaningful_paragraph_cell
             )
-            if allow_fallback and editor.replace_paragraph_text_at_index(para_index, op.new_text):
+            if allow_fallback and _is_similar_enough_for_fallback(op.old_text, current_text) and editor.replace_paragraph_text_at_index(para_index, op.new_text):
                 logger.info(
                     "update_text fallback paragraph rewrite succeeded: block_index=%s para_index=%s para_in_cell=%s",
                     op.block_index, para_index, op.para_in_cell
