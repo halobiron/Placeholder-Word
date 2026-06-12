@@ -98,7 +98,14 @@
       "mcp__zread__get_repo_structure",
       "mcp__zread__search_doc",
       "mcp__plugin_everything-claude-code_memory__search_nodes",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Read(//Users/aiot/Documents/**)",
+      "Read(//Users/aiot/**)",
+      "Bash(/bin/python3 *)",
+      "Bash(/usr/bin/python3 *)",
+      "Bash(sysctl *)",
+      "Bash(/Users/aiot/Documents/Placeholder-Word/backend/.venv/bin/pip install *)",
+      "Bash(/Users/aiot/Documents/Placeholder-Word/backend/.venv/bin/python /Users/aiot/Documents/Placeholder-Word/backend/test_finetuned.py)"
     ]
   },
   "enabledMcpjsonServers": [

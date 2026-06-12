@@ -32,12 +32,19 @@ class MailMergeProcessor:
         ai_provider: str = "gemini",
         ai_model: str | None = None,
         ollama_base_url: str = "http://localhost:11434",
+        finetuned_path: str = None,
+        finetuned_base_model: str = None,
     ):
         """Initialize processor
 
         Args:
             gemini_api_key: Gemini API key for smart field naming (optional)
             timeout: Not used, kept for backward compatibility
+            ai_provider: AI provider (gemini, ollama, finetuned)
+            ai_model: Model name for gemini/ollama
+            ollama_base_url: Ollama server URL
+            finetuned_path: Path to fine-tuned model adapter (for finetuned provider)
+            finetuned_base_model: Base model name for fine-tuned model
         """
         self.w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         self._gemini_api_key = gemini_api_key
@@ -50,8 +57,10 @@ class MailMergeProcessor:
                 provider=ai_provider,
                 model_name=ai_model,
                 ollama_base_url=ollama_base_url,
+                finetuned_path=finetuned_path,
+                finetuned_base_model=finetuned_base_model,
             )
-            if gemini_api_key or ai_provider == "ollama"
+            if gemini_api_key or ai_provider in ["ollama", "finetuned"]
             else None
         )
 

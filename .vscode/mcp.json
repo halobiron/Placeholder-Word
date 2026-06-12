@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "code-review-graph": {
+      "command": "/Users/aiot/Documents/Placeholder-Word/backend/.venv/bin/python3",
+      "args": [
+        "-m",
+        "code_review_graph",
+        "serve"
+      ],
+      "cwd": "/Users/aiot/Documents/Placeholder-Word",
+      "type": "stdio"
+    }
+  }
+}

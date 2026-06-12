@@ -3,12 +3,15 @@ Gemini Client for text extraction and document analysis
 Used for extracting data from context and analyzing document structure
 """
 import json
-import re
 import logging
+import re
 import urllib.error
 import urllib.request
 from google import genai
 from typing import Any
+
+# Lazy load torch only when fine-tuned model is used
+torch = None
 
 # Tắt các log info lặp lại từ google_genai và httpx
 logging.getLogger('google_genai.models').setLevel(logging.WARNING)
@@ -19,38 +22,143 @@ class GeminiClient:
     """Simple client for Gemini API - text extraction and analysis"""
     FULL_CONTEXT_PAGE_THRESHOLD = 5
 
+    @staticmethod
+    def _resolve_finetuned_load_config(torch_module):
+        """Choose a single-device load strategy compatible with PEFT adapter loading."""
+        if torch_module.cuda.is_available():
+            return {"device": "cuda", "dtype": torch_module.float16}
+
+        mps = getattr(torch_module.backends, "mps", None)
+        if mps and mps.is_available():
+            return {"device": "mps", "dtype": torch_module.float16}
+
+        return {"device": "cpu", "dtype": torch_module.float32}
+
     def __init__(
         self,
         api_key: str | None = None,
         provider: str = "gemini",
         model_name: str | None = None,
         ollama_base_url: str = "http://localhost:11434",
+        finetuned_path: str | None = None,
+        finetuned_base_model: str | None = None,
     ):
         """Initialize Gemini client
 
         Args:
             api_key: Gemini API key
+            provider: AI provider (gemini, ollama, finetuned)
+            model_name: Model name for gemini/ollama
+            ollama_base_url: Ollama server URL
+            finetuned_path: Path to fine-tuned model adapter (for finetuned provider)
+            finetuned_base_model: Base model name for fine-tuned model (e.g., Qwen/Qwen2.5-0.5B-Instruct)
         """
         self.provider = (provider or "gemini").strip().lower()
         self.ollama_base_url = (ollama_base_url or "http://localhost:11434").rstrip("/")
         self.client = None
-        self.model = self
+        self.model = None
+        self.finetuned_model = None
+        self.finetuned_tokenizer = None
 
-        if not (model_name and str(model_name).strip()):
-            raise ValueError("AI model is not configured. Set GEMINI_MODEL or OLLAMA_MODEL in .env")
+        if self.provider == "finetuned":
+            if not finetuned_path:
+                raise ValueError("FINETUNED_PATH not configured. Please set it in .env file")
+            if not finetuned_base_model:
+                raise ValueError("FINETUNED_BASE_MODEL not configured. Please set it in .env file")
 
-        if self.provider == "ollama":
+            # Load fine-tuned model
+            try:
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                import torch
+                from peft import PeftModel
+
+                logging.info(f"Loading fine-tuned model from: {finetuned_path}")
+                logging.info(f"Base model: {finetuned_base_model}")
+                load_config = self._resolve_finetuned_load_config(torch)
+                logging.info(
+                    "Fine-tuned model load target: %s (%s)",
+                    load_config["device"],
+                    load_config["dtype"],
+                )
+
+                # Load tokenizer
+                print("Loading tokenizer...")
+                self.finetuned_tokenizer = AutoTokenizer.from_pretrained(
+                    finetuned_base_model,
+                    trust_remote_code=True
+                )
+                if self.finetuned_tokenizer.pad_token_id is None:
+                    eos_token = self.finetuned_tokenizer.eos_token
+                    if not isinstance(eos_token, str):
+                        eos_token_id = self.finetuned_tokenizer.eos_token_id
+                        if isinstance(eos_token_id, int):
+                            eos_token = self.finetuned_tokenizer.convert_ids_to_tokens(eos_token_id)
+                    if isinstance(eos_token, str):
+                        self.finetuned_tokenizer.pad_token = eos_token
+                    else:
+                        self.finetuned_tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+                logging.info("Tokenizer loaded")
+
+                # Load base model with LoRA adapter
+                print("Loading base model (this may take 30-60 seconds)...")
+                self.finetuned_model = AutoModelForCausalLM.from_pretrained(
+                    finetuned_base_model,
+                    torch_dtype=load_config["dtype"],
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True
+                )
+                self.finetuned_model.to(load_config["device"])
+                if len(self.finetuned_tokenizer) > self.finetuned_model.get_input_embeddings().num_embeddings:
+                    self.finetuned_model.resize_token_embeddings(len(self.finetuned_tokenizer))
+                logging.info("Base model loaded")
+
+                # Load LoRA adapter
+                print("Loading LoRA adapter...")
+                self.finetuned_model = PeftModel.from_pretrained(
+                    self.finetuned_model,
+                    finetuned_path
+                )
+                self.finetuned_model.to(load_config["device"])
+                logging.info("LoRA adapter loaded")
+
+                self.finetuned_model.eval()
+                self.model_name = f"{finetuned_base_model}+{finetuned_path}"
+                print(f"✅ Fine-tuned model loaded successfully!")
+                logging.info("Fine-tuned model loaded successfully")
+
+            except ImportError as e:
+                raise ValueError(
+                    f"transformers or peft not installed. Install with: pip install transformers peft torch"
+                ) from e
+            except Exception as e:
+                raise ValueError(f"Failed to load fine-tuned model: {e}") from e
+
+        elif self.provider == "ollama":
+            if not (model_name and str(model_name).strip()):
+                raise ValueError("AI model is not configured. Set OLLAMA_MODEL in .env")
             self.model_name = str(model_name).strip()
+
         elif self.provider == "gemini":
+            if not (model_name and str(model_name).strip()):
+                raise ValueError("AI model is not configured. Set GEMINI_MODEL in .env")
             if not bool(api_key and api_key != "your_gemini_api_key_here"):
                 raise ValueError("GEMINI_API_KEY not configured. Please set it in .env file")
             self.client = genai.Client(api_key=api_key)
             self.model_name = str(model_name).strip()
+
         else:
             raise ValueError(f"Unsupported AI provider: {provider}")
 
         self._usage_total = self._empty_usage()
         self.last_usage = self._empty_usage()
+        self._torch = None  # Will be imported when needed
+
+    def _get_torch(self):
+        """Lazy import torch to avoid loading it unnecessarily"""
+        if self._torch is None:
+            import torch
+            self._torch = torch
+        return self._torch
 
     @staticmethod
     def _empty_usage() -> dict[str, int]:
@@ -99,6 +207,8 @@ class GeminiClient:
         Kept compatible with the old google-genai `model.generate_content(prompt)`
         call shape used in template_manager.
         """
+        if self.provider == "finetuned":
+            return self._generate_finetuned(prompt)
         if self.provider == "ollama":
             return self._generate_ollama(prompt)
 
@@ -135,6 +245,86 @@ class GeminiClient:
             "total_token_count": int(body.get("prompt_eval_count") or 0) + int(body.get("eval_count") or 0),
         }
         return result
+
+    def _generate_finetuned(self, prompt: str) -> Any:
+        """Generate content using fine-tuned model"""
+        try:
+            # Format prompt for Qwen model - use direct text instead of chat template
+            # Qwen3 uses chat format but we can also use direct text
+            text_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+            # Tokenize input. Keep the end of the prompt because it contains
+            # the required JSON schema and assistant marker. The default right
+            # truncation can cut those off and makes the model continue the
+            # document context instead of answering with JSON.
+            previous_truncation_side = self.finetuned_tokenizer.truncation_side
+            self.finetuned_tokenizer.truncation_side = "left"
+            try:
+                inputs = self.finetuned_tokenizer(
+                    text_prompt,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=2048,
+                ).to(self.finetuned_model.device)
+            finally:
+                self.finetuned_tokenizer.truncation_side = previous_truncation_side
+
+            input_ids = inputs["input_ids"]
+            attention_mask = inputs["attention_mask"]
+
+            # Generate with optimized settings
+            torch = self._get_torch()
+            with torch.no_grad():
+                im_end_token_id = self.finetuned_tokenizer.convert_tokens_to_ids("<|im_end|>")
+                eos_token_ids = [self.finetuned_tokenizer.eos_token_id]
+                if isinstance(im_end_token_id, int) and im_end_token_id >= 0:
+                    eos_token_ids.append(im_end_token_id)
+
+                outputs = self.finetuned_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=768,
+                    do_sample=False,
+                    pad_token_id=self.finetuned_tokenizer.pad_token_id,
+                    eos_token_id=eos_token_ids,
+                    use_cache=True,  # Enable KV cache for faster generation
+                )
+
+            # Decode response
+            response_text = self.finetuned_tokenizer.decode(
+                outputs[0][input_ids.shape[1]:],
+                skip_special_tokens=True
+            ).strip()
+
+            # Some chat-tuned local models may still echo role markers or a part
+            # of the prompt. Keep only the assistant completion when possible.
+            if "<|im_start|>assistant" in response_text:
+                response_text = response_text.rsplit("<|im_start|>assistant", 1)[-1]
+            if "<|im_end|>" in response_text:
+                response_text = response_text.split("<|im_end|>", 1)[0]
+            response_text = response_text.strip()
+
+            # Calculate approximate token counts
+            prompt_tokens = input_ids.shape[1]
+            completion_tokens = outputs.shape[1] - input_ids.shape[1]
+            total_tokens = prompt_tokens + completion_tokens
+
+            class FinetunedResponse:
+                pass
+
+            result = FinetunedResponse()
+            result.text = response_text
+            result.usage_metadata = {
+                "prompt_token_count": prompt_tokens,
+                "candidates_token_count": completion_tokens,
+                "total_token_count": total_tokens,
+            }
+            return result
+
+        except Exception as e:
+            logging.error(f"Fine-tuned model generation error: {e}")
+            raise RuntimeError(f"Fine-tuned model generation failed: {e}") from e
 
     def get_usage_summary(self) -> dict:
         """Return cumulative Gemini usage for this client instance."""
@@ -188,6 +378,26 @@ class GeminiClient:
         """Parse JSON from Gemini response, extract JSON block from text."""
         result = (response_text or "").strip()
 
+        # Prefer complete JSON objects that actually contain the expected key.
+        # Fine-tuned/local models can echo prompt/context before the answer, so
+        # first '{' ... last '}' is unsafe when the echoed prompt contains JSON
+        # examples or document text.
+        decoder = json.JSONDecoder()
+        parsed_objects = []
+        for match in re.finditer(r'\{', result):
+            try:
+                parsed, _ = decoder.raw_decode(result[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                parsed_objects.append(parsed)
+
+        for parsed in reversed(parsed_objects):
+            if "renames" in parsed or "suggestions" in parsed or "fields" in parsed:
+                return parsed
+        if parsed_objects:
+            return parsed_objects[-1]
+
         # Find JSON block between { and }
         json_start = result.find('{')
         json_end = result.rfind('}') + 1
@@ -204,8 +414,11 @@ class GeminiClient:
                 result = result[:-3]
 
         try:
-            return json.loads(result.strip())
-        except json.JSONDecodeError:
+            parsed = json.loads(result.strip())
+            return parsed
+        except json.JSONDecodeError as e:
+            print(f"=== JSON PARSE FAILED: {e} ===")
+            print(f"=== Raw text to parse: {result[:500]} ===")
             return {}
 
     @staticmethod
@@ -861,20 +1074,35 @@ JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
         try:
             response = self.generate_content(prompt)
             self._record_usage(response)
+
+            # Debug: log response text
+            print(f"=== Gemini response preview: {response.text[:500]}... ===")
+
             result = self.parse_gemini_json_response(response.text)
             current_field_set = set(current_fields)
 
-            for item in result.get("renames", []):
+            renames_from_ai = result.get("renames", [])
+            print(f"=== AI suggested {len(renames_from_ai)} renames ===")
+
+            for item in renames_from_ai:
                 old = self._normalize_field_name(item.get("current_name", ""))
                 new = self._normalize_field_name(item.get("suggested_name", ""))
+
+                print(f"  Processing: {old} → {new}")
+
                 if old and new and old != new:
                     if old not in current_field_set:
+                        print(f"    SKIP: field '{old}' not in current_fields")
                         continue
                     all_renames[old] = new
-                    print(f"{old} → {new}")
+                    print(f"    ✓ ACCEPTED")
+                else:
+                    print(f"    SKIP: invalid or no change")
 
         except Exception as e:
             print(f"Gemini error: {e}")
+            import traceback
+            traceback.print_exc()
 
         print(f"=== Total renames: {len(all_renames)} ===")
         return all_renames

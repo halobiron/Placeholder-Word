@@ -99,10 +99,20 @@ def empty_gemini_usage() -> dict:
 
 
 def resolve_ai_model(provider: str) -> str:
-    model = DEFAULT_OLLAMA_MODEL if provider == "ollama" else DEFAULT_GEMINI_MODEL
+    if provider == "ollama":
+        model = DEFAULT_OLLAMA_MODEL
+        env_name = "OLLAMA_MODEL"
+    elif provider == "gemini":
+        model = DEFAULT_GEMINI_MODEL
+        env_name = "GEMINI_MODEL"
+    elif provider == "finetuned":
+        model = FINETUNED_BASE_MODEL
+        env_name = "FINETUNED_BASE_MODEL"
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
+
     clean_model = (model or "").strip()
     if not clean_model:
-        env_name = "OLLAMA_MODEL" if provider == "ollama" else "GEMINI_MODEL"
         raise ValueError(f"{env_name} is required when AI_PROVIDER={provider}")
     return clean_model
 
@@ -113,6 +123,8 @@ def create_ai_client() -> GeminiClient:
         provider=DEFAULT_AI_PROVIDER,
         model_name=resolve_ai_model(DEFAULT_AI_PROVIDER),
         ollama_base_url=OLLAMA_BASE_URL,
+        finetuned_path=FINETUNED_PATH,
+        finetuned_base_model=FINETUNED_BASE_MODEL,
     )
 
 
@@ -122,6 +134,8 @@ def processor_for_ai() -> MailMergeProcessor:
         ai_provider=DEFAULT_AI_PROVIDER,
         ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
         ollama_base_url=OLLAMA_BASE_URL,
+        finetuned_path=FINETUNED_PATH,
+        finetuned_base_model=FINETUNED_BASE_MODEL,
     )
 
 
@@ -306,9 +320,11 @@ DEFAULT_AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").strip().lower()
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL")
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+FINETUNED_PATH = os.getenv("FINETUNED_PATH")
+FINETUNED_BASE_MODEL = os.getenv("FINETUNED_BASE_MODEL")
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-if DEFAULT_AI_PROVIDER not in {"gemini", "ollama"}:
+if DEFAULT_AI_PROVIDER not in {"gemini", "ollama", "finetuned"}:
     raise ValueError(f"Unsupported AI_PROVIDER: {DEFAULT_AI_PROVIDER}")
 
 # Initialize FastAPI
