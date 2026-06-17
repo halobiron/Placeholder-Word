@@ -110,8 +110,23 @@ AI_PROVIDER=gemini
 GEMINI_MODEL=your_gemini_model_name
 OLLAMA_MODEL=your_ollama_model_name
 OLLAMA_BASE_URL=http://localhost:11434
+VLLM_MODEL=mail-merge-qwen3-context-aware
+VLLM_BASE_URL=http://localhost:8001/v1
+VLLM_API_KEY=EMPTY
+VLLM_TIMEOUT_SECONDS=420
+VLLM_MAX_TOKENS=0
 MAX_FILE_SIZE=10485760
 ```
+
+### Deploy model fine-tuned với vLLM
+
+```bash
+cd backend
+./scripts/export-finetuned-model.sh
+VLLM_API_KEY=EMPTY ./scripts/serve-vllm.sh
+```
+
+Chi tiết xem `docs/finetune-to-vllm.md`.
 
 ### Frontend (.env)
 

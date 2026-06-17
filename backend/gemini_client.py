@@ -4,6 +4,7 @@ Used for extracting data from context and analyzing document structure
 """
 import json
 import logging
+import os
 import re
 import urllib.error
 import urllib.request
@@ -22,7 +23,26 @@ class GeminiClient:
     """Simple client for Gemini API - text extraction and analysis"""
     FULL_CONTEXT_PAGE_THRESHOLD = 5
     FINETUNED_RENAME_BATCH_CHAR_LIMIT = 2400
+    VLLM_RENAME_BATCH_CHAR_LIMIT = 2200
     DEFAULT_RENAME_BATCH_CHAR_LIMIT = 12000
+
+    @staticmethod
+    def _read_int_env(name: str, default: int) -> int:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
+    @staticmethod
+    def _normalize_openai_base_url(base_url: str | None) -> str:
+        clean_url = (base_url or "http://localhost:8001").rstrip("/")
+        if clean_url.endswith("/v1"):
+            return clean_url
+        return f"{clean_url}/v1"
 
     @staticmethod
     def _resolve_finetuned_load_config(torch_module):
@@ -42,6 +62,8 @@ class GeminiClient:
         provider: str = "gemini",
         model_name: str | None = None,
         ollama_base_url: str = "http://localhost:11434",
+        openai_base_url: str = "http://localhost:8001/v1",
+        openai_api_key: str | None = None,
         finetuned_path: str | None = None,
         finetuned_base_model: str | None = None,
     ):
@@ -49,14 +71,20 @@ class GeminiClient:
 
         Args:
             api_key: Gemini API key
-            provider: AI provider (gemini, ollama, finetuned)
-            model_name: Model name for gemini/ollama
+            provider: AI provider (gemini, ollama, vllm, finetuned)
+            model_name: Model name for gemini/ollama/vllm
             ollama_base_url: Ollama server URL
+            openai_base_url: OpenAI-compatible base URL for vLLM
+            openai_api_key: Optional API key for vLLM/OpenAI-compatible endpoint
             finetuned_path: Path to fine-tuned model adapter (for finetuned provider)
             finetuned_base_model: Base model name for fine-tuned model (e.g., Qwen/Qwen2.5-0.5B-Instruct)
         """
         self.provider = (provider or "gemini").strip().lower()
         self.ollama_base_url = (ollama_base_url or "http://localhost:11434").rstrip("/")
+        self.openai_base_url = self._normalize_openai_base_url(openai_base_url)
+        self.openai_api_key = openai_api_key or "EMPTY"
+        self.vllm_timeout_seconds = self._read_int_env("VLLM_TIMEOUT_SECONDS", 420)
+        self.vllm_max_tokens = self._read_int_env("VLLM_MAX_TOKENS", 0)
         self.client = None
         self.model = None
         self.finetuned_model = None
@@ -140,6 +168,11 @@ class GeminiClient:
                 raise ValueError("AI model is not configured. Set OLLAMA_MODEL in .env")
             self.model_name = str(model_name).strip()
 
+        elif self.provider == "vllm":
+            if not (model_name and str(model_name).strip()):
+                raise ValueError("AI model is not configured. Set VLLM_MODEL in .env")
+            self.model_name = str(model_name).strip()
+
         elif self.provider == "gemini":
             if not (model_name and str(model_name).strip()):
                 raise ValueError("AI model is not configured. Set GEMINI_MODEL in .env")
@@ -203,7 +236,7 @@ class GeminiClient:
 
         return usage
 
-    def generate_content(self, prompt: str, **_kwargs) -> Any:
+    def generate_content(self, prompt: str, **kwargs) -> Any:
         """Generate content using the selected provider.
 
         Kept compatible with the old google-genai `model.generate_content(prompt)`
@@ -213,8 +246,65 @@ class GeminiClient:
             return self._generate_finetuned(prompt)
         if self.provider == "ollama":
             return self._generate_ollama(prompt)
+        if self.provider == "vllm":
+            return self._generate_openai_compatible(prompt, **kwargs)
 
         return self.client.models.generate_content(model=self.model_name, contents=prompt)
+
+    def _generate_openai_compatible(self, prompt: str, **kwargs) -> Any:
+        requested_max_tokens = kwargs.get("max_tokens")
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": "Return valid JSON when the task requests structured output."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        }
+        if isinstance(requested_max_tokens, int) and requested_max_tokens > 0:
+            payload["max_tokens"] = requested_max_tokens
+        elif self.vllm_max_tokens > 0:
+            payload["max_tokens"] = self.vllm_max_tokens
+        request = urllib.request.Request(
+            f"{self.openai_base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.openai_api_key}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.vllm_timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+            raise RuntimeError(
+                f"vLLM request failed at {self.openai_base_url}: HTTP {exc.code} {error_body}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"vLLM request failed at {self.openai_base_url}: {exc}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"vLLM request timed out after {self.vllm_timeout_seconds}s at {self.openai_base_url}"
+            ) from exc
+
+        message = (((body.get("choices") or [{}])[0]).get("message") or {})
+        usage_body = body.get("usage") or {}
+
+        class OpenAICompatibleResponse:
+            pass
+
+        result = OpenAICompatibleResponse()
+        result.text = message.get("content", "")
+        result.usage_metadata = {
+            "prompt_token_count": int(usage_body.get("prompt_tokens") or 0),
+            "candidates_token_count": int(usage_body.get("completion_tokens") or 0),
+            "total_token_count": int(usage_body.get("total_tokens") or 0),
+        }
+        return result
 
     def _generate_ollama(self, prompt: str) -> Any:
         payload = {
@@ -553,6 +643,17 @@ class GeminiClient:
         """Extract placeholder names from a compact context line."""
         return [field.strip() for field in re.findall(r'«([^»]+)»', info or "") if field.strip()]
 
+    @classmethod
+    def _estimate_rename_max_tokens(cls, batch_infos: list[str]) -> int:
+        batch_fields = {
+            field
+            for info in batch_infos or []
+            for field in cls._extract_fields_from_context_info(info)
+        }
+        field_count = max(1, len(batch_fields))
+        estimated = 192 + (field_count * 48)
+        return max(384, min(estimated, 2048))
+
     def _chunk_field_context_infos(self, field_infos: list[str]) -> list[list[str]]:
         """Split rename context into smaller batches so all placeholders reach the model."""
         if not field_infos:
@@ -561,6 +662,8 @@ class GeminiClient:
         char_limit = (
             self.FINETUNED_RENAME_BATCH_CHAR_LIMIT
             if self.provider == "finetuned"
+            else self.VLLM_RENAME_BATCH_CHAR_LIMIT
+            if self.provider == "vllm"
             else self.DEFAULT_RENAME_BATCH_CHAR_LIMIT
         )
 
@@ -1136,9 +1239,23 @@ JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
                     for info in batch_infos
                     for field in self._extract_fields_from_context_info(info)
                 }
+                pending_batch_fields = batch_fields - set(all_renames)
+                if not pending_batch_fields:
+                    print(
+                        f"=== Rename batch {batch_index}/{len(rename_batches)} skipped: "
+                        f"all {len(batch_fields)} field(s) already renamed ==="
+                    )
+                    continue
+
+                remaining_fields = [
+                    field for field in current_fields
+                    if field not in all_renames
+                ]
+                next_remaining_field = remaining_fields[0] if remaining_fields else None
                 print(
                     f"=== Rename batch {batch_index}/{len(rename_batches)}: "
-                    f"{len(batch_infos)} context blocks, {len(batch_fields)} field(s) ==="
+                    f"{len(batch_infos)} context blocks, {len(batch_fields)} field(s), "
+                    f"pending={len(pending_batch_fields)}, next_missing={next_remaining_field or 'none'} ==="
                 )
 
                 prompt = prompt_template.format(
@@ -1148,7 +1265,10 @@ JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
                     batch_text=batch_text,
                 )
 
-                response = self.generate_content(prompt)
+                response = self.generate_content(
+                    prompt,
+                    max_tokens=self._estimate_rename_max_tokens(batch_infos),
+                )
                 self._record_usage(response)
 
                 print(f"=== Gemini response preview: {response.text[:500]}... ===")
@@ -1167,10 +1287,23 @@ JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
                         if old not in current_field_set:
                             print(f"    SKIP: field '{old}' not in current_fields")
                             continue
+                        if old in all_renames:
+                            print(
+                                f"    SKIP: field '{old}' already renamed to '{all_renames[old]}'"
+                            )
+                            continue
                         all_renames[old] = new
                         print(f"    ✓ ACCEPTED")
                     else:
                         print(f"    SKIP: invalid or no change")
+
+                remaining_fields = [
+                    field for field in current_fields
+                    if field not in all_renames
+                ]
+                if not remaining_fields:
+                    print("=== Early stop: all fields renamed ===")
+                    break
 
         except Exception as e:
             print(f"Gemini error: {e}")

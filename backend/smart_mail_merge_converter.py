@@ -34,6 +34,8 @@ class SmartMailMergeConverter:
         ai_provider: str = "gemini",
         ai_model: Optional[str] = None,
         ollama_base_url: str = "http://localhost:11434",
+        openai_base_url: str = "http://localhost:8001/v1",
+        openai_api_key: Optional[str] = None,
     ):
         """Initialize converter with document
 
@@ -46,6 +48,8 @@ class SmartMailMergeConverter:
         self.ai_provider = ai_provider
         self.ai_model = ai_model
         self.ollama_base_url = ollama_base_url
+        self.openai_base_url = openai_base_url
+        self.openai_api_key = openai_api_key
         self._gemini_client = None
         self.used_labels = {}   # base_label -> count of times used
         self.all_field_names = []  # ordered list of all generated field names (incl. _2, _3)
@@ -57,7 +61,7 @@ class SmartMailMergeConverter:
     @property
     def gemini_client(self):
         """Lazy-load Gemini client only when needed"""
-        if self._gemini_client is None and (self.gemini_api_key or self.ai_provider == "ollama"):
+        if self._gemini_client is None and (self.gemini_api_key or self.ai_provider in ["ollama", "vllm"]):
             from gemini_client import GeminiClient
             try:
                 self._gemini_client = GeminiClient(
@@ -65,6 +69,8 @@ class SmartMailMergeConverter:
                     provider=self.ai_provider,
                     model_name=self.ai_model,
                     ollama_base_url=self.ollama_base_url,
+                    openai_base_url=self.openai_base_url,
+                    openai_api_key=self.openai_api_key,
                 )
             except ValueError:
                 # API key not configured, fall back to rule-based

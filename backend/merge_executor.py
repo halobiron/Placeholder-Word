@@ -30,6 +30,18 @@ class MergeExecutor:
             if match:
                 yield fld, instr, match.group(1)
 
+    def _copy_field_run_properties(self, fld) -> object | None:
+        """Return a deep copy of the first run properties inside a fldSimple element."""
+        first_run = fld.find(f"{self.W_NS}r")
+        if first_run is None:
+            return None
+
+        run_properties = first_run.find(f"{self.W_NS}rPr")
+        if run_properties is None:
+            return None
+
+        return copy.deepcopy(run_properties)
+
     def get_template_fields(self, template_path: str) -> list[str]:
         """Get ordered field names from template."""
         doc = Document(template_path)
@@ -239,8 +251,9 @@ class MergeExecutor:
             new_run = OxmlElement('w:r')
 
             # Copy rPr from field's existing run to preserve formatting
-            if fld.r_lst and fld.r_lst[0].rPr is not None:
-                new_run.append(copy.deepcopy(fld.r_lst[0].rPr))
+            copied_run_properties = self._copy_field_run_properties(fld)
+            if copied_run_properties is not None:
+                new_run.append(copied_run_properties)
 
             # Add text element
             t = OxmlElement('w:t')

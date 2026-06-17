@@ -102,6 +102,9 @@ def resolve_ai_model(provider: str) -> str:
     if provider == "ollama":
         model = DEFAULT_OLLAMA_MODEL
         env_name = "OLLAMA_MODEL"
+    elif provider == "vllm":
+        model = DEFAULT_VLLM_MODEL
+        env_name = "VLLM_MODEL"
     elif provider == "gemini":
         model = DEFAULT_GEMINI_MODEL
         env_name = "GEMINI_MODEL"
@@ -123,6 +126,8 @@ def create_ai_client() -> GeminiClient:
         provider=DEFAULT_AI_PROVIDER,
         model_name=resolve_ai_model(DEFAULT_AI_PROVIDER),
         ollama_base_url=OLLAMA_BASE_URL,
+        openai_base_url=VLLM_BASE_URL,
+        openai_api_key=VLLM_API_KEY,
         finetuned_path=FINETUNED_PATH,
         finetuned_base_model=FINETUNED_BASE_MODEL,
     )
@@ -134,6 +139,8 @@ def processor_for_ai() -> MailMergeProcessor:
         ai_provider=DEFAULT_AI_PROVIDER,
         ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
         ollama_base_url=OLLAMA_BASE_URL,
+        openai_base_url=VLLM_BASE_URL,
+        openai_api_key=VLLM_API_KEY,
         finetuned_path=FINETUNED_PATH,
         finetuned_base_model=FINETUNED_BASE_MODEL,
     )
@@ -320,11 +327,14 @@ DEFAULT_AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").strip().lower()
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL")
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+DEFAULT_VLLM_MODEL = os.getenv("VLLM_MODEL")
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8001/v1")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY")
 FINETUNED_PATH = os.getenv("FINETUNED_PATH")
 FINETUNED_BASE_MODEL = os.getenv("FINETUNED_BASE_MODEL")
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-if DEFAULT_AI_PROVIDER not in {"gemini", "ollama", "finetuned"}:
+if DEFAULT_AI_PROVIDER not in {"gemini", "ollama", "vllm", "finetuned"}:
     raise ValueError(f"Unsupported AI_PROVIDER: {DEFAULT_AI_PROVIDER}")
 
 # Initialize FastAPI
@@ -1410,7 +1420,7 @@ async def batch_update(request: Request):
         shutil.copy2(template_path, working_template_path)
         editor = DocxFullEditor(str(working_template_path))
 
-        logger.info(" ===== PHASE 1: VALIDATE AND APPLY =====")
+        logger.info(" ===== PHASE 1: VALIDATE ONLY =====")
 
         for i, op in enumerate(batch_request.operations):
             try:
@@ -1429,16 +1439,46 @@ async def batch_update(request: Request):
                     break
                 continue
 
-            if batch_request.validate_only:
-                results["successful"] += 1
-                results["operation_results"].append({
-                    "index": i,
-                    "type": op.type,
-                    "status": "validated"
-                })
-                logger.debug(f" Op {i} ({op.type}): ✓ VALIDATED")
-                continue
+            results["operation_results"].append({
+                "index": i,
+                "type": op.type,
+                "status": "validated"
+            })
+            logger.debug(f" Op {i} ({op.type}): ✓ VALIDATED")
 
+        if results["validation_errors"]:
+            logger.info(" ===== VALIDATION FAILED =====")
+            logger.info(f" Validation errors: {len(results['validation_errors'])}")
+
+            return JSONResponse(
+                status_code=400,
+                content={
+                    **results,
+                    "success": False,
+                    "message": "Validation failed - no changes made",
+                    "fields": [],
+                    "field_count": 0,
+                    "html_preview": ""
+                }
+            )
+
+        if batch_request.validate_only:
+            logger.info(" ===== VALIDATE ONLY MODE - SKIPPING SAVE =====")
+            results["successful"] = len(batch_request.operations) - len(results["validation_errors"])
+
+            return {
+                **results,
+                "success": True,
+                "message": "Validation passed - no changes made (validate_only mode)",
+                "fields": [],
+                "field_count": 0,
+                "html_preview": ""
+            }
+
+        logger.info(" ===== PHASE 2: EXECUTE =====")
+        results["operation_results"] = []
+
+        for i, op in enumerate(batch_request.operations):
             try:
                 execute_operation(editor, op)
             except Exception as e:
@@ -1467,37 +1507,9 @@ async def batch_update(request: Request):
             results["operation_results"].append({
                 "index": i,
                 "type": op.type,
-                "status": "validated" if batch_request.validate_only else "executed"
+                "status": "executed"
             })
-            logger.debug(f" Op {i} ({op.type}): ✓ SUCCESS")
-
-        if results["validation_errors"]:
-            logger.info(" ===== VALIDATION FAILED =====")
-            logger.info(f" Validation errors: {len(results['validation_errors'])}")
-
-            return JSONResponse(
-                status_code=400,
-                content={
-                    **results,
-                    "success": False,
-                    "message": "Validation failed - no changes made",
-                    "fields": [],
-                    "field_count": 0,
-                    "html_preview": ""
-                }
-            )
-
-        if batch_request.validate_only:
-            logger.info(" ===== VALIDATE ONLY MODE - SKIPPING SAVE =====")
-
-            return {
-                **results,
-                "success": True,
-                "message": "Validation passed - no changes made (validate_only mode)",
-                "fields": [],
-                "field_count": 0,
-                "html_preview": ""
-            }
+            logger.debug(f" Op {i} ({op.type}): ✓ EXECUTED")
 
         # =============================================================================
         # PHASE 2: SAVE & REGENERATE
@@ -1554,6 +1566,8 @@ async def preview_table_expansion(request: TableExpansionPreviewRequest):
         ai_provider=DEFAULT_AI_PROVIDER,
         ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
         ollama_base_url=OLLAMA_BASE_URL,
+        openai_base_url=VLLM_BASE_URL,
+        openai_api_key=VLLM_API_KEY,
     )
 
     # Analyze context requirements
@@ -1645,6 +1659,8 @@ async def merge_with_table_expansion(request: TableExpansionRequest):
         ai_provider=DEFAULT_AI_PROVIDER,
         ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
         ollama_base_url=OLLAMA_BASE_URL,
+        openai_base_url=VLLM_BASE_URL,
+        openai_api_key=VLLM_API_KEY,
     )
     requirements = converter._analyze_context_requirements(request.context_data)
 
@@ -1685,6 +1701,8 @@ async def merge_with_table_expansion(request: TableExpansionRequest):
             ai_provider=DEFAULT_AI_PROVIDER,
             ai_model=resolve_ai_model(DEFAULT_AI_PROVIDER),
             ollama_base_url=OLLAMA_BASE_URL,
+            openai_base_url=VLLM_BASE_URL,
+            openai_api_key=VLLM_API_KEY,
         )
 
         # Expand tables if needed

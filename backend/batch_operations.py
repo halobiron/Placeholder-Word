@@ -30,16 +30,41 @@ def map_camel_to_snake(format_data: Dict[str, Any]) -> Dict[str, Any]:
     return {format_mapping.get(k, k): v for k, v in format_data.items()}
 
 
+def normalize_field_name(field_name: str) -> str:
+    """Normalize user/API field names to bare MERGEFIELD names."""
+    if not field_name:
+        return ""
+
+    value = str(field_name).strip()
+    placeholder_match = re.fullmatch(r'[«<]\s*([^»>]+?)\s*[»>]', value)
+    if placeholder_match:
+        value = placeholder_match.group(1)
+
+    value = value.strip().strip('"\'`')
+    mergefield_match = re.search(r'MERGEFIELD\s+([^\s\\]+)', value, flags=re.IGNORECASE)
+    if mergefield_match:
+        value = mergefield_match.group(1)
+
+    return value.strip().strip('«»<>"\'`')
+
+
 def find_field_with_fuzzy_match(field_name: str, current_fields: List[str]) -> str | None:
     """
     Find field name with exact match or fallback to base name (without _N suffix).
 
     Used for handling mergefield names that may have numeric suffixes like _2, _3.
     """
-    if field_name in current_fields:
-        return field_name
-    base_name = re.sub(r'_\d+$', '', field_name)
-    return base_name if base_name in current_fields else None
+    normalized_field_name = normalize_field_name(field_name)
+    normalized_current_fields = {
+        normalize_field_name(current_field): current_field
+        for current_field in current_fields
+    }
+
+    if normalized_field_name in normalized_current_fields:
+        return normalized_current_fields[normalized_field_name]
+
+    base_name = re.sub(r'_\d+$', '', normalized_field_name)
+    return normalized_current_fields.get(base_name)
 
 
 def resolve_cell_paragraph_index(editor: DocxFullEditor, block_index: int,
@@ -127,11 +152,15 @@ def validate_operation(editor: DocxFullEditor, op: Operation) -> None:
 def _validate_placeholder_op(editor: DocxFullEditor, op: Operation,
                              current_fields: List[str]) -> None:
     """Validate placeholder operations with fuzzy matching"""
+    normalized_current_fields = {normalize_field_name(field) for field in current_fields}
+
     if op.type == "rename_placeholder":
         old_match = find_field_with_fuzzy_match(op.old_name, current_fields)
         if not old_match:
             raise ValueError(f"Field '{op.old_name}' không tồn tại")
-        if op.new_name in current_fields and op.new_name != op.old_name:
+        normalized_old_name = normalize_field_name(op.old_name)
+        normalized_new_name = normalize_field_name(op.new_name)
+        if normalized_new_name in normalized_current_fields and normalized_new_name != normalized_old_name:
             raise ValueError(f"Field '{op.new_name}' đã tồn tại")
 
     elif op.type == "delete_placeholder":
@@ -148,7 +177,7 @@ def _validate_placeholder_op(editor: DocxFullEditor, op: Operation,
         para_index = resolve_cell_paragraph_index(editor, op.block_index, op.para_in_cell)
         if para_index is None:
             raise ValueError(f"Invalid block_index: {op.block_index} or para_in_cell: {op.para_in_cell}")
-        if op.field_name in current_fields:
+        if normalize_field_name(op.field_name) in normalized_current_fields:
             raise ValueError(f"Field '{op.field_name}' đã tồn tại")
 
 
@@ -230,6 +259,13 @@ def _execute_placeholder_op(editor: DocxFullEditor, op: Operation) -> None:
         if actual_name != op.field_name:
             logger.info(f"Deleting actual field: {actual_name} (requested: {op.field_name})")
         if not editor.delete_placeholder(actual_name):
+            remaining_fields = get_current_fields(editor)
+            if find_field_with_fuzzy_match(actual_name, remaining_fields) is None:
+                logger.info(
+                    "Placeholder '%s' already absent at execution time; treating delete as no-op",
+                    actual_name,
+                )
+                return
             raise ValueError(f"Failed to delete '{actual_name}'")
 
     elif op.type == "add_placeholder":

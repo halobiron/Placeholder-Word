@@ -32,6 +32,8 @@ class MailMergeProcessor:
         ai_provider: str = "gemini",
         ai_model: str | None = None,
         ollama_base_url: str = "http://localhost:11434",
+        openai_base_url: str = "http://localhost:8001/v1",
+        openai_api_key: str | None = None,
         finetuned_path: str = None,
         finetuned_base_model: str = None,
     ):
@@ -40,9 +42,11 @@ class MailMergeProcessor:
         Args:
             gemini_api_key: Gemini API key for smart field naming (optional)
             timeout: Not used, kept for backward compatibility
-            ai_provider: AI provider (gemini, ollama, finetuned)
-            ai_model: Model name for gemini/ollama
+            ai_provider: AI provider (gemini, ollama, vllm, finetuned)
+            ai_model: Model name for gemini/ollama/vllm
             ollama_base_url: Ollama server URL
+            openai_base_url: OpenAI-compatible base URL for vLLM
+            openai_api_key: Optional API key for vLLM
             finetuned_path: Path to fine-tuned model adapter (for finetuned provider)
             finetuned_base_model: Base model name for fine-tuned model
         """
@@ -51,16 +55,20 @@ class MailMergeProcessor:
         self.ai_provider = ai_provider
         self.ai_model = ai_model
         self.ollama_base_url = ollama_base_url
+        self.openai_base_url = openai_base_url
+        self.openai_api_key = openai_api_key
         self.gemini_client = (
             GeminiClient(
                 gemini_api_key,
                 provider=ai_provider,
                 model_name=ai_model,
                 ollama_base_url=ollama_base_url,
+                openai_base_url=openai_base_url,
+                openai_api_key=openai_api_key,
                 finetuned_path=finetuned_path,
                 finetuned_base_model=finetuned_base_model,
             )
-            if gemini_api_key or ai_provider in ["ollama", "finetuned"]
+            if gemini_api_key or ai_provider in ["ollama", "vllm", "finetuned"]
             else None
         )
 
@@ -88,7 +96,7 @@ class MailMergeProcessor:
     def _smart_naming_note(self) -> str:
         if not self.gemini_client:
             return ""
-        provider_label = "Ollama" if self.ai_provider == "ollama" else "Gemini"
+        provider_label = "vLLM" if self.ai_provider == "vllm" else "Ollama" if self.ai_provider == "ollama" else "Gemini"
         return f" + {provider_label} smart naming"
 
     def _extract_xml_text(self, element) -> str:
@@ -371,6 +379,8 @@ class MailMergeProcessor:
                 ai_provider=self.ai_provider,
                 ai_model=self.ai_model,
                 ollama_base_url=self.ollama_base_url,
+                openai_base_url=self.openai_base_url,
+                openai_api_key=self.openai_api_key,
             )
             fields = converter.convert(str(output_path), auto_fill_tables=auto_fill_tables)
 
