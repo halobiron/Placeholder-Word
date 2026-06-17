@@ -21,6 +21,8 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 class GeminiClient:
     """Simple client for Gemini API - text extraction and analysis"""
     FULL_CONTEXT_PAGE_THRESHOLD = 5
+    FINETUNED_RENAME_BATCH_CHAR_LIMIT = 2400
+    DEFAULT_RENAME_BATCH_CHAR_LIMIT = 12000
 
     @staticmethod
     def _resolve_finetuned_load_config(torch_module):
@@ -546,6 +548,41 @@ class GeminiClient:
 
         return field_infos
 
+    @staticmethod
+    def _extract_fields_from_context_info(info: str) -> list[str]:
+        """Extract placeholder names from a compact context line."""
+        return [field.strip() for field in re.findall(r'«([^»]+)»', info or "") if field.strip()]
+
+    def _chunk_field_context_infos(self, field_infos: list[str]) -> list[list[str]]:
+        """Split rename context into smaller batches so all placeholders reach the model."""
+        if not field_infos:
+            return []
+
+        char_limit = (
+            self.FINETUNED_RENAME_BATCH_CHAR_LIMIT
+            if self.provider == "finetuned"
+            else self.DEFAULT_RENAME_BATCH_CHAR_LIMIT
+        )
+
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for info in field_infos:
+            info_length = len(info) + 1
+            if current_chunk and current_length + info_length > char_limit:
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_length = 0
+
+            current_chunk.append(info)
+            current_length += info_length
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
+
     def extract_data_from_context(
         self,
         context: str,
@@ -1024,9 +1061,9 @@ DÀN Ý SECTION CỦA TÀI LIỆU (tài liệu dài, không đọc full để tr
 
 ---"""
 
-        prompt = f"""Đổi tên fields tiếng Việt không dấu, viết đầy đủ (snake_case):
+        prompt_template = """Đổi tên fields tiếng Việt không dấu, viết đầy đủ (snake_case):
 
-Dùng strategy: {strategy}. Số trang lưu trong DOCX: {page_count or "unknown"}.
+Dùng strategy: {strategy}. Số trang lưu trong DOCX: {page_count}.
 {document_context_block}
 
 FIELD CONTEXT CẦN ĐỔI TÊN:
@@ -1071,33 +1108,69 @@ QUAN TRỌNG - PHÂN TÍCH CONTEXT TRƯỚC/SAU ĐỂ PHÂN BIỆT LOẠI vs GI�
 
 JSON: {{"renames": [{{"current_name": "...", "suggested_name": "..."}}]}}"""
 
+        rename_batches = self._chunk_field_context_infos(field_infos)
+        covered_fields = {
+            field
+            for batch in rename_batches
+            for info in batch
+            for field in self._extract_fields_from_context_info(info)
+        }
+        missing_fields = [
+            field for field in current_fields
+            if field not in forced_renames and field not in covered_fields
+        ]
+
+        print(
+            f"=== Field rename batching: {len(rename_batches)} batch(es), "
+            f"covered={len(covered_fields)}, missing={len(missing_fields)} ==="
+        )
+        if missing_fields:
+            print(f"=== Missing fields from rename context: {missing_fields} ===")
+
         try:
-            response = self.generate_content(prompt)
-            self._record_usage(response)
-
-            # Debug: log response text
-            print(f"=== Gemini response preview: {response.text[:500]}... ===")
-
-            result = self.parse_gemini_json_response(response.text)
             current_field_set = set(current_fields)
+            for batch_index, batch_infos in enumerate(rename_batches, start=1):
+                batch_text = "\n".join(batch_infos)
+                batch_fields = {
+                    field
+                    for info in batch_infos
+                    for field in self._extract_fields_from_context_info(info)
+                }
+                print(
+                    f"=== Rename batch {batch_index}/{len(rename_batches)}: "
+                    f"{len(batch_infos)} context blocks, {len(batch_fields)} field(s) ==="
+                )
 
-            renames_from_ai = result.get("renames", [])
-            print(f"=== AI suggested {len(renames_from_ai)} renames ===")
+                prompt = prompt_template.format(
+                    strategy=strategy,
+                    page_count=page_count or "unknown",
+                    document_context_block=document_context_block,
+                    batch_text=batch_text,
+                )
 
-            for item in renames_from_ai:
-                old = self._normalize_field_name(item.get("current_name", ""))
-                new = self._normalize_field_name(item.get("suggested_name", ""))
+                response = self.generate_content(prompt)
+                self._record_usage(response)
 
-                print(f"  Processing: {old} → {new}")
+                print(f"=== Gemini response preview: {response.text[:500]}... ===")
 
-                if old and new and old != new:
-                    if old not in current_field_set:
-                        print(f"    SKIP: field '{old}' not in current_fields")
-                        continue
-                    all_renames[old] = new
-                    print(f"    ✓ ACCEPTED")
-                else:
-                    print(f"    SKIP: invalid or no change")
+                result = self.parse_gemini_json_response(response.text)
+                renames_from_ai = result.get("renames", [])
+                print(f"=== AI suggested {len(renames_from_ai)} renames ===")
+
+                for item in renames_from_ai:
+                    old = self._normalize_field_name(item.get("current_name", ""))
+                    new = self._normalize_field_name(item.get("suggested_name", ""))
+
+                    print(f"  Processing: {old} → {new}")
+
+                    if old and new and old != new:
+                        if old not in current_field_set:
+                            print(f"    SKIP: field '{old}' not in current_fields")
+                            continue
+                        all_renames[old] = new
+                        print(f"    ✓ ACCEPTED")
+                    else:
+                        print(f"    SKIP: invalid or no change")
 
         except Exception as e:
             print(f"Gemini error: {e}")
